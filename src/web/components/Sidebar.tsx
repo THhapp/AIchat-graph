@@ -1,4 +1,5 @@
-import type { GraphNode, GraphResponse, GraphTopic } from '../../shared/protocol.js';
+import { useEffect, useState } from 'react';
+import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
 import type { SearchResults } from '../lib/search.js';
 
 /** Structural reading order: root first, then next before branch by order. */
@@ -54,182 +55,68 @@ export interface SidebarProps {
   onSelectTopicPath: (path: string) => void;
   /** Called by the panel's own close control. */
   onClose: () => void;
-}
-
-function countStates(nodes: GraphNode[]): { agreed: number; proposed: number; reference: number } {
-  let agreed = 0;
-  let proposed = 0;
-  let reference = 0;
-  for (const node of nodes) {
-    if (node.state === 'agreed') agreed += 1;
-    else if (node.state === 'proposed') proposed += 1;
-    else reference += 1;
-  }
-  return { agreed, proposed, reference };
-}
-
-function TopicRow(props: {
-  topic: GraphTopic;
-  active: boolean;
-  onOpen: () => void;
-  onFilter: () => void;
-  nodeCount: number;
-}): React.JSX.Element {
-  const { topic, active, onOpen, onFilter, nodeCount } = props;
-  return (
-    <li className="nav-item" data-active={active ? 'true' : 'false'}>
-      <button type="button" className="nav-item__main" onClick={onOpen} title={topic.path}>
-        <span className="nav-item__title">{topic.title}</span>
-        <span className="nav-item__meta">{String(nodeCount)} 张</span>
-      </button>
-      <button
-        type="button"
-        className="nav-item__filter"
-        aria-pressed={active}
-        aria-label={active ? '退出主题聚焦' : '聚焦该主题'}
-        title={active ? '退出主题聚焦' : '聚焦该主题'}
-        onClick={onFilter}
-      >
-        {active ? '●' : '○'}
-      </button>
-    </li>
-  );
+  directoryMode?: boolean;
+  onCopyTopic?: () => void;
+  copied?: boolean;
 }
 
 export function Sidebar(props: SidebarProps): React.JSX.Element {
-  const {
-    graph, query, onQueryChange, results, collapsed, activeNodeId, selectedNodeId,
-    topicFilter, onSelectNode, onOpenTopic, onToggleCollapse, onTopicFilter, onSelectTopicPath, onClose,
-  } = props;
-
-  const counts = graph === null ? null : countStates(graph.nodes);
-  const topicTitleById = new Map(graph?.topics.map((topic) => [topic.id, topic.title]) ?? []);
+  const { graph, query, onQueryChange, results, collapsed, activeNodeId, selectedNodeId, topicFilter, onSelectNode, onOpenTopic, onToggleCollapse, onClose, directoryMode = false, onCopyTopic, copied } = props;
+  const currentTopicId = topicFilter ?? (!directoryMode && graph?.topics.length === 1 ? graph.topics[0]?.id ?? null : null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set(currentTopicId === null ? [] : [currentTopicId]));
+  useEffect(() => {
+    if (currentTopicId !== null) setExpanded((current) => new Set([...current, currentTopicId]));
+  }, [currentTopicId]);
   const searching = query.trim().length > 0;
-
+  const toggleFolder = (id: string): void => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const renderNode = (node: GraphNode): React.JSX.Element => (
+    <li key={node.id} className="nav-item nav-item--chain" data-active={node.id === selectedNodeId ? 'true' : 'false'} data-current={node.id === activeNodeId ? 'true' : 'false'} style={{ paddingLeft: 'calc(' + String((node.number.match(/-/g) ?? []).length) + ' * 10px)' }}>
+      <button type="button" className="nav-item__twisty" aria-expanded={!collapsed.has(node.id)} aria-label={collapsed.has(node.id) ? '展开节点分支' : '折叠节点分支'} onClick={() => { onToggleCollapse(node.id); }}>{collapsed.has(node.id) ? '▸' : '▾'}</button>
+      <button type="button" className="nav-item__main" onClick={() => { onSelectNode(node.id); }}><span className="nav-item__number">{node.number}</span><span className="nav-item__title">{node.title}</span></button>
+      <span className="nav-item__state" data-state={node.state} title={node.state} />
+    </li>
+  );
+  const matches = results.nodes.filter((node) => node.topicId === currentTopicId);
   return (
-    <nav className="sidebar panel" id="nav-panel" aria-label="主题与搜索">
+    <nav className="sidebar panel" id="nav-panel" aria-label="主题目录">
       <div className="panel__head">
-        <h2 className="panel__title">主题与搜索</h2>
-        <button type="button" className="panel__close" onClick={onClose} aria-label="收起导航" title="收起导航">×</button>
-        {counts !== null ? (
-          <span className="sidebar__counts" title="已确认 / 待确认 / 参考">
-            <span className="dot dot--ok" />{String(counts.agreed)}
-            <span className="dot dot--warn" />{String(counts.proposed)}
-            <span className="dot dot--idle" />{String(counts.reference)}
-          </span>
-        ) : null}
+        <h2 className="panel__title">主题目录</h2>
+        <button type="button" className="panel__close" onClick={onClose} aria-label="收起主题目录">×</button>
       </div>
-
-      <div className="search">
-        <label className="visually-hidden" htmlFor="search-input">搜索标题、摘要或主题</label>
-        <input
-          id="search-input"
-          type="search"
-          className="search__input"
-          placeholder="搜索标题、摘要、主题…"
-          value={query}
-          autoComplete="off"
-          onChange={(event) => { onQueryChange(event.target.value); }}
-        />
-        {searching ? (
-          <button type="button" className="search__clear" onClick={() => { onQueryChange(''); }} aria-label="清除搜索">×</button>
-        ) : null}
-      </div>
-
       <div className="panel__scroll">
-        {graph === null ? (
-          <p className="sidebar__placeholder">图尚未载入。</p>
-        ) : searching ? (
-          <section aria-label="搜索结果" className="nav-section">
-            <h3 className="nav-heading">
-              搜索结果 {String(results.nodes.length + results.topics.length)}
-            </h3>
-            {results.nodes.length === 0 && results.topics.length === 0 ? (
-              <p className="sidebar__placeholder">没有匹配「{results.trimmed}」的标题或摘要。</p>
-            ) : null}
+        <section aria-label="主题文件夹" className="nav-section">
+          <h3 className="nav-heading">主题 {String(graph?.topics.length ?? 0)}</h3>
+          {graph === null ? <p className="sidebar__placeholder">图尚未载入。</p> : graph.topics.length === 0 ? <p className="sidebar__placeholder">工作区尚无主题，请让 Agent 创建。</p> : (
             <ul className="nav-list">
-              {results.topics.map((topic) => (
-                <TopicRow
-                  key={'topic:' + topic.id}
-                  topic={topic}
-                  active={topic.id === topicFilter}
-                  nodeCount={topic.nodeIds.length}
-                  onOpen={() => { onSelectTopicPath(topic.path); }}
-                  onFilter={() => { onTopicFilter(topic.id === topicFilter ? null : topic.id); }}
-                />
-              ))}
-              {results.nodes.map((node) => (
-                <li key={node.id} className="nav-item nav-item--node" data-active={node.id === selectedNodeId ? 'true' : 'false'}>
-                  <button type="button" className="nav-item__main" onClick={() => { onSelectNode(node.id); }}>
-                    <span className="nav-item__number">{node.number}</span>
-                    <span className="nav-item__title">{node.title}</span>
-                    <span className="nav-item__meta">{topicTitleById.get(node.topicId) ?? ''}</span>
-                  </button>
+              {graph.topics.map((topic) => (
+                <li key={topic.id} className="topic-folder" data-topic-id={topic.id}>
+                  <div className="nav-item" data-active={topic.id === currentTopicId ? 'true' : 'false'}>
+                    <button type="button" className="nav-item__twisty" aria-expanded={expanded.has(topic.id)} aria-label={(expanded.has(topic.id) ? '收起主题 ' : '展开主题 ') + topic.title} onClick={() => { toggleFolder(topic.id); }}>{expanded.has(topic.id) ? '▾' : '▸'}</button>
+                    <button type="button" className="nav-item__main" aria-current={topic.id === currentTopicId ? 'page' : undefined} onClick={() => { onOpenTopic(topic.id); }} title={topic.title}>
+                      <span aria-hidden="true">▱</span><span className="nav-item__title">{topic.title}</span><span className="nav-item__meta">{String(topic.nodeIds.length)} 张</span>
+                    </button>
+                  </div>
+                  {expanded.has(topic.id) ? <ul className="nav-list nav-list--tree" aria-label={topic.title + '的节点'}>{orderChain(graph.nodes.filter((node) => node.topicId === topic.id)).map(renderNode)}</ul> : null}
                 </li>
               ))}
             </ul>
-          </section>
-        ) : (
-          <>
-            <section aria-label="主题目录" className="nav-section">
-              <h3 className="nav-heading">主题 {String(graph.topics.length)}</h3>
-              {graph.topics.length === 0 ? (
-                <p className="sidebar__placeholder">工作区尚无主题。</p>
-              ) : (
-                <ul className="nav-list">
-                  {graph.topics.map((topic) => (
-                    <TopicRow
-                      key={topic.id}
-                      topic={topic}
-                      active={topic.id === topicFilter}
-                      nodeCount={topic.nodeIds.length}
-                      onOpen={() => { onSelectTopicPath(topic.path); }}
-                      onFilter={() => { onTopicFilter(topic.id === topicFilter ? null : topic.id); }}
-                    />
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section aria-label="讨论链" className="nav-section">
-              <h3 className="nav-heading">结构链</h3>
-              <ul className="nav-list nav-list--tree">
-                {orderChain(graph.nodes).map((node) => {
-                  const indent = (node.number.match(/-/g) ?? []).length;
-                  const isCollapsed = collapsed.has(node.id);
-                  return (
-                    <li
-                      key={node.id}
-                      className="nav-item nav-item--chain"
-                      data-active={node.id === selectedNodeId ? 'true' : 'false'}
-                      data-current={node.id === activeNodeId ? 'true' : 'false'}
-                      style={{ paddingLeft: 'calc(' + String(indent) + ' * 10px)' }}
-                    >
-                      {node.flow !== 'root' ? (
-                        <button
-                          type="button"
-                          className="nav-item__twisty"
-                          aria-expanded={!isCollapsed}
-                          aria-label={isCollapsed ? '展开' : '折叠'}
-                          onClick={() => { onToggleCollapse(node.id); }}
-                        >
-                          {isCollapsed ? '▸' : '▾'}
-                        </button>
-                      ) : (
-                        <span className="nav-item__twisty nav-item__twisty--root" aria-hidden="true">·</span>
-                      )}
-                      <button type="button" className="nav-item__main" onClick={() => { onSelectNode(node.id); }}>
-                        <span className="nav-item__number">{node.number}</span>
-                        <span className="nav-item__title">{node.title}</span>
-                      </button>
-                      <span className="nav-item__state" data-state={node.state} title={node.state} />
-                    </li>
-                  );
-                })}
-              </ul>
-            </section>
-          </>
-        )}
+          )}
+        </section>
+        <section className="nav-section" aria-label="当前主题搜索">
+          <div className="search">
+            <label className="visually-hidden" htmlFor="search-input">搜索当前主题的标题和摘要</label>
+            <input id="search-input" type="search" className="search__input" placeholder={currentTopicId === null ? '请先选择主题' : '搜索当前主题…'} disabled={currentTopicId === null} value={query} autoComplete="off" onChange={(event) => { onQueryChange(event.target.value); }} />
+            {searching ? <button type="button" className="search__clear" onClick={() => { onQueryChange(''); }} aria-label="清除搜索">×</button> : null}
+          </div>
+          {searching ? <><h3 className="nav-heading">当前主题结果 {String(matches.length)}</h3><ul className="nav-list">{matches.map(renderNode)}</ul>{matches.length === 0 ? <p className="sidebar__placeholder">当前主题没有匹配的标题或摘要。</p> : null}</> : null}
+          {onCopyTopic !== undefined && currentTopicId !== null ? <button type="button" onClick={onCopyTopic}>{copied ? '已复制' : '复制主题给 Agent'}</button> : null}
+        </section>
       </div>
     </nav>
   );

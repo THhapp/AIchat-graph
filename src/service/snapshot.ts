@@ -65,6 +65,7 @@ export interface SnapshotData {
   readonly workspaceId: string;
   readonly name: string;
   readonly schemaVersion: SupportedSchemaVersion;
+  readonly topicMode?: "isolated" | "shared";
   readonly activeNode: string | null;
   readonly workspaceHash: string;
   readonly graph: WorkspaceGraph;
@@ -180,6 +181,7 @@ export function buildSnapshot(input: {
     workspaceId: input.workspace.workspaceId,
     name: input.workspace.name,
     schemaVersion: input.workspace.schemaVersion,
+    topicMode: input.workspace.topicMode ?? "shared",
     activeNode: input.workspace.activeNode,
     workspaceHash: input.workspaceHash,
     graph: input.graph,
@@ -200,12 +202,14 @@ export function emptySnapshot(
   workspaceId: string,
   name: string,
   schemaVersion: SupportedSchemaVersion = 2,
+  topicMode: "isolated" | "shared" = "shared",
 ): SnapshotData {
   const graph: WorkspaceGraph = {
     workspaceId,
     name,
     activeNode: null,
     rootId: null,
+    rootIds: [],
     topics: [],
     nodes: [],
   };
@@ -214,6 +218,7 @@ export function emptySnapshot(
     workspaceId,
     name,
     schemaVersion,
+    topicMode,
     activeNode: null,
     workspaceHash: "",
     graph,

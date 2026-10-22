@@ -19,6 +19,14 @@ export interface ReadingState {
   leftPanelOpen: boolean;
   /** Right detail panel. Closed by default; opened only by explicit action. */
   rightPanelOpen: boolean;
+  /** Saved reading position for each topic, never an Agent write target. */
+  topicStates: Record<string, TopicReadingState>;
+}
+
+export interface TopicReadingState {
+  viewport: SavedViewport | null;
+  selectedNodeId: string | null;
+  collapsedNodeIds: string[];
 }
 
 export function emptyReadingState(): ReadingState {
@@ -30,6 +38,7 @@ export function emptyReadingState(): ReadingState {
     topicFilter: null,
     leftPanelOpen: false,
     rightPanelOpen: false,
+    topicStates: {},
   };
 }
 
@@ -72,21 +81,67 @@ export function parseReadingState(raw: string | null): ReadingState {
   }
   if (typeof candidate.leftPanelOpen === 'boolean') state.leftPanelOpen = candidate.leftPanelOpen;
   if (typeof candidate.rightPanelOpen === 'boolean') state.rightPanelOpen = candidate.rightPanelOpen;
+  if (typeof candidate.topicStates === 'object' && candidate.topicStates !== null && !Array.isArray(candidate.topicStates)) {
+    for (const [id, value] of Object.entries(candidate.topicStates)) {
+      if (typeof value !== 'object' || value === null) continue;
+      const saved = value as Record<string, unknown>;
+      state.topicStates[id] = {
+        viewport: isViewport(saved.viewport) ? saved.viewport : null,
+        selectedNodeId: typeof saved.selectedNodeId === 'string' ? saved.selectedNodeId : null,
+        collapsedNodeIds: Array.isArray(saved.collapsedNodeIds) ? saved.collapsedNodeIds.filter((id): id is string => typeof id === 'string') : [],
+      };
+    }
+  }
   return state;
+}
+
+/** Switching opens only the diagram; long details require an explicit action. */
+export function switchReadingTopic(state: ReadingState, topicId: string): ReadingState {
+  if (state.topicFilter === topicId) return state;
+  const topicStates = { ...state.topicStates };
+  if (state.topicFilter !== null) {
+    topicStates[state.topicFilter] = {
+      viewport: state.viewport,
+      selectedNodeId: state.selectedNodeId,
+      collapsedNodeIds: state.collapsedNodeIds,
+    };
+  }
+  const saved = topicStates[topicId];
+  return {
+    ...state, topicStates, topicFilter: topicId,
+    viewport: saved?.viewport ?? null,
+    selectedNodeId: saved?.selectedNodeId ?? null,
+    collapsedNodeIds: saved?.collapsedNodeIds ?? [],
+    rightPanelOpen: false,
+  };
 }
 
 /** Drop references that no longer exist in the effective graph. Missing nodes never delete content. */
 export function pruneReadingState(state: ReadingState, graph: GraphResponse): ReadingState {
   const nodeIds = new Set(graph.nodes.map((node) => node.id));
   const topicIds = new Set(graph.topics.map((topic) => topic.id));
+  const topicStates: Record<string, TopicReadingState> = {};
+  for (const topic of graph.topics) {
+    const saved = state.topicStates[topic.id];
+    if (saved === undefined) continue;
+    const ids = new Set(topic.nodeIds);
+    topicStates[topic.id] = {
+      viewport: saved.viewport,
+      selectedNodeId: saved.selectedNodeId !== null && ids.has(saved.selectedNodeId) ? saved.selectedNodeId : null,
+      collapsedNodeIds: saved.collapsedNodeIds.filter((id) => ids.has(id)),
+    };
+  }
+  const validTopic = state.topicFilter !== null && topicIds.has(state.topicFilter) ? state.topicFilter : null;
+  const allowed = new Set(graph.nodes.filter((node) => validTopic !== null && node.topicId === validTopic).map((node) => node.id));
   return {
-    viewport: state.viewport,
-    selectedNodeId: state.selectedNodeId !== null && nodeIds.has(state.selectedNodeId) ? state.selectedNodeId : null,
-    collapsedNodeIds: state.collapsedNodeIds.filter((id) => nodeIds.has(id)),
+    viewport: validTopic === state.topicFilter ? state.viewport : null,
+    selectedNodeId: state.selectedNodeId !== null && allowed.has(state.selectedNodeId) ? state.selectedNodeId : null,
+    collapsedNodeIds: state.collapsedNodeIds.filter((id) => nodeIds.has(id) && (validTopic === null || allowed.has(id))),
     detailWidth: state.detailWidth,
-    topicFilter: state.topicFilter !== null && topicIds.has(state.topicFilter) ? state.topicFilter : null,
+    topicFilter: validTopic,
     leftPanelOpen: state.leftPanelOpen,
     rightPanelOpen: state.rightPanelOpen,
+    topicStates,
   };
 }
 

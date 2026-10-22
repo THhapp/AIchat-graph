@@ -7,6 +7,8 @@
  * - 提交后重建并发布快照，确认成功才 completeTransaction；刷新失败保留日志并报
  *   COMMITTED_REFRESH_PENDING，绝不回滚已提交源文件。
  */
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import {
   ChangeError,
   commitFiles,
@@ -409,6 +411,16 @@ export async function applyAgentChange(
       { runtime, editRefs: runtime.editRefs, requestId: request.requestId, generated: null },
       request.action,
     );
+    // A user-named topic must never reuse even an empty or non-Markdown directory.
+    // This check is inside the writer queue, before candidate creation/transaction.
+    if (request.action.action === "createTopic" && compiled.created.topicPath !== null) {
+      const directory = path.dirname(path.join(runtime.rootReal, ...compiled.created.topicPath.split("/")));
+      const stat = await fs.lstat(directory).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (stat !== null) throw new ServiceError(409, "OPERATION_CONFLICT", "主题目录已存在，拒绝覆盖：" + path.basename(directory), {});
+    }
     const generated =
       compiled.created.nodeIds.length > 0 || compiled.created.topicId !== null
         ? {

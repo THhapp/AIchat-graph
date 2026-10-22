@@ -255,7 +255,7 @@ function OfflineReader(): React.JSX.Element {
           <button type="button" aria-pressed={leftOpen} aria-controls="nav-panel" onClick={() => { setLeftOpen((v) => !v); }}>
             {leftOpen ? '收起导航' : '导航'}
           </button>
-          <button type="button" onClick={() => { setFitSignal((v) => v + 1); }}>查看全部</button>
+          <button type="button" onClick={() => { setCollapsed(new Set()); setFitSignal((v) => v + 1); }}>查看全部</button>
           <button type="button" aria-pressed={rightOpen} aria-controls="detail-panel" onClick={() => { setRightOpen((v) => !v); }}>
             {rightOpen ? '收起详情' : '打开详情'}
           </button>

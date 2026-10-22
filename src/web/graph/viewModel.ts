@@ -15,6 +15,16 @@ export interface GraphView {
   childCounts: Map<string, number>;
 }
 
+/** A reading boundary, not a source mutation or shared Agent focus. */
+export function scopeGraphToTopic(graph: GraphResponse, topicId: string | null): GraphResponse {
+  const topics = graph.topics.filter((topic) => topic.id === topicId);
+  const nodes = graph.nodes.filter((node) => node.topicId === topicId && topics.length > 0);
+  return {
+    ...graph, topics, nodes,
+    activeNode: nodes.some((node) => node.id === graph.activeNode) ? graph.activeNode : null,
+  };
+}
+
 function childrenMap(graph: GraphResponse): Map<string, string[]> {
   const children = new Map<string, string[]>();
   for (const node of graph.nodes) {
@@ -99,15 +109,20 @@ export function buildGraphView(
   }
 
   const nodes = graph.nodes.filter((node) => visibleIds.has(node.id));
-  const layoutNodes: LayoutNodeInput[] = nodes.map((node) => ({
-    id: node.id,
-    from: node.from,
-    flow: node.flow,
-    side: node.flow === 'branch' ? node.side ?? null : null,
-    order: node.flow === 'branch' ? node.order ?? null : null,
-    label: node.label ?? null,
-    topicId: node.topicId,
-  }));
+  const layoutNodes: LayoutNodeInput[] = nodes.map((node) => {
+    // Shared legacy topics can enter from outside the reading boundary. Only
+    // the layout treats that entry as a local root; source relationship stays.
+    const localRoot = node.from !== null && !byId.has(node.from);
+    return {
+      id: node.id,
+      from: localRoot ? null : node.from,
+      flow: localRoot ? 'root' : node.flow,
+      side: !localRoot && node.flow === 'branch' ? node.side ?? null : null,
+      order: !localRoot && node.flow === 'branch' ? node.order ?? null : null,
+      label: node.label ?? null,
+      topicId: node.topicId,
+    };
+  });
 
   // Counted over the whole graph: a collapsed node still has children and must
   // keep its expand control, even though none of them are visible.

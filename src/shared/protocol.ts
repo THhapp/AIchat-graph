@@ -97,6 +97,8 @@ export interface Diagnostic {
 
 /** GET /api/workspace */
 export interface WorkspaceResponse extends SnapshotVersion {
+  topicMode?: 'isolated' | 'shared';
+  agentEntry?: { cliPath: string; skillPath: string };
   workspaceId: string;
   name: string;
   rootPath: string;
@@ -108,6 +110,7 @@ export interface WorkspaceResponse extends SnapshotVersion {
 
 /** GET /api/graph */
 export interface GraphResponse extends SnapshotVersion {
+  topicMode?: 'isolated' | 'shared';
   workspaceId: string;
   activeNode: string | null;
   stale: boolean;
@@ -357,12 +360,22 @@ export interface AgentCreateRootAction {
   description?: string;
 }
 
+export interface AgentCreateTopicAction {
+  action: 'createTopic';
+  topicTitle: string;
+  directory?: string;
+  title?: string;
+  body: string;
+  state?: NodeState;
+}
+
 export type AgentChangeAction =
   | AgentPatchNodeAction
   | AgentCreateBranchAction
   | AgentCreateNextAction
   | AgentUpdateConnectionAction
-  | AgentCreateRootAction;
+  | AgentCreateRootAction
+  | AgentCreateTopicAction;
 
 /** POST /api/agent/changes */
 export interface AgentChangeRequest {

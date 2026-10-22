@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSnapshot } from './data/snapshot.js';
-import { loadReadingState, pruneReadingState, saveReadingState, type ReadingState } from './data/readingState.js';
+import { loadReadingState, pruneReadingState, saveReadingState, switchReadingTopic, type ReadingState } from './data/readingState.js';
 import { useDetails } from './data/details.js';
-import { buildGraphView } from './graph/viewModel.js';
+import { buildGraphView, scopeGraphToTopic } from './graph/viewModel.js';
 import { useLayoutEngine } from './graph/layoutBridge.js';
 import { useGraphLayout } from './graph/useGraphLayout.js';
 import { searchGraph } from './lib/search.js';
@@ -33,7 +33,6 @@ export function App(): React.JSX.Element {
   const [reading, setReading] = useState<ReadingState | null>(null);
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<DetailTab>('node');
-  const [viewTopicId, setViewTopicId] = useState<string | null>(null);
   const [fitSignal, setFitSignal] = useState(0);
   const [copied, setCopied] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -66,13 +65,15 @@ export function App(): React.JSX.Element {
   const detailOpen = reading?.rightPanelOpen ?? false;
 
   const collapsedSet = useMemo(() => new Set(reading?.collapsedNodeIds ?? []), [reading]);
+  const currentTopicId = reading?.topicFilter ?? null;
+  const topicGraph = useMemo(() => graph === null ? null : scopeGraphToTopic(graph, currentTopicId), [graph, currentTopicId]);
   const view = useMemo(
-    () => (graph === null ? null : buildGraphView(graph, collapsedSet, reading?.topicFilter ?? null)),
-    [graph, collapsedSet, reading?.topicFilter],
+    () => (topicGraph === null ? null : buildGraphView(topicGraph, collapsedSet, currentTopicId)),
+    [topicGraph, collapsedSet, currentTopicId],
   );
   const anchorNodeId = useMemo(
-    () => (graph === null || view === null ? null : findAnchorNodeId(view, reading?.selectedNodeId ?? null, graph)),
-    [graph, view, reading?.selectedNodeId],
+    () => (topicGraph === null || view === null ? null : findAnchorNodeId(view, reading?.selectedNodeId ?? null, topicGraph)),
+    [topicGraph, view, reading?.selectedNodeId],
   );
 
   // Capture the anchor's screen rect before the new geometry is applied. The
@@ -99,18 +100,10 @@ export function App(): React.JSX.Element {
   }, [view?.structureKey, anchorNodeId]);
 
   const layoutState = useGraphLayout(view, engineSlot);
-  // Topic tab state: explicit topic wins, else the selected node's topic.
-  const effectiveTopicId = useMemo((): string | null => {
-    if (graph === null) return null;
-    if (viewTopicId !== null) return graph.topics.some((topic) => topic.id === viewTopicId) ? viewTopicId : null;
-    if (reading?.selectedNodeId != null) {
-      return graph.nodes.find((node) => node.id === reading.selectedNodeId)?.topicId ?? null;
-    }
-    return null;
-  }, [graph, viewTopicId, reading?.selectedNodeId]);
+  const effectiveTopicId = graph?.topics.some((topic) => topic.id === currentTopicId) ? currentTopicId : null;
 
   const selectedNode = graph !== null && reading?.selectedNodeId != null
-    ? graph.nodes.find((node) => node.id === reading.selectedNodeId) ?? null
+    ? topicGraph?.nodes.find((node) => node.id === reading.selectedNodeId) ?? null
     : null;
   const selectedTopic = graph !== null && effectiveTopicId !== null
     ? graph.topics.find((topic) => topic.id === effectiveTopicId) ?? null
@@ -131,22 +124,31 @@ export function App(): React.JSX.Element {
     setReading((current) => (current === null ? current : { ...current, rightPanelOpen: !current.rightPanelOpen }));
   }, []);
 
-  // A plain click only selects. Opening the detail panel is an explicit action.
-  const selectNode = useCallback((id: string) => {
-    update({ selectedNodeId: id });
+  const openTopic = useCallback((id: string) => {
+    if (!graph?.topics.some((topic) => topic.id === id)) return;
+    setReading((current) => current === null ? current : switchReadingTopic(current, id));
+    setQuery('');
     setTab('node');
-  }, [update]);
+    setCopied(false);
+    setFitSignal(0);
+  }, [graph]);
+
+  // A link to another theme explicitly opens that theme before its node.
+  const selectNode = useCallback((id: string) => {
+    const node = graph?.nodes.find((candidate) => candidate.id === id);
+    if (node === undefined) return;
+    setReading((current) => current === null ? current : { ...switchReadingTopic(current, node.topicId), selectedNodeId: id });
+    setTab('node');
+    if (node.topicId !== currentTopicId) setQuery('');
+  }, [graph, currentTopicId]);
 
   const selectNodeAndOpen = useCallback((id: string) => {
-    update({ selectedNodeId: id, rightPanelOpen: true });
+    const node = graph?.nodes.find((candidate) => candidate.id === id);
+    if (node === undefined) return;
+    setReading((current) => current === null ? current : { ...switchReadingTopic(current, node.topicId), selectedNodeId: id, rightPanelOpen: true });
     setTab('node');
-  }, [update]);
-
-  const openTopic = useCallback((id: string) => {
-    setViewTopicId(id);
-    setTab('topic');
-    update({ rightPanelOpen: true });
-  }, [update]);
+    if (node.topicId !== currentTopicId) setQuery('');
+  }, [graph, currentTopicId]);
 
   const openTopicByPath = useCallback((path: string) => {
     if (graph === null) return;
@@ -156,17 +158,24 @@ export function App(): React.JSX.Element {
   }, [graph, openTopic]);
 
   const toggleCollapse = useCallback((id: string) => {
+    const node = graph?.nodes.find((candidate) => candidate.id === id);
+    if (node === undefined) return;
     setReading((current) => {
       if (current === null) return current;
-      const exists = current.collapsedNodeIds.includes(id);
+      const target = switchReadingTopic(current, node.topicId);
+      const exists = target.collapsedNodeIds.includes(id);
       return {
-        ...current,
+        ...target,
         collapsedNodeIds: exists
-          ? current.collapsedNodeIds.filter((candidate) => candidate !== id)
-          : [...current.collapsedNodeIds, id],
+          ? target.collapsedNodeIds.filter((candidate) => candidate !== id)
+          : [...target.collapsedNodeIds, id],
       };
     });
-  }, []);
+    if (node.topicId !== currentTopicId) {
+      setQuery('');
+      setTab('node');
+    }
+  }, [graph, currentTopicId]);
 
   const copyPrompt = useCallback(() => {
     if (graph === null) return;
@@ -245,7 +254,7 @@ export function App(): React.JSX.Element {
     );
   }
 
-  const results = searchGraph(graph, query);
+  const results = searchGraph(topicGraph ?? scopeGraphToTopic(graph, null), query);
   const status = snapshot.error !== null
     ? { tone: 'bad', text: '刷新失败' }
     : graph.stale
@@ -262,28 +271,32 @@ export function App(): React.JSX.Element {
         <div className="app-header__brand">
           <span className="app-header__title">AIchat-graph</span>
           <span className="app-header__workspace">{snapshot.workspace?.name ?? graph.workspaceId}</span>
+          <button type="button" className="app-header__topic" onClick={() => { update({ leftPanelOpen: true }); }} title={(selectedTopic?.title ?? '选择主题') + ' · 打开主题目录'}>
+            {selectedTopic?.title ?? '选择主题'} ▾
+          </button>
         </div>
         <span className="app-header__spacer" />
         <div className="app-header__meta">
           <span>图 r{graph.revision}</span>
-          {graph.activeNode !== null ? (
+          {topicGraph?.activeNode != null ? (
             <button
               type="button"
-              onClick={() => { selectNode(graph.activeNode as string); }}
+              onClick={() => { selectNode(topicGraph.activeNode as string); }}
               title="定位当前讨论节点"
             >
               当前讨论
             </button>
           ) : null}
-          <button type="button" onClick={() => { setFitSignal((value) => value + 1); }} title="查看全部（适配整图）">查看全部</button>
+          <button type="button" disabled={selectedTopic === null} onClick={() => { update({ collapsedNodeIds: [] }); setFitSignal((value) => value + 1); }} title="展开并适配当前主题">查看全部</button>
+          <button type="button" disabled={selectedTopic === null} onClick={copyPrompt}>{copied ? '已复制' : '复制给 Agent'}</button>
           <button
             type="button"
             aria-pressed={leftOpen}
             aria-controls="nav-panel"
             onClick={toggleLeft}
-            title="导航（主题与搜索）"
+            title="主题目录"
           >
-            {leftOpen ? '收起导航' : '导航'}
+            {leftOpen ? '收起目录' : '主题目录'}
           </button>
           <button
             type="button"
@@ -353,19 +366,29 @@ export function App(): React.JSX.Element {
           onTopicFilter={(id) => { update({ topicFilter: id }); }}
           onSelectTopicPath={openTopicByPath}
           onClose={() => { update({ leftPanelOpen: false }); }}
+          directoryMode
+          onCopyTopic={copyPrompt}
+          copied={copied}
         /> : null}
 
         <main className="canvas-host" id="main-content">
           {isEmpty ? (
             <EmptyState topicCount={graph.topics.length} onRetry={() => { snapshot.refresh(); }} />
+          ) : selectedTopic === null ? (
+            <div className="canvas-host__empty"><div className="state-block">
+              <h3>选择一个主题开始阅读</h3>
+              <p>每个主题有独立的讨论图。打开主题目录选择；新主题由外部 Agent 创建。</p>
+              <button type="button" onClick={() => { update({ leftPanelOpen: true }); }}>打开主题目录</button>
+            </div></div>
           ) : (
             <GraphCanvas
-              graph={graph}
-              view={view ?? buildGraphView(graph, collapsedSet, reading?.topicFilter ?? null)}
-              layout={layoutState.result}
+              key={selectedTopic.id}
+              graph={topicGraph ?? graph}
+              view={view ?? buildGraphView(topicGraph ?? graph, collapsedSet, currentTopicId)}
+              layout={layoutState.result?.structureVersion === view?.structureKey ? layoutState.result : null}
               layoutStatus={layoutState.status}
               layoutError={layoutState.error?.message ?? null}
-              activeNodeId={graph.activeNode}
+              activeNodeId={topicGraph?.activeNode ?? null}
               selectedNodeId={reading?.selectedNodeId ?? null}
               onSelectNode={selectNode}
               onOpenNodeDetail={selectNodeAndOpen}
@@ -401,9 +424,6 @@ export function App(): React.JSX.Element {
               tab={tab}
               onTabChange={(next) => {
                 setTab(next);
-                if (next === 'topic' && viewTopicId === null && selectedNode !== null) {
-                  setViewTopicId(selectedNode.topicId);
-                }
               }}
               topic={selectedTopic}
               node={selectedNode}
@@ -412,7 +432,7 @@ export function App(): React.JSX.Element {
               loading={details.loading}
               error={details.error}
               detailVersion={details.detailVersion}
-              activeNodeId={graph.activeNode}
+              activeNodeId={topicGraph?.activeNode ?? null}
               selectedNodeId={reading?.selectedNodeId ?? null}
               onSelectNode={selectNodeAndOpen}
               onRetry={details.retry}
@@ -430,7 +450,8 @@ export function App(): React.JSX.Element {
       <footer className="app-status">
         <span className={'dot dot--' + status.tone} aria-hidden="true" />
         <span role="status">{status.text}</span>
-        <span>{String(graph.nodes.length)} 节点 · {String(graph.topics.length)} 主题</span>
+        <span>{String(topicGraph?.nodes.length ?? 0)} 节点 · 当前主题 / 全库 {String(graph.topics.length)} 主题</span>
+        {(graph.topicMode ?? snapshot.workspace?.topicMode ?? 'shared') === 'shared' ? <span title="旧主题可能有跨主题来路；当前仅显示所选主题，源关系未改写。">共享图兼容（未迁移）</span> : null}
         {layoutState.result !== null ? (
           <span>{String(Object.keys(layoutState.result.positions).length)} 可见</span>
         ) : null}

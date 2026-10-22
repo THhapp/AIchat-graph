@@ -183,6 +183,7 @@ export class WorkspaceRuntime {
       let workspaceId: string;
       let name: string;
       let schemaVersion: 1 | 2 = 2;
+      let topicMode: "isolated" | "shared" = "shared";
       let data: SnapshotData;
       let stale: boolean;
       let diagnostics: readonly Diagnostic[];
@@ -192,6 +193,7 @@ export class WorkspaceRuntime {
         workspaceId = loaded.files.workspace.workspaceId;
         name = loaded.files.workspace.name;
         schemaVersion = loaded.files.workspace.schemaVersion;
+        topicMode = loaded.files.workspace.topicMode ?? "shared";
       } else {
         const cachedIdentity = await loadCacheIdentity(rootReal);
         if (cachedIdentity === null) {
@@ -205,6 +207,7 @@ export class WorkspaceRuntime {
         workspaceId = cachedIdentity.workspaceId;
         name = cachedIdentity.name;
         schemaVersion = cachedIdentity.schemaVersion;
+        topicMode = cachedIdentity.topicMode ?? "shared";
         identityFromCache = true;
       }
 
@@ -214,7 +217,7 @@ export class WorkspaceRuntime {
         diagnostics = loaded.outcome.diagnostics;
       } else {
         diagnostics = loaded.outcome.diagnostics;
-        data = emptySnapshot(workspaceId, name, schemaVersion);
+        data = emptySnapshot(workspaceId, name, schemaVersion, topicMode);
         stale = true;
       }
 

@@ -42,6 +42,7 @@ export interface WorkspaceFile {
 export interface WorkspaceInfo {
   /** 1 = 主题文件内多卡片；2 = 一节点一份 Markdown。扫描不改写版本。 */
   schemaVersion: WorkspaceSchemaVersion;
+  topicMode?: "isolated" | "shared";
   workspaceId: string;
   name: string;
   activeNode: string | null;
@@ -131,7 +132,7 @@ export async function readWorkspaceFile(
   return readWorkspaceFileAt(rootReal, relativePath, absolutePath);
 }
 
-const WORKSPACE_ALLOWED_KEYS = new Set(["schemaVersion", "workspaceId", "name", "activeNode"]);
+const WORKSPACE_ALLOWED_KEYS = new Set(["schemaVersion", "workspaceId", "name", "activeNode", "topicMode"]);
 const SUPPORTED_WORKSPACE_VERSIONS: readonly WorkspaceSchemaVersion[] = [1, 2];
 
 export function parseWorkspaceInfo(text: string, workspacePath = "workspace.json"): WorkspaceInfo {
@@ -187,8 +188,15 @@ export function parseWorkspaceInfo(text: string, workspacePath = "workspace.json
       path: workspacePath,
     });
   }
+  if (record.topicMode !== undefined && record.topicMode !== "shared" && record.topicMode !== "isolated") {
+    throw new StorageError("WORKSPACE_INVALID", "topicMode 必须是 isolated 或 shared", { path: workspacePath });
+  }
+  if (schemaVersion === 1 && record.topicMode === "isolated") {
+    throw new StorageError("WORKSPACE_INVALID", "格式 1 只支持 shared 主题模式", { path: workspacePath });
+  }
   return {
     schemaVersion,
+    ...(record.topicMode !== undefined ? { topicMode: record.topicMode } : {}),
     workspaceId: record.workspaceId,
     name: record.name,
     activeNode: record.activeNode as string | null,

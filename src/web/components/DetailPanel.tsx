@@ -181,7 +181,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
         ) : topic === null ? (
           <div className="state-block">
             <h3>未选择主题</h3>
-            <p>在左侧导航中选择主题，按文件顺序连续阅读全部卡片。</p>
+            <p>在主题目录中打开主题，再选择主题页连续阅读。</p>
           </div>
         ) : (
           <article className="detail__article" aria-labelledby="detail-topic-title">
@@ -219,7 +219,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                 <span className="banner__text">磁盘上的主题文件当前无法解析，未显示部分正文。</span>
               </div>
             ) : null}
-            <ol className="topic-reader" aria-label="按文件顺序的卡片">
+            <ol className="topic-reader" aria-label="按结构顺序的卡片">
               {topicNodes === null || (topicDetail !== null && topicDetail.topic.id !== topic.id) ? (
                 <li className="topic-reader__empty">正文尚未载入；等待与当前图版本一致的内容。</li>
               ) : (
@@ -277,7 +277,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
               </section>
             ) : null}
             <p className="detail__version">
-              文件顺序阅读；结构顺序由 from／flow 决定
+              结构顺序阅读，由 from／flow 决定
               {topicDetail !== null ? ' · 内容版本 ' + versionLabel(topicDetail.instanceId, topicDetail.revision) : ''}
             </p>
           </article>

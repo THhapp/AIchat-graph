@@ -61,8 +61,8 @@ code, pre, kbd { font-family: var(--font-mono); }
 
 /* shell */
 .app {
-  display: grid;
-  grid-template-rows: var(--header-h) minmax(0, 1fr) var(--status-h);
+  display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
@@ -74,10 +74,12 @@ code, pre, kbd { font-family: var(--font-mono); }
   padding: 0 var(--space-4);
   border-bottom: 1px solid var(--border);
   background: var(--panel-bg);
+  flex: 0 0 var(--header-h);
 }
 .app-header__brand { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
 .app-header__title { font-size: var(--text-md); font-weight: 620; letter-spacing: 0.01em; white-space: nowrap; }
 .app-header__workspace { color: var(--text-muted); font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-header__topic { min-width: 5em; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--text-sm); }
 .app-header__spacer { flex: 1; }
 .app-header__meta { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-muted); }
 .app-header__root { max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
@@ -87,6 +89,7 @@ code, pre, kbd { font-family: var(--font-mono); }
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) auto;
   min-height: 0;
   overflow: hidden;
+  flex: 1 1 0;
 }
 /* app-main grid columns are set inline so the resizer column matches detail state. */
 
@@ -122,6 +125,7 @@ code, pre, kbd { font-family: var(--font-mono); }
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
+  flex: 0 0 var(--status-h);
 }
 .app-status__spacer { flex: 1; }
 .app-status button { font-size: var(--text-xs); }
@@ -142,6 +146,7 @@ code, pre, kbd { font-family: var(--font-mono); }
   font-size: var(--text-sm);
   background: var(--bg-sunken);
   color: var(--text-soft);
+  flex-shrink: 0;
 }
 .banner--stale { background: var(--state-proposed-bg); color: var(--state-proposed-fg); border-bottom-color: color-mix(in srgb, var(--state-proposed-fg) 25%, transparent); }
 .banner--error { background: var(--danger-soft); color: var(--danger); }

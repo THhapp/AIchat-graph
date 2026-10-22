@@ -100,6 +100,7 @@ export async function runInit(args: readonly string[], ctx: CliContext): Promise
     root: result.root,
     workspaceId: result.workspaceId,
     schemaVersion: created.schemaVersion,
+    topicMode: created.workspace?.topicMode ?? "shared",
     name: name ?? path.basename(result.root),
     files: result.files,
   };
@@ -235,6 +236,7 @@ export async function runTopics(args: readonly string[], ctx: CliContext): Promi
     source: "disk",
     root: snapshot.root,
     schemaVersion: snapshot.schemaVersion,
+    topicMode: snapshot.workspace?.topicMode ?? "shared",
     workspace: snapshot.workspace,
     workspaceFile: fileFacts(snapshot.files.workspaceFile),
     topics,
@@ -243,7 +245,7 @@ export async function runTopics(args: readonly string[], ctx: CliContext): Promi
   };
   const lines = [
     `workspace ${snapshot.workspace?.workspaceId ?? "(unreadable)"} ${snapshot.workspace?.name ?? ""}`,
-    `schemaVersion ${snapshot.schemaVersion ?? "unknown"}; ${topics.length} topic(s)`,
+    `schemaVersion ${snapshot.schemaVersion ?? "unknown"}; topicMode ${payload.topicMode}; ${topics.length} topic(s)`,
   ];
   for (const topic of topics) {
     lines.push(`  ${topic.topicId}  ${topic.title}  dir=${topic.dir ?? "-"}  nodes=${topic.nodeCount}`);
@@ -298,7 +300,7 @@ function isSafeInt(raw: string | undefined, label: string, min: number, max: num
 export async function runSearch(args: readonly string[], ctx: CliContext): Promise<number> {
   const parsed = parseOptions(
     args,
-    [{ name: "workspace" }, { name: "limit" }, { name: "page" }, ...OUTPUT_OPTIONS],
+    [{ name: "workspace" }, { name: "topic" }, { name: "limit" }, { name: "page" }, ...OUTPUT_OPTIONS],
     1,
   );
   const mode = parseOutputMode(parsed);
@@ -317,9 +319,14 @@ export async function runSearch(args: readonly string[], ctx: CliContext): Promi
 
   const root = await workspaceRoot(parsed, ctx);
   const snapshot = await loadWorkspace(root);
+  const topicId = parsed.values.get("topic");
+  if (topicId !== undefined && !snapshot.topics.some((topic) => topic.topic.topicId === topicId)) {
+    throw invalidArgument("--topic 必须是现有主题的稳定 topicId：" + topicId);
+  }
   const needle = query.toLowerCase();
   const hits: SearchHit[] = [];
   for (const topic of snapshot.topics) {
+    if (topicId !== undefined && topic.topic.topicId !== topicId) continue;
     for (const entry of topic.nodes) {
       const node = entry.node;
       const titleLower = node.title.toLowerCase();
@@ -527,6 +534,7 @@ export async function runRead(args: readonly string[], ctx: CliContext): Promise
         details: {
           locator,
           schemaVersion: snapshot.schemaVersion,
+          topicMode: snapshot.workspace?.topicMode ?? "shared",
           diagnostics: snapshot.diagnostics.slice(0, 20),
         },
       },
@@ -552,6 +560,7 @@ export async function runRead(args: readonly string[], ctx: CliContext): Promise
     source: "disk",
     root: snapshot.root,
     schemaVersion: snapshot.schemaVersion,
+    topicMode: snapshot.workspace?.topicMode ?? "shared",
     topic: describeTopic(snapshot, topic),
     ...(entryFile ? { file: fileFacts(entryFile) } : {}),
     // 节点清单：标题、摘要、状态、连接与真实源文件，不含正文。
@@ -608,6 +617,7 @@ async function readNodes(
       ...nodeReadPayload(found.topic, found.entry, window),
       source: "disk",
       schemaVersion: snapshot.schemaVersion,
+      topicMode: snapshot.workspace?.topicMode ?? "shared",
       online: { available: false, code: online.code, reason: online.reason },
       file: fileFacts(found.entry.file),
     });
@@ -653,6 +663,7 @@ export async function runValidate(args: readonly string[], ctx: CliContext): Pro
     source: "disk",
     root: snapshot.root,
     schemaVersion: snapshot.schemaVersion,
+    topicMode: snapshot.workspace?.topicMode ?? "shared",
     workspace: snapshot.workspace,
     topics: snapshot.topics.map((entry) => describeTopic(snapshot, entry)),
     storageDiagnostics: snapshot.files.diagnostics,
@@ -664,6 +675,7 @@ export async function runValidate(args: readonly string[], ctx: CliContext): Pro
           name: validation.graph.name,
           activeNode: validation.graph.activeNode,
           rootId: validation.graph.rootId,
+          rootIds: validation.graph.rootIds ?? [],
           topics: validation.graph.topics,
           nodes: validation.graph.nodes.map((node) => ({
             id: node.id,
@@ -687,7 +699,7 @@ export async function runValidate(args: readonly string[], ctx: CliContext): Pro
       : null,
   };
   const lines = [
-    `${validation.ok ? "valid" : "INVALID"} ${snapshot.root} (schemaVersion ${snapshot.schemaVersion ?? "?"})`,
+    `${validation.ok ? "valid" : "INVALID"} ${snapshot.root} (schemaVersion ${snapshot.schemaVersion ?? "?"}, topicMode ${payload.topicMode})`,
     `${snapshot.topics.length} topic(s), ${snapshot.topics.reduce((sum, topic) => sum + topic.nodes.length, 0)} node(s)`,
   ];
   for (const diagnostic of validation.diagnostics) {
@@ -697,7 +709,8 @@ export async function runValidate(args: readonly string[], ctx: CliContext): Pro
     lines.push(`  storage ${diagnostic.code} ${diagnostic.path ?? ""} ${diagnostic.message}`);
   }
   if (payload.graph) {
-    lines.push(`graph ${payload.graph.nodes.length} node(s), root ${payload.graph.rootId ?? "none"}`);
+    const roots = payload.graph.rootIds;
+    lines.push(`graph ${payload.graph.nodes.length} node(s), ${roots.length} root(s)${roots.length > 0 ? ": " + roots.join(", ") : ""}`);
   }
   emit(ctx, mode, payload, lines);
   return validation.ok ? EXIT_CODES.ok : EXIT_CODES.validation;

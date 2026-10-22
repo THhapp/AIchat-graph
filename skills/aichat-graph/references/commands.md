@@ -9,7 +9,7 @@
 | 命令 | 说明 |
 | --- | --- |
 | `topics` | 主题列表：topicId、title、真实入口文件、节点数、全部源文件哈希 |
-| `search <词> [--limit 1-100] [--page n]` | 标题→摘要→正文优先级排序；默认 10 项；给出节点真实路径与文件哈希 |
+| `search <词> [--topic <topicId>] [--limit 1-100] [--page n]` | 标题→摘要→正文优先级排序；默认 10 项；主题过滤后分页；给出节点真实路径与文件哈希 |
 | `read <topicId\|相对路径>` | 读主题元数据与节点清单；不含节点正文 |
 | `read --node <id> [--start n] [--length n] [--full] [--section 标题] [--section-index n] [--offline]` | 节点正文片段；默认 4000 UTF-16，上限 16000；`--full` 取全文 |
 | `validate` | 校验磁盘结构与全图；失败时不给 graph |
@@ -23,14 +23,16 @@
 
 先定位、读相关范围，再写入。同一轮可维护多个节点，但每次提交使用相应真实读取凭据。需要理解节点完整论证时用 `--full`，不因默认片段短就误以为正文已读完。
 
+日常使用已绑定主题的稳定 ID：`search "<关键词>" --topic "<topicId>" --workspace "<工作区>"`。`topics` 用于解析用户给出的名称、目录和真实 ID，`read <topicId>` 用于核对节点归属；不要用全局 activeNode 或浏览器选中项决定写入主题。
+
 ## 在线写入
 
 **格式边界（先看这条）**
 
 | 工作区 | 读取 | 低摩擦写入 | 受控写入 | 转换 |
 | --- | --- | --- | --- | --- |
-| `schemaVersion: 2`（新默认） | 全部只读命令 | `edit` 片段／追加、`branch`、`next`、`connect`、`create-root` 可用 | `check`／`apply` 亦可 | — |
-| `schemaVersion: 1`（兼容） | 全部只读命令 | **不可用**（`branch`／`next`／`connect`／`create-root` 只面向格式 2；`edit` 仅接受整篇 `--body*`，片段／追加会 409） | `check`／`apply` 兼容 | 只在用户明确要求时 `migrate` 隔离生成新目录，**不自动迁移** |
+| `schemaVersion: 2`（新默认） | 全部只读命令 | `edit` 片段／追加、`branch`、`next`、`connect`、`create-root` 可用；隔离主题库可 `create-topic` | `check`／`apply` 亦可 | — |
+| `schemaVersion: 1`（兼容） | 全部只读命令 | **不可用**（`branch`／`next`／`connect`／`create-root`／`create-topic` 只面向格式 2；`edit` 仅接受整篇 `--body*`，片段／追加会 409） | `check`／`apply` 兼容 | 只在用户明确要求时 `migrate` 隔离生成新目录，**不自动迁移** |
 
 格式由 `topics` 或 `validate` 输出里的 `schemaVersion` 给出，不要假设。"V1 能读"不等于"低摩擦写入口可用"。
 
@@ -43,6 +45,7 @@
 | `next --from-ref <ref> --title <t> --description <why>` | 正文来源之一 | 纵向后继；`flow: next`，不带 side／order；来源已有 next 时 409，不插队 |
 | `connect --ref <ref> --description <why>` | `--description` | 结构字段全可选：`--from-ref`／`--flow`／`--side`／`--order`；只改描述也合法 |
 | `create-root --topic-title <t> --title <t>` | 正文来源之一 | 仅格式 2 的空工作区；主题与根卡一次创建 |
+| `create-topic --topic-title <t> [--directory <目录名>] [--title <首节点标题>]` | 正文来源之一 | 在格式 2 隔离主题库中创建新主题与独立 root；首节点标题默认主题名，目录为可选自命名单层目录 |
 | `check --input <json>` | — | 只验证底层变更集合，不写盘（V1／V2 共用联合 schema） |
 | `apply --input <json>` | — | 提交底层变更集合（V1／V2 共用联合 schema） |
 | `status <requestId>` | — | 查询状态；unknown 不证明成功或失败 |
@@ -52,9 +55,12 @@
 ```powershell
 node "<aichat-cli>" edit --ref "<实际读取凭据>" --append-file "<补充正文.md>" --workspace "<工作区>"
 node "<aichat-cli>" branch --from-ref "<实际读取凭据>" --title '输入分辨率改变后的处理' --description '从固定尺寸实例延伸到可变尺寸的网络设计' --body-file "<分支正文.md>" --workspace "<工作区>"
+node "<aichat-cli>" create-topic --topic-title 'LeNet 学习' --directory 'lenet' --body-file "<首节点正文.md>" --workspace "<工作区>"
 ```
 
 不自行生成 nodeId、路径、顺序、哈希或 requestId。托管提交已包含候选结构校验；核对返回结果即可，不要求每次再运行全图 `validate`。直接编辑源文件后、出现结构诊断或怀疑损坏时再校验。同一批修改只选托管提交或直接编辑。
+
+用户明确要求记录新主题时可用 `create-topic`，不必先把整个工作区清空，也不把现有主题的 root 接到新主题。`--directory` 是单层目录名，不是任意路径；不自行创建目录或写元数据来绕过命令。旧 shared 库不自动切换主题模式；创建能力以实际 CLI 的帮助和诊断为准。
 
 > PowerShell 提示：描述里出现中文弯引号（`“”`、`‘’`）时，别用外层双引号包住——PowerShell 会把这些字符当引号，参数被截成多段，CLI 报未知选项而不会写盘。用外层单引号，或干脆走文件：`--description` 之外的长文本用 `--body-file`／`--append-file`／`--replace-file`，整批变更用 `check`／`apply --input <json>`。
 >

@@ -335,12 +335,17 @@ export async function runConnect(args: readonly string[], ctx: CliContext): Prom
 
 /* ------------------------------- create-root ------------------------------ */
 
-export async function runCreateRoot(args: readonly string[], ctx: CliContext): Promise<number> {
+export async function runCreateTopic(args: readonly string[], ctx: CliContext): Promise<number> {
+  return runCreateRoot(args, ctx, true);
+}
+
+export async function runCreateRoot(args: readonly string[], ctx: CliContext, createTopic = false): Promise<number> {
   const parsed = parseOptions(
     args,
     [
       { name: "workspace" },
       { name: "topic-title" },
+      ...(createTopic ? [{ name: "directory" }] : []),
       { name: "title" },
       { name: "state" },
       ...BODY_SOURCE,
@@ -352,7 +357,7 @@ export async function runCreateRoot(args: readonly string[], ctx: CliContext): P
   const root = await workspaceRoot(parsed, ctx);
   const topicTitle = parsed.values.get("topic-title");
   if (topicTitle === undefined) throw new UsageError("缺少 --topic-title");
-  const title = parsed.values.get("title");
+  const title = parsed.values.get("title") ?? (createTopic ? topicTitle : undefined);
   if (title === undefined) throw new UsageError("缺少 --title");
   const body = await readBodyInput(parsed, ctx);
   if (body === undefined) {
@@ -360,13 +365,14 @@ export async function runCreateRoot(args: readonly string[], ctx: CliContext): P
   }
   const state = parseEnum(parsed.values.get("state"), NODE_STATES, "--state");
   const action: AgentChangeAction = {
-    action: "createRoot",
+    action: createTopic ? "createTopic" : "createRoot",
+    ...(createTopic && parsed.values.has("directory") ? { directory: parsed.values.get("directory")! } : {}),
     topicTitle,
     title,
     body: normalizeText(body.text),
     ...(state !== undefined ? { state } : {}),
   };
-  return submitAction("create-root", action, root, ctx, mode);
+  return submitAction(createTopic ? "create-topic" : "create-root", action, root, ctx, mode);
 }
 
 /* --------------------------------- 共用提交 -------------------------------- */

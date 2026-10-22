@@ -21,6 +21,7 @@ import type {
   AgentCreateBranchAction,
   AgentCreateNextAction,
   AgentCreateRootAction,
+  AgentCreateTopicAction,
   AgentEditRef,
   AgentNodeReadResponse,
   AgentPatchNodeAction,
@@ -33,6 +34,7 @@ import type {
   Operation as V1Operation,
   V2Operation,
 } from "../storage/index.js";
+import { normalizeRelativePath } from "../storage/paths.js";
 import { DEFAULT_READ_LENGTH, MAX_READ_SEGMENT, sliceBody } from "../core/index.js";
 import type { ParsedNode } from "../core/index.js";
 import type { WorkspaceRuntime } from "./workspace.js";
@@ -123,6 +125,15 @@ const createRootActionSchema = z.strictObject({
   description: singleLine("description").optional(),
 });
 
+const createTopicActionSchema = z.strictObject({
+  action: z.literal("createTopic"),
+  topicTitle: singleLine("topicTitle"),
+  directory: singleLine("directory").optional(),
+  title: singleLine("title").optional(),
+  body: z.string(),
+  state: nodeStateSchema.optional(),
+});
+
 /** 严格请求 schema：未知字段一律拒绝，正文模式互斥由 action 层校验。 */
 export const agentChangeRequestSchema = z.strictObject({
   workspaceId: z.string().min(1),
@@ -133,6 +144,7 @@ export const agentChangeRequestSchema = z.strictObject({
     createNextActionSchema,
     updateConnectionActionSchema,
     createRootActionSchema,
+    createTopicActionSchema,
   ]),
 });
 
@@ -639,6 +651,9 @@ function compileChild(context: CompileContext, input: ChildInput): CompiledActio
     );
   }
   const topicId = input.topicId ?? input.node.topicId;
+  if (snapshot.topicMode === "isolated" && topicId !== input.node.topicId) {
+    throw new ServiceError(409, "OPERATION_CONFLICT", "隔离主题不能连接其他主题的节点", { details: { topicId, sourceTopicId: input.node.topicId } });
+  }
   const topic = snapshot.topics.find((entry) => entry.topicId === topicId);
   if (topic === undefined) {
     throw new ServiceError(422, "VALIDATION_FAILED", input.action + " 的目标主题不存在", {
@@ -722,9 +737,12 @@ function compileCreateNext(context: CompileContext, action: AgentCreateNextActio
   });
 }
 
-function compileCreateRoot(context: CompileContext, action: AgentCreateRootAction): CompiledAction {
+function compileCreateRoot(context: CompileContext, action: AgentCreateRootAction | AgentCreateTopicAction): CompiledAction {
   const snapshot = context.runtime.current.data;
-  if (snapshot.graph.nodes.length > 0) {
+  if (action.action === "createTopic" && snapshot.topicMode !== "isolated") {
+    throw new ServiceError(409, "OPERATION_CONFLICT", "createTopic 需要 isolated 工作区；旧 shared 工作区不能自动转换", {});
+  }
+  if (action.action === "createRoot" && snapshot.graph.nodes.length > 0) {
     throw new ServiceError(
       409,
       "OPERATION_CONFLICT",
@@ -743,19 +761,25 @@ function compileCreateRoot(context: CompileContext, action: AgentCreateRootActio
   if (action.topicTitle.trim().length === 0) {
     throw new ServiceError(422, "VALIDATION_FAILED", "createRoot 需要主题标题", {});
   }
-  if (action.title.trim().length === 0) {
+  const title = action.title ?? action.topicTitle;
+  if (title.trim().length === 0) {
     throw new ServiceError(422, "VALIDATION_FAILED", "createRoot 需要节点标题", {});
   }
   const topicId = context.generated?.topicId ?? newId("t_");
   const nodeId = context.generated?.nodeId ?? newId("n_");
-  const dir = context.generated?.dir ?? topicDirectory(action.topicTitle, topicId.slice(2, 10));
+  const dir = context.generated?.dir ?? (action.action === "createTopic"
+    ? isolatedTopicDirectory(action.topicTitle, action.directory)
+    : topicDirectory(action.topicTitle, topicId.slice(2, 10)));
+  if (snapshot.topics.some((topic) => topic.path.split("/")[1]?.toLocaleLowerCase() === dir.toLocaleLowerCase())) {
+    throw new ServiceError(409, "OPERATION_CONFLICT", "主题目录已存在：" + dir, { details: { directory: dir } });
+  }
   const operations: V2Operation[] = [
     { op: "createTopic", topicId, path: dir, title: action.topicTitle.trim() },
     {
       op: "createNode",
       nodeId,
       topicId,
-      title: action.title.trim(),
+      title: title.trim(),
       body: action.body,
       from: null,
       flow: "root",
@@ -781,6 +805,18 @@ function compileCreateRoot(context: CompileContext, action: AgentCreateRootActio
     primaryNodeId: nodeId,
     action: action.action,
   };
+}
+
+function isolatedTopicDirectory(title: string, explicit?: string): string {
+  let dir = explicit ?? title.trim().replace(/[<>:"|?*\\/\u0000-\u001f]/g, "-").replace(/[. ]+$/g, "");
+  if (explicit === undefined && (dir.length === 0 || dir.startsWith(".") || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(dir))) dir = "topic-" + dir.replace(/^\.+/, "");
+  try {
+    if (dir.trim() !== dir || dir.startsWith(".") || dir.includes("/") || dir.includes("\\") || dir === "topic.md") throw new Error("必须是非隐藏的单层目录名");
+    normalizeRelativePath(dir);
+  } catch (error) {
+    throw new ServiceError(422, "VALIDATION_FAILED", "非法主题目录：" + dir + "；" + (error instanceof Error ? error.message : String(error)), {});
+  }
+  return dir;
 }
 
 /** 生成新节点后的读取凭据（正文已在快照中）；找不到时返回 null。 */

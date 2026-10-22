@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphResponse } from '../../src/shared/protocol.js';
-import { buildGraphView } from '../../src/web/graph/viewModel.js';
-import { parseReadingState, pruneReadingState, emptyReadingState } from '../../src/web/data/readingState.js';
+import { buildGraphView, scopeGraphToTopic } from '../../src/web/graph/viewModel.js';
+import { parseReadingState, pruneReadingState, emptyReadingState, switchReadingTopic } from '../../src/web/data/readingState.js';
 import { resolveLink, resolveResourceKey, safeUrlTransform, stripNodeComments } from '../../src/web/components/MarkdownBody.js';
 import { searchGraph } from '../../src/web/lib/search.js';
+import { buildContinuationPrompt } from '../../src/web/lib/prompt.js';
+import { computeLayout } from '../../src/web/layout/index.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string): GraphResponse['nodes'][number] {
   return {
@@ -109,6 +111,62 @@ describe('reading state', () => {
     expect(pruned.collapsedNodeIds).toEqual(['n3']);
     expect(pruned.topicFilter).toBe('t_1');
     expect(pruned.viewport).toEqual({ x: 1, y: 2, zoom: 0.8 });
+  });
+});
+
+describe('isolated topic reading', () => {
+  const twoTopics: GraphResponse = {
+    ...graph, topicMode: 'isolated', activeNode: 'other',
+    nodes: [...graph.nodes, { ...node('other', null, 'root', '01', '另一个主题'), topicId: 't_2' }],
+    topics: [...graph.topics, { id: 't_2', title: '另一个主题', path: 'topics/第二主题/topic.md', nodeIds: ['other'], fileHash: 'bbb' }],
+  };
+
+  it('opens no graph until a topic is chosen, and search never leaks another topic', () => {
+    expect(scopeGraphToTopic(twoTopics, null).nodes).toEqual([]);
+    const first = scopeGraphToTopic(twoTopics, 't_1');
+    expect(buildGraphView(first, new Set(), 't_1').nodes.map((node) => node.id)).not.toContain('other');
+    expect(searchGraph(first, '另一个').nodes).toEqual([]);
+    expect(first.activeNode).toBeNull();
+    expect(scopeGraphToTopic(twoTopics, 't_2').nodes.map((node) => node.id)).toEqual(['other']);
+    // Shared compatibility does not silently pull cross-topic ancestors into the open diagram.
+    const shared = { ...twoTopics, topicMode: 'shared' as const, nodes: twoTopics.nodes.map((node) => node.id === 'other' ? { ...node, from: 'n2', flow: 'branch' as const } : node) };
+    const sharedView = buildGraphView(scopeGraphToTopic(shared, 't_2'), new Set(), 't_2');
+    expect(sharedView.nodes.map((node) => node.id)).toEqual(['other']);
+    expect(sharedView.nodes[0]?.from).toBe('n2');
+    expect(sharedView.layoutNodes[0]?.from).toBeNull();
+    const layout = computeLayout({ nodes: sharedView.layoutNodes, visibleNodeIds: [...sharedView.visibleIds] });
+    expect(Object.keys(layout.positions)).toEqual(['other']);
+    expect(layout.diagnostics.some((diagnostic) => diagnostic.code === 'unknown-parent')).toBe(false);
+  });
+
+  it('restores each topic viewport, selection and collapse after switching and reload', () => {
+    const a = { ...switchReadingTopic(emptyReadingState(), 't_1'), selectedNodeId: 'n3', collapsedNodeIds: ['n3'], viewport: { x: 123, y: 40, zoom: 0.7 }, rightPanelOpen: true };
+    const b = switchReadingTopic(a, 't_2');
+    expect(b.selectedNodeId).toBeNull();
+    expect(b.rightPanelOpen).toBe(false);
+    const saved = parseReadingState(JSON.stringify({ ...b, selectedNodeId: 'other', viewport: { x: 20, y: 30, zoom: 1.1 } }));
+    const restored = switchReadingTopic(saved, 't_1');
+    expect(restored.selectedNodeId).toBe('n3');
+    expect(restored.collapsedNodeIds).toEqual(['n3']);
+    expect(restored.viewport).toEqual(a.viewport);
+    expect(switchReadingTopic(restored, 't_2').viewport).toEqual({ x: 20, y: 30, zoom: 1.1 });
+  });
+
+  it('copies exact topic binding and actual entry paths without another topic focus', () => {
+    const first = twoTopics.topics[0]!;
+    const text = buildContinuationPrompt({
+      graph: twoTopics, topic: first, node: twoTopics.nodes.find((node) => node.id === 'other')!,
+      workspace: { ...twoTopics, name: '示例库', rootPath: 'D:/example-vault', agentEntry: { cliPath: 'D:/daily/dist/cli/index.js', skillPath: 'D:/daily/skills/aichat-graph/SKILL.md' } },
+    });
+    expect(text).toContain('workspaceId：w_1');
+    expect(text).toContain('topicId=t_1');
+    expect(text).toContain('主题目录：D:/example-vault/topics');
+    expect(text).toContain('D:/daily/dist/cli/index.js');
+    expect(text).toContain('D:/daily/skills/aichat-graph/SKILL.md');
+    expect(text).toContain('不会自动改变本对话的记录目标');
+    expect(text).not.toContain('activeNode：other');
+    expect(text).not.toContain('另一个主题');
+    expect(text).not.toContain('按文件顺序阅读所有卡片');
   });
 });
 

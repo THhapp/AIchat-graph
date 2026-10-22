@@ -5,7 +5,7 @@ export const USAGE = [
   "",
   "Read (offline, straight from disk):",
   "  topics --workspace <path>                   列出主题（V1 单文件／V2 一节点一份）",
-  "  search <query> --workspace <path> [--limit <n>] [--page <n>]",
+  "  search <query> --workspace <path> [--topic <topicId>] [--limit <n>] [--page <n>]",
   "                                              搜索标题／摘要／正文（默认 10 项，最多 100）",
   "  read <topicId|relative-path> --workspace <path>",
   "  read --node <id> [--node <id> ...] [--start <n>] [--length <n>|--full]",
@@ -19,6 +19,8 @@ export const USAGE = [
   "  next --from-ref <ref> --title <t> --description <d> (--body-file <f>|--body-stdin|--body <b>)",
   "                                              纵向后继；来源已有 next 时明确 409，不挤掉旧主线",
   "  connect --ref <ref> --description <d> [--from-ref <ref>] [--flow ...] [--side ...] [--order <n>]",
+  "  create-topic --topic-title <t> [--directory <name>] [--title <t>] (--body-file <f>|--body-stdin|--body <b>)",
+  "                                              isolated 模式创建主题和独立起点；目录碰撞拒绝",
   "  create-root --topic-title <t> --title <t> (--body-file <f>|--body-stdin|--body <b>)",
   "  check --input <json>                        只验证一次底层变更集合（不写盘）",
   "  apply --input <json>                        提交底层变更集合（须带真实旧哈希）",
@@ -48,7 +50,7 @@ export const COMMAND_USAGE: Record<string, string> = {
   serve: "aichat serve --workspace <path> [--port <port>] [--json|--text]",
   topics: "aichat topics --workspace <path> [--json|--text]",
   search:
-    "aichat search <query> --workspace <path> [--limit <1-100>] [--page <n>] [--json|--text]",
+    "aichat search <query> --workspace <path> [--topic <topicId>] [--limit <1-100>] [--page <n>] [--json|--text]",
   read: [
     "aichat read <topicId|relative-path> --workspace <path> [--json|--text]",
     "       aichat read --topic <topicId|relative-path> --workspace <path>",
@@ -76,6 +78,7 @@ export const COMMAND_USAGE: Record<string, string> = {
     "aichat connect --ref <editRef> --description <why>",
     "                [--from-ref <editRef>] [--flow root|next|branch] [--side left|right] [--order <n>]",
   ].join("\n"),
+  "create-topic": "aichat create-topic --topic-title <t> [--directory <单层目录>] [--title <t>] (--body-file <f>|--body-stdin|--body <b>) [--state ...] [--workspace <path>]",
   "create-root": [
     "aichat create-root --topic-title <t> --title <t>",
     "                    (--body <text>|--body-file <file>|--body-stdin) [--state ...] [--workspace <path>]",
@@ -102,6 +105,6 @@ export function briefUsage(command: string | undefined): string {
   if (command && COMMAND_USAGE[command]) return "Usage: " + COMMAND_USAGE[command];
   return (
     "Usage: aichat <command> [options]\n" +
-    "Commands: init serve topics search read validate edit branch next connect create-root migrate check apply status whoami"
+    "Commands: init serve topics search read validate edit branch next connect create-root create-topic migrate check apply status whoami"
   );
 }

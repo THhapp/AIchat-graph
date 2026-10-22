@@ -11,6 +11,7 @@
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { bodyLimit } from "hono/body-limit";
@@ -129,12 +130,22 @@ function assertSnapshotVersion(
   }
 }
 
+function runtimeAgentEntry(): { cliPath: string; skillPath: string } {
+  const appRoot = fileURLToPath(new URL("../../", import.meta.url));
+  return {
+    cliPath: path.join(appRoot, "dist", "cli", "index.js"),
+    skillPath: path.join(appRoot, "skills", "aichat-graph", "SKILL.md"),
+  };
+}
+
 function workspaceResponse(runtime: WorkspaceRuntime): WorkspaceResponse {
   return {
     ...runtime.snapshotVersion(),
     workspaceId: runtime.workspaceId,
     name: runtime.current.data.name,
     rootPath: runtime.rootReal,
+    topicMode: runtime.current.data.topicMode ?? "shared",
+    agentEntry: runtimeAgentEntry(),
     activeNode: runtime.current.data.graph.activeNode,
     stale: runtime.stale,
     diagnostics: runtime.diagnostics,
@@ -143,6 +154,7 @@ function workspaceResponse(runtime: WorkspaceRuntime): WorkspaceResponse {
 
 function graphResponse(runtime: WorkspaceRuntime): GraphResponse {
   return {
+    topicMode: runtime.current.data.topicMode ?? "shared",
     ...runtime.snapshotVersion(),
     workspaceId: runtime.workspaceId,
     activeNode: runtime.current.data.graph.activeNode,
@@ -308,6 +320,7 @@ async function diskTopicDetail(
   const parsedWorkspace = parseWorkspaceDocuments({
     workspace: {
       schemaVersion: scanned.workspace.schemaVersion,
+      ...(scanned.workspace.topicMode !== undefined ? { topicMode: scanned.workspace.topicMode } : {}),
       workspaceId: scanned.workspace.workspaceId,
       name: scanned.workspace.name,
       activeNode: scanned.workspace.activeNode,
@@ -742,7 +755,14 @@ export function createApp(options: AppOptions): Hono {
   api.get("/search", (c) => {
     const query = c.req.query("q") ?? "";
     try {
-      const outcome = searchIndex(runtime.current.data.search, query);
+      const topicId = c.req.query("topic");
+      if (topicId !== undefined && !runtime.current.data.topics.some((topic) => topic.topicId === topicId)) {
+        throw badRequest("搜索主题不存在：" + topicId);
+      }
+      const search = runtime.current.data.search;
+      const outcome = searchIndex(topicId === undefined ? search : {
+        ...search, documents: search.documents.filter((document) => document.topicId === topicId),
+      }, query);
       const body: SearchResponse = {
         ...runtime.snapshotVersion(),
         query: query.trim(),

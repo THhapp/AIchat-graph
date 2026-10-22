@@ -180,6 +180,7 @@ export function planConversion(options: ConvertWorkspaceOptions): ConversionPlan
     JSON.stringify(
       {
         schemaVersion: 2,
+        ...(files.workspace.topicMode !== undefined ? { topicMode: files.workspace.topicMode } : {}),
         workspaceId: files.workspace.workspaceId,
         name: files.workspace.name,
         activeNode: files.workspace.activeNode,
@@ -202,6 +203,7 @@ export function planConversion(options: ConvertWorkspaceOptions): ConversionPlan
 function workspaceMetaFromInfo(files: WorkspaceFiles): WorkspaceMeta {
   return {
     schemaVersion: files.workspace.schemaVersion,
+    ...(files.workspace.topicMode !== undefined ? { topicMode: files.workspace.topicMode } : {}),
     workspaceId: files.workspace.workspaceId,
     name: files.workspace.name,
     activeNode: files.workspace.activeNode,

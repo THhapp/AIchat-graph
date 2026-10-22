@@ -71,6 +71,9 @@ export const workspaceMetaSchema = z.strictObject({
   workspaceId: z.string().trim().min(1),
   name: z.string().trim().min(1),
   activeNode: nodeIdSchema.nullable(),
+  topicMode: z.enum(["isolated", "shared"]).optional(),
+}).refine((value) => value.schemaVersion !== 1 || value.topicMode !== "isolated", {
+  message: "格式 1 工作区只能使用 shared 主题模式", path: ["topicMode"],
 });
 
 export type SupportedSchemaVersion = (typeof SUPPORTED_SCHEMA_VERSIONS)[number];

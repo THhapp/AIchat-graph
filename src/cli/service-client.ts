@@ -33,6 +33,7 @@ export interface ServiceDescriptor {
 }
 
 export interface WorkspaceIdentity {
+  readonly topicMode?: "isolated" | "shared";
   readonly workspaceId: string;
   readonly instanceId: string;
   readonly rootPath: string;
@@ -316,6 +317,7 @@ export async function fetchWorkspaceIdentity(
     instanceId,
     rootPath,
     url: baseUrl,
+    ...(body["topicMode"] === "isolated" || body["topicMode"] === "shared" ? { topicMode: body["topicMode"] } : {}),
     ...(typeof body["name"] === "string" ? { name: body["name"] } : {}),
   };
 }

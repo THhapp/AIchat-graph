@@ -3,7 +3,9 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { main as runCli } from "../../src/cli/index.js";
+import { loadWorkspace } from "../../src/cli/workspace.js";
 import { initWorkspace } from "../../src/storage/index.js";
 import { startService } from "../../src/service/index.js";
 
@@ -579,6 +581,91 @@ describe("Agent 动作编译", () => {
     expect(text).toContain("description: 改接后的新理由");
   });
 
+  async function readAgent(url: string, nodeId: string): Promise<{ editRef: { ref: string } }> {
+    return await (await fetch(url + "/api/agent/nodes/" + nodeId)).json() as { editRef: { ref: string } };
+  }
+
+  it("isolated 主题各自起点、搜索隔离、重放与目录碰撞保护", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const beforeWorkspace = await fs.readFile(path.join(root, "workspace.json"), "utf8");
+    expect(JSON.parse(beforeWorkspace).topicMode).toBe("isolated");
+
+    const command = ["create-topic", "--workspace", root, "--topic-title", "第二主题", "--directory", "自定义目录", "--body", "默认更新现有内容，但属于另一个主题。"];
+    const created = await runCli(command);
+    expect(created.exitCode, created.stderr).toBe(0);
+    const result = JSON.parse(created.stdout).result as { created: { topicId: string; nodeIds: string[] }; editRef: { ref: string } };
+    const secondId = result.created.topicId;
+    const secondRoot = result.created.nodeIds[0]!;
+    expect(await fs.readFile(path.join(root, "topics", "自定义目录", "topic.md"), "utf8")).toContain(secondId);
+    const workspace = await (await fetch(handle.url + "/api/workspace")).json() as { topicMode: string; agentEntry: { cliPath: string; skillPath: string } };
+    expect(workspace.topicMode).toBe("isolated");
+    expect(workspace.agentEntry.cliPath.replaceAll("\\", "/")).toMatch(/\/dist\/cli\/index\.js$/);
+    expect(workspace.agentEntry.skillPath.replaceAll("\\", "/")).toMatch(/\/skills\/aichat-graph\/SKILL\.md$/);
+    const graph = await (await fetch(handle.url + "/api/graph")).json() as { topicMode: string; nodes: Array<{ id: string; topicId: string; flow: string; number: string }> };
+    expect(graph.topicMode).toBe("isolated");
+    expect(graph.nodes.filter((node) => node.flow === "root").map((node) => node.number)).toEqual(["01", "01"]);
+    const snapshot = await loadWorkspace(root);
+    expect(snapshot.graph?.rootId).toBeNull();
+    expect(snapshot.graph?.rootIds).toHaveLength(2);
+    const manifest = JSON.parse(await fs.readFile(path.join(root, ".aichat/cache/manifest.json"), "utf8"));
+    expect(manifest.roots).toHaveLength(2);
+
+    const search = await runCli(["search", "默认更新", "--workspace", root, "--topic", TOPIC_ID, "--limit", "1"]);
+    expect(search.exitCode, search.stderr).toBe(0);
+    const searchBody = JSON.parse(search.stdout);
+    expect(searchBody.totalHits).toBe(1);
+    expect(searchBody.hits[0].topicId).toBe(TOPIC_ID);
+    expect(searchBody.hasMore).toBe(false);
+    const webSearch = await (await fetch(handle.url + "/api/search?q=" + encodeURIComponent("默认更新") + "&topic=" + secondId)).json() as { hits: Array<{ topicId: string }> };
+    expect(webSearch.hits.map((hit) => hit.topicId)).toEqual([secondId]);
+    const invalidTopic = await runCli(["search", "默认", "--workspace", root, "--topic", "第二主题"]);
+    expect(invalidTopic.exitCode).not.toBe(0);
+
+    const beforeNode = await fs.readFile(path.join(root, "topics", DIR, NEXT_NODE + ".md"), "utf8");
+    const firstRef = await readAgent(handle.url, NEXT_NODE);
+    const secondRef = await readAgent(handle.url, secondRoot);
+    const cross = await postAgent(handle.url, { workspaceId: handle.workspaceId, requestId: randomUUID(), action: {
+      action: "updateConnection", editRef: firstRef.editRef.ref, fromRef: secondRef.editRef.ref, description: "不应跨主题连接",
+    } });
+    expect(cross.status).toBe(422);
+    expect(await fs.readFile(path.join(root, "topics", DIR, NEXT_NODE + ".md"), "utf8")).toBe(beforeNode);
+    expect(await fs.readFile(path.join(root, "workspace.json"), "utf8")).toBe(beforeWorkspace);
+    const crossChild = await postAgent(handle.url, { workspaceId: handle.workspaceId, requestId: randomUUID(), action: {
+      action: "createBranch", editRef: firstRef.editRef.ref, topicId: secondId, title: "错误跨主题分支", body: "不能落盘", description: "不应跨主题",
+    } });
+    expect(crossChild.status).toBe(409);
+
+    const collision = await runCli(command);
+    expect(collision.exitCode).not.toBe(0);
+    expect(collision.stderr).toContain("409");
+    await fs.mkdir(path.join(root, "topics", "空目录"));
+    const emptyCollision = await runCli(["create-topic", "--workspace", root, "--topic-title", "空目录", "--body", "不能复用"]);
+    expect(emptyCollision.exitCode).not.toBe(0);
+    expect(await fs.readdir(path.join(root, "topics", "空目录"))).toEqual([]);
+    const illegal = await runCli(["create-topic", "--workspace", root, "--topic-title", "越界", "--directory", "../bad", "--body", "不能写入"]);
+    expect(illegal.exitCode).not.toBe(0);
+
+    const payload = { workspaceId: handle.workspaceId, requestId: randomUUID(), action: { action: "createTopic", topicTitle: "重放主题", body: "只有一个起点" } };
+    const once = await postAgent(handle.url, payload);
+    expect(once.status).toBe(200);
+    const onceBody = await once.json() as { created: unknown };
+    const replay = await postAgent(handle.url, payload);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ created: onceBody.created, replayed: true });
+
+    const focus = await fetch(handle.url + "/api/changes", {
+      method: "POST", headers: agentHeaders(), body: JSON.stringify({
+        workspaceId: handle.workspaceId, requestId: randomUUID(),
+        expectedFiles: { "workspace.json": sha256Hex(beforeWorkspace) },
+        operations: [{ op: "setDiscussionFocus", nodeId: secondRoot }],
+      }),
+    });
+    expect(focus.status).toBe(200);
+    expect(JSON.parse(await fs.readFile(path.join(root, "workspace.json"), "utf8"))).toMatchObject({ topicMode: "isolated", activeNode: secondRoot });
+  });
+
   it("createRoot 只用于空工作区，并在同一事务创建主题与根", async () => {
     const parent = await fs.mkdtemp(path.join(os.tmpdir(), "aichat-agent-empty-"));
     temporaryRoots.push(parent);
@@ -799,6 +886,10 @@ describe("editRef 与读取后源变化", () => {
 
   it("无关主题发布后旧 ref 仍可用（不以全局 revision 否决）", async () => {
     const root = await newWorkspace();
+    // 此历史用例故意保留 shared 的跨主题侧枝，不让新 init 默认值改变验证语义。
+    const metaPath = path.join(root, "workspace.json");
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    await fs.writeFile(metaPath, JSON.stringify({ ...meta, topicMode: "shared" }, null, 2) + "\n");
     // 第二个主题，用来制造"无关发布"。
     const otherDir = path.join(root, "topics", "别的主题");
     await fs.mkdir(otherDir, { recursive: true });

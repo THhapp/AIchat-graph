@@ -33,12 +33,14 @@ export interface CacheIdentity {
   readonly workspaceId: string;
   readonly name: string;
   readonly schemaVersion: SupportedSchemaVersion;
+  readonly topicMode?: "isolated" | "shared";
 }
 
 interface CachedSnapshot {
   schemaVersion: number;
   workspaceId: string;
   schemaFormat: 1 | 2;
+  topicMode: "isolated" | "shared";
   name: string;
   activeNode: string | null;
   workspaceHash: string;
@@ -69,6 +71,7 @@ export async function saveCache(rootReal: string, data: SnapshotData): Promise<b
     schemaVersion: CACHE_FORMAT,
     workspaceId: data.workspaceId,
     schemaFormat: data.schemaVersion,
+    topicMode: data.topicMode ?? "shared",
     name: data.name,
     activeNode: data.activeNode,
     workspaceHash: data.workspaceHash,
@@ -115,7 +118,10 @@ export async function loadCacheIdentity(rootReal: string): Promise<CacheIdentity
     if (typeof workspaceId !== "string" || workspaceId.length === 0) return null;
     if (typeof name !== "string" || name.length === 0) return null;
     if (schemaVersion !== 1 && schemaVersion !== 2) return null;
-    return { workspaceId, name, schemaVersion };
+    const topicMode = parsed["topicMode"] ?? "shared";
+    if (topicMode !== "isolated" && topicMode !== "shared") return null;
+    if (schemaVersion === 1 && topicMode === "isolated") return null;
+    return { workspaceId, name, schemaVersion, topicMode };
   } catch {
     return null;
   }

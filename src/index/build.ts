@@ -125,7 +125,7 @@ export function buildIndex(source: IndexSource): BuiltIndex {
     nodes: manifestNodeOf(graph),
     links,
     backlinks,
-    roots: graph.rootId === null ? [] : [graph.rootId],
+    roots: [...(graph.rootIds ?? (graph.rootId === null ? [] : [graph.rootId]))],
   };
 
   const search: SearchIndex = {

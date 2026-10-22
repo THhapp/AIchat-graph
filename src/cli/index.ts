@@ -13,6 +13,7 @@ import {
   runBranch,
   runConnect,
   runCreateRoot,
+  runCreateTopic,
   runEdit,
   runNext,
 } from "./agent-commands.js";
@@ -128,6 +129,9 @@ export async function main(
         break;
       case "connect":
         exitCode = await runConnect(rest, ctx);
+        break;
+      case "create-topic":
+        exitCode = await runCreateTopic(rest, ctx);
         break;
       case "create-root":
         exitCode = await runCreateRoot(rest, ctx);

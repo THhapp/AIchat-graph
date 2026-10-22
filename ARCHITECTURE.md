@@ -13,7 +13,7 @@
 ## 2. 格式 2：一节点一份 Markdown
 
 ~~~text
-workspace.json                         # schemaVersion:2, workspaceId,name,activeNode
+workspace.json                         # schemaVersion:2, workspaceId,name,activeNode,topicMode
 topics/<任意主题目录>/topic.md           # 主题元数据，没有正文镜像或节点总表
 topics/<任意主题目录>/<nodeId>.md        # 一份文件一张真实节点
 AGENTS.md                              # 简短维护指南
@@ -22,7 +22,7 @@ AGENTS.md                              # 简短维护指南
 .aichat/runtime/                        # 服务协调、锁、未恢复事务
 ~~~
 
-主题目录在 topics 下一层；topic.md 为保留文件名。其严格 YAML 头只有 topicId、title，正文仅允许空白。主题 ID 保存在头中，目录改名不改变身份。标题不重复存放。节点默认以 ID 命名，但真正身份来自 nodeId；改名／移动保留身份。移动到另一主题目录改变归组，不改变 ID 或连接。禁止隐式按文件名重新生成身份。
+主题目录在 topics 下一层；topic.md 为保留文件名。其严格 YAML 头只有 topicId、title，正文仅允许空白。主题 ID 保存在头中，目录改名不改变身份。标题不重复存放。节点默认以 ID 命名，但真正身份来自 nodeId；改名／移动保留身份。移动到另一主题目录改变归组，不改变 ID 或连接；isolated 模式仍须满足目标主题单根、父边同主题等约束，不能仅靠移动文件完成拆图。禁止隐式按文件名重新生成身份。
 
 单节点示例（以下省略值仅为教学占位，真实 ID 必须通过 schema）：
 
@@ -60,7 +60,11 @@ GraphNode／TopicNodeDetail 新增 description，GraphTopic 可增 contentHash�
 
 ## 4. 简单结构与阅读顺序
 
-继续一棵有方向的结构树：非空工作区恰好一个 root，其余节点恰好一个 from，全部从 root 可达，无环。跨主题连接仍可存在，不增加多父、交叉边或复杂关系本体。
+主题是讨论的隔离边界。新建格式 2 工作区使用 `workspace.json` 的 `topicMode: "isolated"`：每个非空主题恰好一个 root，其余节点只能连接同主题节点，并从该主题 root 可达，无环；各主题从 01 独立编号。根节点不是全库公共入口，不要求不同主题互相连线。不增加多父、交叉关系或复杂关系本体。
+
+已有工作区缺少 topicMode 时沿用 `shared` 兼容语义：非空全库恰好一个 root，允许既有跨主题连接。显式 shared 同样兼容。格式 1 保持 shared，不自动改写旧数据或剪断关系。空库可以在停服并校验后明确切换 isolated；有内容的共享图转独立主题须另行设计显式转换，不由本轮自动执行。
+
+内部图提供全部 rootIds，旧 rootId 仅在单根时有值；索引收录全部根。命令和 HTTP 快照明确返回实际 topicMode，使界面不会把共享图假装成独立主题。单父、next／branch 及稳定身份不因分主题而改变。
 
 next 纵向继续，每个来源最多一个 next；branch 横向进入，分支内部可以 next。side／order 只用于 branch；同一来源各 branch 的 order 跨左右唯一，显式整数升序、缺省稳定 ID 后置。新建默认最大值+10。06 的 next 保持 07，06-03 必须是侧枝，不因添加分支吞掉主线。
 
@@ -72,6 +76,10 @@ V2 主题连续阅读按全图派生结构顺序过滤该主题节点，而不�
 
 已有离线 topics／search／read／validate 与在线低层 check／apply／status 保留。默认查询输出有界：搜索默认 10 项、最大 100，分页；节点正文默认 4000 UTF-16 单元、最大分段 16000，显式 --full 才取全文。返回 range {start,end,total,unit:"utf16"}、truncated、路径和匹配版本；不要切断代理对。章节标题可选定位，重复标题需明确范围。完整读取不限制必要正文保存长度。
 
+新增 `create-topic --topic-title <主题> [--directory <自命名一级目录>] [--title <首节点标题>] --body-file <文件>`，在 isolated 工作区原子创建主题及独立 root，默认首节点标题可取主题名。目录重名明确拒绝，不覆盖已有资料。create-root 继续作为空库兼容入口。search 支持 `--topic <topicId>`，在主题过滤后再分页；稳定 ID 由命令返回，用户不必手填。
+
+Agent 按用户首次给定的主题名或前端复制的上下文解析并绑定 topicId／目录，之后在当前对话沿用；重名或缺目标时只澄清实际歧义。前端打开的主题是本机阅读状态，不写入共享 activeTopic，也不能作为其他对话的默认写入目标。写入凭据继续绑定真实节点及主题，隔离模式拒绝跨主题连接。工作区身份响应可带从当前运行构建位置推导的 agentEntry（cliPath、skillPath），供续谈提示提供同版本入口，不能猜测开发目录或依赖 process.cwd。
+
 新增在线 GET /api/agent/nodes/:id?start=&length=&full=，返回节点属性、body 片段、range、truncated、实际 path／fileHash、快照版本及 editRef。editRef 为实例内短凭据，绑定工作区、节点、真实源路径与读取时哈希；可含相关主题身份元数据。离线读取不假造在线可写凭据。过期／服务重启后明确拒绝，不能按编号悄悄重定位；显示编号只能在读取时解析成稳定 ID。
 
 新增 POST /api/agent/changes（JSON、同现有写安全检查），外层 requestId 由 CLI 自动生成，具体动作：
@@ -81,6 +89,7 @@ V2 主题连续阅读按全图派生结构顺序过滤该主题节点，而不�
 - createNext：与 createBranch 共用编译路径，editRef、title、body、description、可选 state/topicId，flow 固定 next，不带 side/order。来源已有 next 即冲突，不自动 insert 或挤掉旧主线。
 - updateConnection：editRef（目标）、可选 fromRef（改接来源时必需）、flow/side/order，及 description；不能隐式改为第二个 root 或挤掉既有 next。
 - createRoot：仅空工作区可用，topicTitle、title、body、可选 state；工具生成主题、节点 ID 与路径，同一事务创建主题与根。
+- createTopic：isolated 工作区可用，topicTitle、body、可选 directory/title/state；同一事务创建新主题与独立根，title 缺省用主题标题，目录冲突不覆盖。不能借此转换 shared 工作区。
 
 服务将这些动作编译到同一个 prepareChanges／commitFiles 链路，不在 CLI 或 Skill 另造修改逻辑。低层操作补充 patchNode／updateConnection 与 V2 description 支持；已有节点更新仍可全文替换，V2 拒绝用 replaceTopic 伪造整主题节点正文，必要原文修复须定位真实单节点文件。
 
@@ -150,6 +159,20 @@ React Markdown 默认关闭原始 HTML；阻止 javascript/file 等危险链接�
 
 ## 12. 文件所有权与集成接口
 
+### 主题目录与前端打开方式
+
+隔离模式的左侧导航是可收起的主题目录：主题行打开对应图，目录展开仅展示该主题的节点，不显示 topic.md、JSON、缓存、锁或其他程序文件。没有有效打开主题时显示选择入口，不把所有主题默认合并成图；恢复上次有效打开的主题，切换时保存各主题的阅读状态。选择主题不自动打开长正文，保留图优先；不扩展为任意多层文件管理器、文件编辑器或多标签系统。
+
+当前主题名称在主界面明确可见；节点查找与阅读以当前主题为范围，不把其他主题结果悄悄混入。侧栏收起后仍可切换主题或复制其 Agent 续谈上下文。复制内容包括工作区、主题稳定 ID／真实目录、可选节点及同版本 CLI／Skill 入口；不复制全部正文或要求新 Agent 按旧单文件格式读取整主题。浏览选择与对话记录绑定分别处理。旧 shared 模式保留兼容说明，不自动迁移。
+
+### 本机日用与开发启动
+
+日用程序、开发源码和用户资料分别管理。日用入口使用私有 `.local/daily` 中明确更新的固定构建及独立运行依赖，不因开发源码时间变化而自动重建。开发入口使用当前工程构建，默认独立开发工作区与 4318 端口；日用默认 4317。开发模式不继承日用工作区配置，并拒绝意外使用已绑定的正式库。工作区身份和服务复用继续使用现有检查，不通过结束其他进程或偷偷换端口解决冲突。
+
+日用工作区由本机 `launcher.local.json` 显式绑定；开发选择保存在独立的本机配置。具体用户路径不得写入公开源码、Skill 或构建快照。资料库继续将节点正文与关系保存在主题 Markdown，缓存、本机配置与运行证据留在 `.aichat`，不把程序内部文件显示成节点，不复制用户资料到日用快照。
+
+更新日用版是独立操作：使用当前完整且未落后源码的构建，在私有暂存位置准备必要产物和独立运行依赖，做最小入口检查后替换；不自动获取更新、不创建发布平台。日用快照仍在使用时拒绝替换，准备失败保留旧版本。清理只针对本操作创建并已核对绝对边界的暂存资源，不清理用户资料和未恢复事务。
+
 - [core](<src/core/>)／[index](<src/index/>)：纯解析、结构校验与索引，不依赖写盘或服务。
 - [storage](<src/storage/>)：扫描、初始化、候选变更、转换与可恢复事务，复用公共解析入口。
 - [service](<src/service/>)：有效快照、读取凭据、受控 API、资源接入与导出调度；共享 [DTO](<src/shared/protocol.ts>) 统一定义跨层契约。
@@ -161,7 +184,7 @@ React Markdown 默认关闭原始 HTML；阻止 javascript/file 等危险链接�
 
 ## 13. 必要验收与停止
 
-先各自受影响检查，集成后统一类型检查、既有测试和生产构建。复用现有 Vitest 与 Edge CDP／Node WebSocket，非必要不安装重型平台，不追覆盖率或重复全量旧验收。
+先按改动风险选择受影响的既有检查，集成后只补必要的类型检查、针对性测试和生产构建，不默认重跑全部历史验收。纯文档或 Skill 文字修改检查格式与引用；界面调整验证受影响行为；存储、迁移和覆盖写入重点验证数据完整性。复用现有 Vitest 与 Edge CDP／Node WebSocket，非必要不安装重型平台，不追覆盖率或重复全量旧验收。
 
 隔离工作区验证：新建格式 2、真实节点独立存储；原位片段修改、新分支、连接说明、旧凭据冲突不覆盖；无效源保持旧有效图；必要 V1 转换身份／正文／状态／顺序／连接完整，源未改。
 

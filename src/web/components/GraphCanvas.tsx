@@ -265,11 +265,14 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
 
   useEffect(() => {
     if (fitSignal === lastFitSignal.current) return;
+    // Expanding a collapsed topic changes its layout asynchronously. Fit only
+    // once that expanded geometry exists, not the old (or empty) canvas.
+    if (layout === null || (layout.structureVersion !== null && String(layout.structureVersion) !== view.structureKey)) return;
     lastFitSignal.current = fitSignal;
     requestAnimationFrame(() => {
       fitView({ padding: 0.16, duration: 200, maxZoom: 1 }).catch(() => undefined);
     });
-  }, [fitSignal, fitView]);
+  }, [fitSignal, fitView, layout, view.structureKey]);
 
   const handleNodeClick = useCallback<NodeMouseHandler<Node<TopicCardData>>>(
     (_event, node) => { onSelectNode(node.id); },

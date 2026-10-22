@@ -45,8 +45,9 @@ export interface WorkspaceGraph {
   readonly workspaceId: string;
   readonly name: string;
   readonly activeNode: string | null;
-  /** 空工作区为 null；非空工作区恰好一个。 */
+  /** 仅单根时有值；隔离多主题或空工作区为 null。 */
   readonly rootId: string | null;
+  readonly rootIds?: readonly string[];
   readonly topics: readonly WorkspaceTopicView[];
   /** 按派生编号稳定排序；含正文，调用方可用 toNodeSummary 转成轻量视图。 */
   readonly nodes: readonly WorkspaceNodeView[];
@@ -141,6 +142,7 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
     return { ok: false, diagnostics };
   }
   const workspace = workspaceParsed.data;
+  const isolated = workspace.topicMode === "isolated";
 
   const nodesById = new Map<string, IndexedNode>();
   const topicIds = new Set<string>();
@@ -214,7 +216,11 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
         continue;
       }
       if (!nodeById.has(node.from)) {
-        diagnose(node, "NODE_FROM_UNKNOWN", "from 指向不存在的节点 " + node.from + "（跨主题连接合法）");
+        diagnose(node, "NODE_FROM_UNKNOWN", "from 指向不存在的节点 " + node.from);
+        continue;
+      }
+      if (isolated && nodeById.get(node.from)?.topicId !== node.topicId) {
+        diagnose(node, "NODE_CROSS_TOPIC", "隔离主题不能连接其他主题的节点 " + node.from);
         continue;
       }
       const siblings = childrenOf.get(node.from);
@@ -223,7 +229,18 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
     }
   }
 
-  if (allNodes.length > 0) {
+  if (isolated) {
+    for (const topic of input.topics) {
+      const topicRoots = roots.filter((node) => node.topicId === topic.topicId);
+      if (topic.nodes.length > 0 && topicRoots.length === 0) {
+        diagnostics.push(makeDiagnostic("NODE_ROOT_MISSING", "非空主题必须恰好有一个 root", {
+          topicId: topic.topicId, topicPath: topic.document.path,
+        }));
+      } else if (topicRoots.length > 1) {
+        for (const root of topicRoots) diagnose(root, "NODE_ROOT_MULTIPLE", "每个主题只能有一个 root");
+      }
+    }
+  } else if (allNodes.length > 0) {
     if (roots.length === 0) {
       diagnostics.push(
         makeDiagnostic("NODE_ROOT_MISSING", "非空工作区必须恰好有一个 root 节点"),
@@ -291,8 +308,8 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
 
   const rootNode = roots.length === 1 ? roots[0] : undefined;
   const reachable = new Set<string>();
-  if (rootNode) {
-    const queue: ParsedNode[] = [rootNode];
+  if (isolated || rootNode) {
+    const queue: ParsedNode[] = isolated ? [...roots] : [rootNode as ParsedNode];
     while (queue.length > 0) {
       const current = queue.shift() as ParsedNode;
       if (reachable.has(current.id)) continue;
@@ -369,7 +386,7 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
     return counter;
   };
 
-  if (rootNode) assignChain(rootNode.id, null, 1);
+  for (const root of isolated ? roots : rootNode ? [rootNode] : []) assignChain(root.id, null, 1);
 
   if (numberCollision || numbers.size !== allNodes.length) {
     return {
@@ -396,13 +413,14 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
         branchIds: branches,
       };
     })
-    .sort((left, right) => byNumberSegments(left.number, right.number));
+    .sort((left, right) => (isolated ? left.topicId.localeCompare(right.topicId) : 0) || byNumberSegments(left.number, right.number));
 
   const graph: WorkspaceGraph = {
     workspaceId: workspace.workspaceId,
     name: workspace.name,
     activeNode: workspace.activeNode,
     rootId: rootNode ? rootNode.id : null,
+    rootIds: roots.map((node) => node.id).sort(),
     topics: topicViews,
     nodes: views,
   };

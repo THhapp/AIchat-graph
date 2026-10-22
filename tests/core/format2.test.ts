@@ -234,3 +234,20 @@ describe("格式 2：严格校验", () => {
     expect(validateWorkspace({ workspace: { schemaVersion: 1, workspaceId: "w", name: "n", activeNode: null }, topics: [] }).ok).toBe(true);
   });
 });
+
+describe("主题模式兼容", () => {
+  it("旧格式 1/2 未声明主题模式仍接受共享根与跨主题连接", () => {
+    expect(v1Result().graph?.rootIds).toHaveLength(1);
+    expect(v2Result().graph?.rootIds).toHaveLength(1);
+    const explicit = parseWorkspaceDocuments({ workspace: { ...v2Workspace, topicMode: "shared" }, documents: v2Documents() });
+    expect(explicit.ok).toBe(true);
+    const isolated = parseWorkspaceDocuments({ workspace: { ...v2Workspace, topicMode: "isolated" }, documents: v2Documents() });
+    expect(isolated.ok).toBe(false);
+    expect(isolated.diagnostics.some((item) => item.code === "NODE_CROSS_TOPIC")).toBe(true);
+  });
+  it("格式1不能伪装成隔离模式", () => {
+    const invalid = parseWorkspaceDocuments({ workspace: { ...v2Workspace, schemaVersion: 1, topicMode: "isolated" }, documents: [] });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.diagnostics[0]?.code).toBe("WORKSPACE_SCHEMA_INVALID");
+  });
+});

@@ -63,6 +63,7 @@
 .nav-item__filter { flex: none; width: 24px; height: 24px; padding: 0; font-size: 10px; color: var(--text-muted); }
 .nav-item__filter[aria-pressed='true'] { color: var(--accent-strong); }
 .nav-list--tree .nav-item--chain { padding-right: var(--space-1); }
+.topic-folder > .nav-list--tree { margin-left: 12px; border-left: 1px solid var(--border); }
 .sidebar__placeholder { padding: var(--space-2) var(--space-4); color: var(--text-muted); font-size: var(--text-sm); }
 
 /* detail */
@@ -225,6 +226,7 @@
   background: var(--panel-bg);
   max-height: 44vh;
   overflow: auto;
+  flex: 0 0 auto;
 }
 .export-panel__hint {
   padding: var(--space-2) var(--space-4);
