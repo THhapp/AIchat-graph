@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 /**
  * Builds the self-contained offline reader.
  *
- * Requirements (ARCHITECTURE 10/12):
+ * Requirements:
  * - dist/offline/reader.js is a single IIFE containing React and every dependency:
  *   no import statements, no code-split chunks, no external modules.
  * - dist/offline/reader.css has every url() (KaTeX fonts) inlined as data URIs.

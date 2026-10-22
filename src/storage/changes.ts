@@ -2,30 +2,54 @@
  * 候选变更集合：把一份 ChangeRequest 应用到"本次扫描得到的文本"上，
  * 纯同步地算出可提交的文件与全图校验结果。
  *
- * 边界（对应 ARCHITECTURE 7.2／8.1）：
+ * 边界：
  * - 不读文件、不写文件、不取锁、不发布快照；所有事实来自调用方传入的 WorkspaceFiles；
  * - 只改动本次操作涉及的卡片区块与目标文件的 frontmatter；其他卡片正文、BOM、CRLF 原样保留；
  * - frontmatter 用 yaml Document 做受控元数据更新；正文只按 AST 源码范围拼接，不用正则解析 Markdown；
  * - 返回的 CommitFileInput.expectedSha256 一律取自调用方声明，绝不替调用者补旧哈希；
  * - 最终必须整份工作区 parse + graph 校验通过，否则不返回任何可提交候选。
  */
-import { parseDocument, stringify as stringifyYaml } from "yaml";
-import type { ParsedNode as YamlParsedNode } from "yaml";
-import type { Document } from "yaml";
+import { changeRequestSchema } from "./changes/v1-request.js";
+import type {
+  CreateTopicOperation,
+  CreateNodeOperation,
+  UpdateNodeOperation,
+  InsertNextNodeInput,
+  InsertNextOperation,
+  MoveBranchOperation,
+  MoveNodeToTopicOperation,
+  ReplaceTopicOperation,
+  SetDiscussionFocusOperation,
+  RemoveLeafOperation,
+  MergeReconnectEntry,
+  MergeNodesOperation,
+  Operation,
+  ChangeRequest,
+} from "./changes/v1-request.js";
+export * from "./changes/v1-request.js";
+import {
+  normalizeNewlines,
+  detectNewline,
+  renderNewBlock,
+  patchBlock,
+  renderText,
+  setNodeMeta,
+  stateFromParsed,
+  newTopicState,
+  resync,
+  appendBlock,
+  insertBlockAfter,
+  removeBlock,
+} from "./changes/v1-text.js";
+import type { NodeView, TopicState } from "./changes/v1-text.js";
 import { z } from "zod";
 import {
-  branchSideSchema,
-  nodeFlowSchema,
-  nodeIdSchema,
-  nodeStateSchema,
   parseTopicDocument,
-  topicIdSchema,
   nextBranchOrder,
   validateWorkspace,
   workspaceMetaSchema,
   type Diagnostic,
   type NodeMeta,
-  type ParsedNode,
   type ParsedTopic,
   type WorkspaceMeta,
 } from "../core/index.js";
@@ -55,273 +79,6 @@ export { ChangeError, badRequest, conflict, validationError, flattenChangeReques
 export type { ChangeErrorCode, ChangeErrorOptions, PreparedChanges };
 export type { FlatIssue } from "./changes-shared.js";
 
-export interface CreateTopicOperation {
-  readonly op: "createTopic";
-  readonly topicId: string;
-  readonly path: string;
-  readonly title: string;
-}
-
-export interface CreateNodeOperation {
-  readonly op: "createNode";
-  readonly nodeId: string;
-  readonly topicId: string;
-  readonly title: string;
-  readonly body: string;
-  readonly from: string | null;
-  readonly flow: NodeMeta["flow"];
-  readonly state: NodeMeta["state"];
-  readonly side?: NodeMeta["side"] | undefined;
-  readonly order?: number | undefined;
-  readonly label?: string | undefined;
-  readonly summary?: string | undefined;
-}
-
-export interface UpdateNodeOperation {
-  readonly op: "updateNode";
-  readonly nodeId: string;
-  readonly title?: string | undefined;
-  readonly body?: string | undefined;
-  readonly state?: NodeMeta["state"] | undefined;
-  /** null 删除显式摘要；省略表示不改。 */
-  readonly summary?: string | null | undefined;
-}
-
-export interface InsertNextNodeInput {
-  readonly nodeId: string;
-  readonly topicId: string;
-  readonly title: string;
-  readonly body: string;
-  readonly state: NodeMeta["state"];
-  readonly label?: string | undefined;
-  readonly summary?: string | undefined;
-}
-
-export interface InsertNextOperation {
-  readonly op: "insertNext";
-  readonly sourceId: string;
-  readonly node: InsertNextNodeInput;
-}
-
-export interface MoveBranchOperation {
-  readonly op: "moveBranch";
-  readonly nodeId: string;
-  readonly from: string;
-  readonly side: NodeMeta["side"];
-  readonly order: number;
-}
-
-export interface MoveNodeToTopicOperation {
-  readonly op: "moveNodeToTopic";
-  readonly nodeId: string;
-  readonly topicId: string;
-}
-
-export interface ReplaceTopicOperation {
-  readonly op: "replaceTopic";
-  readonly topicId: string;
-  readonly path: string;
-  readonly raw: string;
-}
-
-export interface SetDiscussionFocusOperation {
-  readonly op: "setDiscussionFocus";
-  readonly nodeId: string | null;
-}
-
-export interface RemoveLeafOperation {
-  readonly op: "removeLeaf";
-  readonly nodeId: string;
-}
-
-/** 受影响边的完整新结构；未给出的 side／order 表示删除该字段。 */
-export interface MergeReconnectEntry {
-  readonly nodeId: string;
-  readonly from: string | null;
-  readonly flow: NodeMeta["flow"];
-  readonly side?: NodeMeta["side"] | undefined;
-  readonly order?: number | undefined;
-  readonly label?: string | undefined;
-}
-
-export interface MergeNodesOperation {
-  readonly op: "mergeNodes";
-  readonly survivorId: string;
-  readonly mergedNodeIds: string[];
-  readonly body: string;
-  readonly reconnect: MergeReconnectEntry[];
-  readonly activeNode: string | null;
-}
-
-export type Operation =
-  | CreateTopicOperation
-  | CreateNodeOperation
-  | UpdateNodeOperation
-  | InsertNextOperation
-  | MoveBranchOperation
-  | MoveNodeToTopicOperation
-  | ReplaceTopicOperation
-  | SetDiscussionFocusOperation
-  | RemoveLeafOperation
-  | MergeNodesOperation;
-
-export interface ChangeRequest {
-  readonly workspaceId: string;
-  readonly requestId: string;
-  readonly expectedFiles: Record<string, string | null>;
-  readonly operations: Operation[];
-}
-
-/* ------------------------------------------------------------------ *
- * 严格运行时校验：拒绝未知／多余字段，不把类型断言当校验
- * ------------------------------------------------------------------ */
-
-const sha256HexSchema = z
-  .string()
-  .regex(/^[0-9a-f]{64}$/, "SHA-256 必须是 64 位小写十六进制");
-
-const titleSchema = z.string().superRefine((value, ctx) => {
-  if (value.trim().length === 0) {
-    ctx.addIssue({ code: "custom", message: "标题不能为空" });
-    return;
-  }
-  if (/[\r\n]/.test(value)) {
-    ctx.addIssue({ code: "custom", message: "标题必须是单行文本" });
-    return;
-  }
-  // 标题里的 HTML 注释片段会被解析成别人的 node 标记，必须拒绝。
-  if (/<!--|-->|node:/.test(value)) {
-    ctx.addIssue({ code: "custom", message: "标题不能包含伪 ID 标记（<!--、-->、node:）" });
-  }
-});
-
-const labelSchema = z.string().superRefine((value, ctx) => {
-  if (value.trim().length === 0) ctx.addIssue({ code: "custom", message: "label 不能为空" });
-  else if (/[\r\n]/.test(value)) ctx.addIssue({ code: "custom", message: "label 必须是单行文本" });
-});
-
-const summarySchema = z.string().superRefine((value, ctx) => {
-  if (value.trim().length === 0) ctx.addIssue({ code: "custom", message: "summary 不能为空" });
-  else if (/[\r\n]/.test(value)) {
-    ctx.addIssue({ code: "custom", message: "summary 必须是单行文本" });
-  }
-});
-
-const createTopicSchema = z.strictObject({
-  op: z.literal("createTopic"),
-  topicId: topicIdSchema,
-  path: z.string().min(1),
-  title: titleSchema,
-});
-
-const createNodeSchema = z.strictObject({
-  op: z.literal("createNode"),
-  nodeId: nodeIdSchema,
-  topicId: topicIdSchema,
-  title: titleSchema,
-  body: z.string(),
-  from: nodeIdSchema.nullable(),
-  flow: nodeFlowSchema,
-  state: nodeStateSchema,
-  side: branchSideSchema.optional(),
-  order: z.int().optional(),
-  label: labelSchema.optional(),
-  summary: summarySchema.optional(),
-});
-
-const updateNodeSchema = z.strictObject({
-  op: z.literal("updateNode"),
-  nodeId: nodeIdSchema,
-  title: titleSchema.optional(),
-  body: z.string().optional(),
-  state: nodeStateSchema.optional(),
-  summary: summarySchema.nullable().optional(),
-});
-
-const insertNextSchema = z.strictObject({
-  op: z.literal("insertNext"),
-  sourceId: nodeIdSchema,
-  node: z.strictObject({
-    nodeId: nodeIdSchema,
-    topicId: topicIdSchema,
-    title: titleSchema,
-    body: z.string(),
-    state: nodeStateSchema,
-    label: labelSchema.optional(),
-    summary: summarySchema.optional(),
-  }),
-});
-
-const moveBranchSchema = z.strictObject({
-  op: z.literal("moveBranch"),
-  nodeId: nodeIdSchema,
-  from: nodeIdSchema,
-  side: branchSideSchema,
-  order: z.int(),
-});
-
-const moveNodeToTopicSchema = z.strictObject({
-  op: z.literal("moveNodeToTopic"),
-  nodeId: nodeIdSchema,
-  topicId: topicIdSchema,
-});
-
-const replaceTopicSchema = z.strictObject({
-  op: z.literal("replaceTopic"),
-  topicId: topicIdSchema,
-  path: z.string().min(1),
-  raw: z.string(),
-});
-
-const setDiscussionFocusSchema = z.strictObject({
-  op: z.literal("setDiscussionFocus"),
-  nodeId: nodeIdSchema.nullable(),
-});
-
-const removeLeafSchema = z.strictObject({
-  op: z.literal("removeLeaf"),
-  nodeId: nodeIdSchema,
-});
-
-const reconnectSchema = z.strictObject({
-  nodeId: nodeIdSchema,
-  from: nodeIdSchema.nullable(),
-  flow: nodeFlowSchema,
-  side: branchSideSchema.optional(),
-  order: z.int().optional(),
-  label: labelSchema.optional(),
-});
-
-const mergeNodesSchema = z.strictObject({
-  op: z.literal("mergeNodes"),
-  survivorId: nodeIdSchema,
-  mergedNodeIds: z.array(nodeIdSchema).min(1),
-  body: z.string(),
-  reconnect: z.array(reconnectSchema),
-  activeNode: nodeIdSchema.nullable(),
-});
-
-const operationSchema = z.discriminatedUnion("op", [
-  createTopicSchema,
-  createNodeSchema,
-  updateNodeSchema,
-  insertNextSchema,
-  moveBranchSchema,
-  moveNodeToTopicSchema,
-  replaceTopicSchema,
-  setDiscussionFocusSchema,
-  removeLeafSchema,
-  mergeNodesSchema,
-]);
-
-/** 严格请求 schema；service 可在任何计算前复用同一套结构校验。 */
-export const changeRequestSchema = z.strictObject({
-  workspaceId: z.string().min(1),
-  requestId: z.uuid(),
-  expectedFiles: z.record(z.string().min(1), sha256HexSchema.nullable()),
-  operations: z.array(operationSchema),
-});
-
 /* ------------------------------------------------------------------ *
  * 内部工具
  * ------------------------------------------------------------------ */
@@ -332,15 +89,6 @@ function issueList(error: z.ZodError): Array<{ path: string; message: string; co
     message: issue.message,
     code: issue.code,
   }));
-}
-
-function normalizeNewlines(value: string, nl: string): string {
-  const lf = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  return nl === "\n" ? lf : lf.replace(/\n/g, nl);
-}
-
-function detectNewline(text: string): string {
-  return text.includes("\r\n") ? "\r\n" : "\n";
 }
 
 function requireContentPath(rawPath: string): string {
@@ -354,28 +102,6 @@ function requireContentPath(rawPath: string): string {
     throw badRequest("只允许 workspace.json 与 topics 下的 Markdown：" + normalized);
   }
   return normalized;
-}
-
-function metaToPlain(meta: NodeMeta): Record<string, unknown> {
-  const plain: Record<string, unknown> = {
-    from: meta.from,
-    flow: meta.flow,
-    state: meta.state,
-  };
-  if (meta.side !== undefined) plain["side"] = meta.side;
-  if (meta.order !== undefined) plain["order"] = meta.order;
-  if (meta.label !== undefined) plain["label"] = meta.label;
-  if (meta.summary !== undefined) plain["summary"] = meta.summary;
-  return plain;
-}
-
-function metaFromParsed(node: ParsedNode): NodeMeta {
-  const meta: NodeMeta = { from: node.from, flow: node.flow, state: node.state };
-  if (node.side !== undefined) meta.side = node.side;
-  if (node.order !== undefined) meta.order = node.order;
-  if (node.label !== undefined) meta.label = node.label;
-  if (node.summaryExplicit) meta.summary = node.summary;
-  return meta;
 }
 
 interface MetaInput {
@@ -416,410 +142,6 @@ function assertStructure(meta: NodeMeta, where: string): void {
     return;
   }
   // branch 的 order 可缺省：既有文件允许缺省，受控新增按 core 的 nextBranchOrder 补默认值。
-}
-
-/* ------------------------------------------------------------------ *
- * 候选模型
- * ------------------------------------------------------------------ */
-
-interface NodeView {
-  readonly id: string;
-  title: string;
-  body: string;
-  meta: NodeMeta;
-  /** 以下偏移都相对该卡片区块（ranges.node 切片）起点，用于局部替换。 */
-  readonly headingStart: number;
-  readonly headingEnd: number;
-  readonly titleRange: { readonly start: number; readonly end: number } | null;
-  readonly bodyStart: number;
-  readonly bodyEnd: number;
-}
-
-type YamlDocument = Document.Parsed<YamlParsedNode, true>;
-
-interface TopicState {
-  topicId: string;
-  path: string;
-  title: string;
-  nl: string;
-  /** 文件开头至 frontmatter YAML 内容之前（含可选 BOM 与起始 --- 行）。 */
-  yamlLeading: string;
-  /** YAML 内容之后至第一张卡片之前（含结束 --- 行）。 */
-  yamlTrailing: string;
-  yamlText: string;
-  yamlDoc: YamlDocument;
-  order: string[];
-  nodes: Map<string, NodeView>;
-  blocks: Map<string, string>;
-  text: string;
-  /** 扫描时是否已存在于磁盘。 */
-  existing: boolean;
-  originalText: string | null;
-  everHadNode: boolean;
-}
-
-/** 标题里的 Markdown 控制字符必须转义，否则写回后 H2 的可见文字会变。 */
-const TITLE_SPECIAL = /([\\\x60*_\[\]<>~|&])/g;
-
-/** 卡片标题的单行转义：只处理 Markdown 会吃掉或改变语义的字符。 */
-function escapeCardTitle(title: string): string {
-  return title.replace(TITLE_SPECIAL, "\\$1");
-}
-
-function headingLine(nodeId: string, title: string): string {
-  return "## " + escapeCardTitle(title) + " <!-- node:" + nodeId + " -->";
-}
-
-/** 新建卡片区块；正文里的三级以下标题原样保留。 */
-function renderNewBlock(
-  nodeId: string,
-  title: string,
-  body: string,
-  nl: string,
-  tail: string,
-): string {
-  const heading = headingLine(nodeId, title);
-  const normalized = normalizeNewlines(body, nl).replace(/\s+$/, "");
-  if (normalized.length === 0) return heading + tail;
-  return heading + nl + nl + normalized + tail;
-}
-
-/**
- * 只替换标题或正文，保留原区块的其余字节。
- *
- * ranges.node 是"H2 到下一张卡 H2"的整块范围，ranges.body 只是 trim 后的展示范围，
- * 都不能直接当作替换边界；这里用相对偏移定位标题文字与正文，分隔空白、尾随空白、
- * BOM 与 CRLF 全部原样保留。
- */
-function patchBlock(
-  block: string,
-  node: NodeView,
-  options: { title?: string | undefined; body?: string | undefined; nl: string },
-): string {
-  // 先替换正文（更靠后），再替换标题；否则标题长度变化会让正文偏移失效。
-  let next = block;
-  if (options.body !== undefined) {
-    const normalized = normalizeNewlines(options.body, options.nl).replace(/\s+$/, "");
-    const trailing = next.slice(node.bodyEnd);
-    if (normalized.length === 0) {
-      // 正文清空：保留卡片本身与尾随空白（末卡可能没有结尾换行）。
-      next = next.slice(0, node.headingEnd) + (trailing.length > 0 ? trailing : options.nl);
-    } else {
-      const gap = next.slice(node.headingEnd, node.bodyStart);
-      const separator = /\r?\n/.test(gap) ? gap : options.nl + options.nl;
-      next = next.slice(0, node.headingEnd) + separator + normalized + trailing;
-    }
-  }
-  if (options.title === undefined || options.title === node.title) return next;
-
-  const escaped = escapeCardTitle(options.title);
-  if (node.titleRange) {
-    return next.slice(0, node.titleRange.start) + escaped + next.slice(node.titleRange.end);
-  }
-  const heading = next.slice(node.headingStart, node.headingEnd);
-  const prefixEnd = heading.indexOf("##") + 2;
-  const commentAt = heading.indexOf("<!--");
-  const comment = commentAt >= 0 ? heading.slice(commentAt) : "<!-- node:" + node.id + " -->";
-  return (
-    next.slice(0, node.headingStart) +
-    heading.slice(0, prefixEnd) +
-    " " +
-    escaped +
-    " " +
-    comment +
-    next.slice(node.headingEnd)
-  );
-}
-
-function renderText(state: TopicState): string {
-  let blocks = "";
-  for (const id of state.order) blocks += state.blocks.get(id) ?? "";
-  return state.yamlLeading + state.yamlText + state.yamlTrailing + blocks;
-}
-
-function parseYamlDoc(yamlText: string, path: string): YamlDocument {
-  const doc = parseDocument(yamlText, {
-    schema: "core",
-    uniqueKeys: true,
-    strict: true,
-    customTags: [],
-    version: "1.2",
-  });
-  if (doc.errors.length > 0) {
-    const message = doc.errors.map((error) => error.message).join("; ");
-    throw validationError("frontmatter 无法解析：" + path + "：" + message);
-  }
-  return doc as YamlDocument;
-}
-
-function setNodeMeta(state: TopicState, nodeId: string, meta: NodeMeta | null): void {
-  const doc = state.yamlDoc;
-  if (meta === null) doc.deleteIn(["nodes", nodeId]);
-  else doc.setIn(["nodes", nodeId], metaToPlain(meta));
-  if (doc.errors.length > 0) {
-    const message = doc.errors.map((error) => error.message).join("; ");
-    throw validationError("frontmatter 元数据更新失败：" + state.path + "：" + message);
-  }
-  state.yamlText = normalizeNewlines(doc.toString({ lineWidth: 0 }), state.nl);
-}
-
-function makeState(options: {
-  topicId: string;
-  path: string;
-  title: string;
-  nl: string;
-  yamlLeading: string;
-  yamlTrailing: string;
-  yamlText: string;
-  yamlDoc: YamlDocument;
-  originalText: string | null;
-  existing: boolean;
-}): TopicState {
-  return {
-    topicId: options.topicId,
-    path: options.path,
-    title: options.title,
-    nl: options.nl,
-    yamlLeading: options.yamlLeading,
-    yamlTrailing: options.yamlTrailing,
-    yamlText: options.yamlText,
-    yamlDoc: options.yamlDoc,
-    order: [],
-    nodes: new Map(),
-    blocks: new Map(),
-    text: "",
-    existing: options.existing,
-    originalText: options.originalText,
-    everHadNode: false,
-  };
-}
-
-function nodeViewFrom(
-  node: ParsedNode,
-  text: string,
-  blockStart: number,
-  blockLength: number,
-  path: string,
-): { node: ParsedNode; block: string; view: NodeView } {
-  const block = text.slice(blockStart, blockStart + blockLength);
-  const rel = (range: { start: number; end: number }) => ({
-    start: range.start - blockStart,
-    end: range.end - blockStart,
-  });
-  // 格式 1 一定有 H2 标题范围；缺省说明不是本模块该处理的格式 2 节点。
-  const headingRange = node.ranges.heading;
-  if (!headingRange) {
-    throw validationError("格式 1 卡片缺少标题范围：" + node.id + "（" + path + "）");
-  }
-  const heading = rel(headingRange);
-  const body = rel(node.ranges.body);
-  if (
-    heading.start < 0 ||
-    heading.end > block.length ||
-    body.start < heading.end ||
-    body.end > block.length
-  ) {
-    throw validationError("卡片源码范围异常：" + node.id + "（" + path + "）");
-  }
-  return {
-    node,
-    block,
-    view: {
-      id: node.id,
-      title: node.title,
-      body: node.body,
-      meta: metaFromParsed(node),
-      headingStart: heading.start,
-      headingEnd: heading.end,
-      titleRange: node.ranges.title ? rel(node.ranges.title) : null,
-      bodyStart: body.start,
-      bodyEnd: body.end,
-    },
-  };
-}
-
-/** 从一次成功的解析构造候选状态；未修改区块的原文切片保持逐字节一致。 */
-function stateFromParsed(
-  topic: ParsedTopic,
-  options: { path: string; text: string; originalText: string | null; existing: boolean },
-): TopicState {
-  const text = options.text;
-  const contentRange = topic.document.frontmatterContentRange;
-  if (!contentRange) throw validationError("主题缺少 frontmatter 内容范围：" + options.path);
-  const sorted = [...topic.nodes].sort(
-    (left, right) => left.ranges.node.start - right.ranges.node.start,
-  );
-  const firstStart = sorted.length > 0 ? (sorted[0] as ParsedNode).ranges.node.start : text.length;
-  const nl = detectNewline(text);
-  const yamlText = text.slice(contentRange.start, contentRange.end);
-  const state = makeState({
-    topicId: topic.topicId,
-    path: options.path,
-    title: topic.title,
-    nl,
-    yamlLeading: text.slice(0, contentRange.start),
-    yamlTrailing: text.slice(contentRange.end, firstStart),
-    yamlText,
-    yamlDoc: parseYamlDoc(yamlText, options.path),
-    originalText: options.originalText,
-    existing: options.existing,
-  });
-  for (const node of sorted) {
-    const start = node.ranges.node.start;
-    const built = nodeViewFrom(node, text, start, node.ranges.node.end - start, options.path);
-    state.order.push(node.id);
-    state.blocks.set(node.id, built.block);
-    state.nodes.set(node.id, built.view);
-  }
-  state.everHadNode = state.order.length > 0;
-  state.text = renderText(state);
-  return state;
-}
-
-/** 新主题：frontmatter 从空 nodes 开始，首卡必须由同批 createNode 提供。 */
-function newTopicState(topicId: string, path: string, title: string): TopicState {
-  const nl = "\n";
-  const yamlText = normalizeNewlines(
-    stringifyYaml({ schemaVersion: 1, topicId, title, nodes: {} }, { lineWidth: 0 }),
-    nl,
-  );
-  const state = makeState({
-    topicId,
-    path,
-    title,
-    nl,
-    yamlLeading: "---" + nl,
-    yamlTrailing: "---" + nl + nl,
-    yamlText,
-    yamlDoc: parseYamlDoc(yamlText, path),
-    originalText: null,
-    existing: false,
-  });
-  state.text = renderText(state);
-  return state;
-}
-
-/**
- * 用当前候选文本重新解析并回填相对偏移。
- *
- * - verify=true（操作结束时）额外核对标题与元数据是否按预期落到源码里；
- * - verify=false（批量重算偏移）只刷新位置，供后续局部替换使用；
- * - 新主题在首卡落盘前允许暂时没有卡片。
- */
-function resync(state: TopicState, verify: boolean): void {
-  state.text = renderText(state);
-  if (state.order.length === 0) return;
-  const result = parseTopicDocument(state.text, { path: state.path });
-  if (!result.ok || !result.topic) {
-    throw validationError("候选主题无法通过解析：" + state.path, result.diagnostics, {
-      path: state.path,
-    });
-  }
-  const parsed = result.topic;
-  if (parsed.topicId !== state.topicId) {
-    throw validationError("候选主题的 topicId 发生变化：" + state.path);
-  }
-  const seen = new Set(parsed.nodes.map((node) => node.id));
-  for (const id of state.order) {
-    if (!seen.has(id)) throw validationError("候选主题缺少卡片：" + id + "（" + state.path + "）");
-  }
-  if (seen.size !== state.order.length) {
-    throw validationError("候选主题出现未预期的卡片：" + state.path, result.diagnostics);
-  }
-  state.title = parsed.title;
-  for (const node of parsed.nodes) {
-    const index = state.order.indexOf(node.id);
-    const block = state.blocks.get(node.id) ?? "";
-    if (index >= 0) {
-      const built = nodeViewFrom(node, state.text, startOfBlock(state, index), block.length, state.path);
-      const previous = state.nodes.get(node.id);
-      if (verify && previous) {
-        if (node.title !== previous.title) {
-          throw validationError(
-            "标题无法在 Markdown 中稳定呈现：" + previous.title + " → " + node.title,
-            [],
-            { path: state.path, nodeId: node.id },
-          );
-        }
-        const expected = previous.meta;
-        const actual = metaFromParsed(node);
-        if (
-          expected.from !== actual.from ||
-          expected.flow !== actual.flow ||
-          expected.state !== actual.state ||
-          expected.side !== actual.side ||
-          expected.order !== actual.order ||
-          expected.label !== actual.label ||
-          expected.summary !== actual.summary
-        ) {
-          throw validationError("frontmatter 与卡片元数据不一致：" + node.id, [], {
-            path: state.path,
-            nodeId: node.id,
-          });
-        }
-      }
-      state.blocks.set(node.id, built.block);
-      state.nodes.set(node.id, {
-        ...built.view,
-        // 尚未确认的新值在 verify=false 时由操作方自己维持，这里只刷新位置。
-        title: previous && !verify ? previous.title : built.view.title,
-        body: previous && !verify ? previous.body : built.view.body,
-        meta: previous && !verify ? previous.meta : built.view.meta,
-      });
-    }
-  }
-}
-
-/** 第 index 张卡片在 state.text 中的起点。 */
-function startOfBlock(state: TopicState, index: number): number {
-  let offset = state.yamlLeading.length + state.yamlText.length + state.yamlTrailing.length;
-  for (let i = 0; i < index; i += 1) {
-    offset += (state.blocks.get(state.order[i] as string) ?? "").length;
-  }
-  return offset;
-}
-
-function endsWithBlankLine(block: string): boolean {
-  const trimmed = block.trimEnd();
-  const tail = block.slice(trimmed.length);
-  return tail.includes("\n\n") || tail.includes("\r\n\r\n");
-}
-
-function withBlankLine(block: string, nl: string): string {
-  return endsWithBlankLine(block) ? block : block + nl;
-}
-
-function appendBlock(state: TopicState, nodeId: string, block: string): void {
-  const lastId = state.order.length > 0 ? state.order[state.order.length - 1] : undefined;
-  if (lastId !== undefined) {
-    const lastBlock = state.blocks.get(lastId) ?? "";
-    if (!endsWithBlankLine(lastBlock)) state.blocks.set(lastId, lastBlock + state.nl);
-  }
-  state.blocks.set(nodeId, block);
-  state.order.push(nodeId);
-}
-
-function insertBlockAfter(
-  state: TopicState,
-  afterId: string,
-  nodeId: string,
-  block: string,
-): void {
-  state.blocks.set(nodeId, withBlankLine(block, state.nl));
-  const index = state.order.indexOf(afterId);
-  if (index < 0) state.order.push(nodeId);
-  else state.order.splice(index + 1, 0, nodeId);
-}
-
-function removeBlock(state: TopicState, nodeId: string): NodeView | undefined {
-  const node = state.nodes.get(nodeId);
-  if (!node) return undefined;
-  const index = state.order.indexOf(nodeId);
-  if (index >= 0) state.order.splice(index, 1);
-  state.blocks.delete(nodeId);
-  state.nodes.delete(nodeId);
-  setNodeMeta(state, nodeId, null);
-  return node;
 }
 
 /* ------------------------------------------------------------------ *

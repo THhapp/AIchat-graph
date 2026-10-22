@@ -70,4 +70,4 @@ HTML 包含完整主题、分支、脚本、样式和必要资源，移走后可
 
 ## 开发
 
-源码开发、Windows 辅助启动器、固定运行版本的准备与更新、验证命令见 [DEVELOPMENT.md](DEVELOPMENT.md)。接口和数据约束见 [ARCHITECTURE.md](ARCHITECTURE.md)，开发协作规则见 [AGENTS.md](AGENTS.md)。
+开发入口、运行版本管理、架构与数据安全约束统一见 [开发说明](DEVELOPMENT.md)。Agent 协作遵循 [开发约定](AGENTS.md)。

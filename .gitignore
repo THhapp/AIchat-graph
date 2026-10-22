@@ -40,9 +40,9 @@ yarn-error.log*
 /.local/
 
 # Local workspaces that must not be committed by accident.
-# The default workspace lives under LOCALAPPDATA, outside this repo. These rules are
-# anchored to the repository root on purpose: a nested workspace/ inside a fixture
-# directory must stay tracked, and workspace.json / topics/ are never ignored by name.
+# The daily workspace is bound by machine-local configuration; development defaults
+# to the ignored .local/ directory. Rules below are root-anchored so nested fixture
+# workspaces stay tracked; workspace.json / topics/ are never ignored by name.
 /workspace/
 /workspaces/
 /.data/
@@ -65,8 +65,8 @@ Desktop.ini
 .tmp-*/
 *.bak
 
-# Private background material: kept on disk, deliberately excluded from the
-# public repository. Do not delete these files; they are just not published.
+# Private design notes and legacy local paths; never publish user material.
+/docs/design-notes.md
 /DEVELOPMENT_PROMPT.md
 /thinking-map-design.md
 /docs/reference/

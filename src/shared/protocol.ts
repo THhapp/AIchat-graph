@@ -11,7 +11,7 @@
  * - Snapshot identity is { instanceId, revision }; a new service instance gets a
  *   new instanceId, and every accepted snapshot increments revision.
  * - Source offsets are UTF-16 offsets into the decoded file text, half-open
- *   [offset, endOffset), matching ARCHITECTURE 4.2.
+ *   [offset, endOffset).
  */
 
 /** Effective snapshot identity. */

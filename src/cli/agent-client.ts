@@ -1,7 +1,7 @@
 /**
  * 在线 Agent 通道：GET /api/agent/nodes/:id 与 POST /api/agent/changes。
  *
- * 约定（ARCHITECTURE 5）：
+ * 约定：
  * - editRef 是服务实例内的短凭据，绑定工作区／节点／真实源路径／读取时哈希；
  *   CLI 原样回传，不自己补最新哈希、不按显示编号重定位；
  * - 外层 requestId 由 CLI 生成；同 requestId 重放由服务幂等处理；

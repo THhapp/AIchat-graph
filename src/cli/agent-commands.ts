@@ -1,7 +1,7 @@
 /**
  * 低摩擦在线写入命令：edit／branch／connect／create-root。
  *
- * 设计要点（ARCHITECTURE 5）：
+ * 设计要点：
  * - 写入凭据只来自真实在线读取（read --node 返回的 editRef.ref），CLI 不伪造、不按编号重定位；
  * - 机械字段（requestId UUID、节点 ID、路径、branch order）由服务生成或按规则推导，
  *   调用方不必手拼大量 JSON 转义；

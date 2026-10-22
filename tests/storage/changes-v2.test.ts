@@ -69,7 +69,10 @@ function topicMeta(topicId: string, title: string): string {
   return "---\ntopicId: " + topicId + "\ntitle: " + title + "\n---\n";
 }
 
-async function newV2Workspace(topics: Record<string, Record<string, string>>): Promise<{
+async function newV2Workspace(
+  topics: Record<string, Record<string, string>>,
+  topicMode: "isolated" | "shared" = "isolated",
+): Promise<{
   root: string;
   files: Awaited<ReturnType<typeof readWorkspaceFiles>>;
 }> {
@@ -77,6 +80,11 @@ async function newV2Workspace(topics: Record<string, Record<string, string>>): P
   temporaryRoots.push(parent);
   const root = path.join(parent, "ws");
   await initWorkspace({ root, name: "v2-test" });
+  if (topicMode === "shared") {
+    const metaPath = path.join(root, "workspace.json");
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    await fs.writeFile(metaPath, JSON.stringify({ ...meta, topicMode }, null, 2) + "\n", "utf8");
+  }
   for (const [dir, files] of Object.entries(topics)) {
     const target = path.join(root, "topics", dir);
     await fs.mkdir(target, { recursive: true });
@@ -350,7 +358,7 @@ describe("格式 2 候选：局部修改与结构", () => {
     ]);
   });
 
-  it("moveNodeToTopic 保留 ID 与连接，并删除被清空的主题入口", async () => {
+  it("shared 模式 moveNodeToTopic 保留 ID 与连接，并删除被清空的主题入口", async () => {
     const { files } = await newV2Workspace({
       协作方式: BASE_TOPIC,
       条目整理: {
@@ -365,7 +373,7 @@ describe("格式 2 候选：局部修改与结构", () => {
           order: 10,
         }),
       },
-    });
+    }, "shared");
     const changes = prepareChangesV2(
       files,
       request(files, [{ op: "moveNodeToTopic", nodeId: BRANCH_ID, topicId: TOPIC_ID }], {

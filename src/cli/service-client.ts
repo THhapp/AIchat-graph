@@ -1,5 +1,5 @@
 /**
- * CLI 与服务描述文件的连接规则（ARCHITECTURE 7.1／10）：
+ * CLI 与服务描述文件的连接规则：
  * - 只读 <root>/.aichat/runtime/service.json，不跟随外部符号链接；
  * - url 只接受 loopback HTTP，且不得带凭据／路径／查询；
  * - 先 GET /api/workspace，核对 workspaceId、instanceId、rootPath；

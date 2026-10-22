@@ -1,7 +1,7 @@
 /**
  * 主题自动导出：把有效快照冻结成单文件 HTML 并写到用户选定的本机目标。
  *
- * 约束（ARCHITECTURE 8／9）：
+ * 约束：
  * - 只用有效快照内容，不从不同 revision 拼正文；资源来自同一快照；
  * - 计算（文档组装＋HTML 渲染）可以在队列外，但"仍是最新任务 → 路径与哈希校验 →
  *   可靠替换 → 记录成功"必须在 WorkspaceRuntime.queue 内完成；
@@ -19,7 +19,6 @@ import {
   writeFileDurable,
 } from "../storage/index.js";
 import {
-  computeContentFingerprint,
   computeExportFingerprints,
   readExportMarkers,
   readReaderAssets,
@@ -29,12 +28,9 @@ import {
 import type {
   Diagnostic,
   ExportState,
-  GraphNode,
   OfflineTopicDocument,
   TopicExportStatus,
 } from "../shared/protocol.js";
-import type { SnapshotData, TopicSnapshot } from "./snapshot.js";
-import { graphTopic, toGraphNode } from "./snapshot.js";
 import { ServiceError, wireDiagnostic } from "./errors.js";
 import {
   loadExportConfig,
@@ -44,6 +40,8 @@ import {
   type ExportTargetRecord,
 } from "./exportConfig.js";
 import type { WorkspaceRuntime } from "./workspace.js";
+import { isAbsoluteHtml, resolveTarget, targetInsideRoots } from "./export/targets.js";
+import { buildTopicDocument } from "./export/document.js";
 
 interface PreparedExport {
   readonly topicId: string;
@@ -83,158 +81,6 @@ function isFileSync(target: string): boolean {
 
 function hasErrorDiagnostics(diagnostics: readonly Diagnostic[]): boolean {
   return diagnostics.some((item) => item.severity === "error" || item.severity === undefined);
-}
-
-function isAbsoluteHtml(value: string): boolean {
-  if (!path.isAbsolute(value)) return false;
-  if (value.startsWith("\\\\") || value.startsWith("//")) return false;
-  // 目录名之外的冒号（NTFS ADS）一律拒绝；盘符后的冒号不算。
-  const withoutDrive = /^[A-Za-z]:/.test(value) ? value.slice(2) : value;
-  if (withoutDrive.includes(":")) return false;
-  if (value.includes("\u0000")) return false;
-  return path.extname(value).toLowerCase() === ".html";
-}
-
-interface TargetResolution {
-  /** 用户给出的绝对路径（仅用于报告）。 */
-  absolute: string;
-  /** 规范化后的真实目标：父目录 realpath + 文件名；所有安全判断与写入都用它。 */
-  canonical: string;
-  /** 目标自身的真实路径（不存在时为 null）。 */
-  canonicalExisting: string | null;
-  exists: boolean;
-  isFile: boolean;
-  isSymlink: boolean;
-}
-
-/**
- * 逐级检查用户给出的父路径链：任何一级是 symlink／junction 都不接受。
- *
- * 合同要求"拒绝链接"，不只是拒绝指向工作区／应用根的链接：否则授权后把父 alias
- * 改指别处，同一字面路径就会悄悄写到另一个真实位置。这里在授权与 finalize 共用，
- * 提示调用方改用真实路径。只检查真实存在的祖先，第一段不存在即止（其余更深的
- * 段也不可能存在）。
- */
-async function assertNoLinkedParent(value: string): Promise<string> {
-  const absolute = path.resolve(value);
-  const parent = path.dirname(absolute);
-  // 用相对 root 的段累加，避免把 "C:" 当成第一段拼出 "C:\C:"（Windows 下会
-  // 立刻 ENOENT，等于整条检查被跳过）。
-  const root = path.parse(parent).root;
-  const segments = path.relative(root, parent).split(path.sep).filter((segment) => segment.length > 0);
-  let current = root;
-  for (const segment of segments) {
-    current = path.join(current, segment);
-    let stat;
-    try {
-      stat = await fs.lstat(current);
-    } catch (error) {
-      if (isErrnoCode(error, "ENOENT")) return parent; // 更深的祖先不存在
-      throw new ServiceError(
-        422,
-        "EXPORT_TARGET_INVALID",
-        "无法检查导出目标路径：" + current,
-        { details: { path: value }, cause: error },
-      );
-    }
-    if (stat.isSymbolicLink()) {
-      throw new ServiceError(
-        422,
-        "EXPORT_TARGET_UNSAFE",
-        "导出目标的父路径含有符号链接或 junction：" + current + "；请改用真实目录路径",
-        { details: { path: value, linkedAncestor: current } },
-      );
-    }
-  }
-  return parent;
-}
-
-/**
- * 外部绝对路径归一化。
- *
- * 1) 逐级拒绝父链中的 symlink／junction（不是只拒指向保护根的链接）；
- * 2) 用 realpath 解析父目录后再拼文件名，后续的工作区／应用根判断与写入
- *    都使用 canonical 路径；仅比较用户输入的字面路径会被目录 alias 绕过。
- */
-async function resolveTarget(value: string): Promise<TargetResolution> {
-  const absolute = path.resolve(value);
-  const parent = await assertNoLinkedParent(absolute);
-  let parentReal: string;
-  try {
-    parentReal = await fs.realpath(parent);
-  } catch (error) {
-    throw new ServiceError(
-      422,
-      "EXPORT_TARGET_INVALID",
-      "导出目标的父目录不存在或不可访问：" + parent,
-      { details: { path: value }, cause: error },
-    );
-  }
-  const canonical = path.join(parentReal, path.basename(absolute));
-  const stat = await fs.lstat(canonical).catch((error: unknown) => {
-    if (isErrnoCode(error, "ENOENT")) return null;
-    throw error;
-  });
-  if (stat === null) {
-    return {
-      absolute,
-      canonical,
-      canonicalExisting: null,
-      exists: false,
-      isFile: false,
-      isSymlink: false,
-    };
-  }
-  // 目标本身是符号链接／junction：拒绝（不跟随到别处写入）。
-  let canonicalExisting: string | null = null;
-  if (stat.isSymbolicLink()) {
-    return {
-      absolute,
-      canonical,
-      canonicalExisting: null,
-      exists: true,
-      isFile: false,
-      isSymlink: true,
-    };
-  }
-  canonicalExisting = await fs.realpath(canonical).catch(() => canonical);
-  return {
-    absolute,
-    canonical,
-    canonicalExisting,
-    exists: true,
-    isFile: stat.isFile(),
-    isSymlink: false,
-  };
-}
-
-function isInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative === "" || (!relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative));
-}
-
-/** 工作区与应用根的 canonical 形式；用于和真实目标比较。 */
-async function canonicalRoots(runtime: WorkspaceRuntime, appRoot: string): Promise<{
-  workspace: string;
-  app: string;
-}> {
-  const workspace = await fs.realpath(runtime.rootReal).catch(() => runtime.rootReal);
-  const app = await fs.realpath(appRoot).catch(() => appRoot);
-  return { workspace, app };
-}
-
-/** 目标是否落在工作区或应用根内部（都按 canonical 比较）。 */
-async function targetInsideRoots(
-  runtime: WorkspaceRuntime,
-  appRoot: string,
-  resolution: TargetResolution,
-): Promise<{ insideWorkspace: boolean; insideApp: boolean }> {
-  const roots = await canonicalRoots(runtime, appRoot);
-  const candidate = resolution.canonicalExisting ?? resolution.canonical;
-  return {
-    insideWorkspace: isInside(roots.workspace, candidate),
-    insideApp: isInside(roots.app, candidate),
-  };
 }
 
 export class ExportCoordinator {
@@ -318,41 +164,12 @@ export class ExportCoordinator {
 
   /** 当前有效快照中该主题的冻结文档；资源从同一快照取。 */
   buildDocument(topicId: string): OfflineTopicDocument {
-    const snapshot = this.runtime.current.data;
-    const topic = snapshot.topics.find((entry) => entry.topicId === topicId);
-    if (topic === undefined) {
-      throw new ServiceError(404, "NOT_FOUND", "当前快照中没有主题 " + topicId, {
-        details: { topicId },
-      });
-    }
-    const nodes = topic.nodes.map((node) => {
-      const view = snapshot.graph.nodes.find((entry) => entry.id === node.id);
-      const file = topic.files.find((entry) => entry.path === node.sourcePath);
-      return {
-        ...(view === undefined ? basicNode(node) : toGraphNode(view)),
-        body: node.body,
-        path: node.sourcePath,
-        fileHash: file?.fileHash ?? "",
-      };
-    });
-    // 边界：本主题节点所需的全部外部祖先（直至 root），只带元数据与来源主题信息。
-    const boundary = externalAncestors(snapshot, topic);
-    const document: OfflineTopicDocument = {
-      format: 1,
-      workspaceId: snapshot.workspaceId,
-      workspaceName: snapshot.name,
-      instanceId: this.runtime.instanceId,
-      revision: this.runtime.current.revision,
-      fingerprint: "",
-      generatedAt: new Date().toISOString(),
-      topic: graphTopic(snapshot, topic),
-      nodes,
-      boundaryNodes: boundary,
-      resources: { ...topic.resources },
-      resourceDiagnostics: [...topic.resourceDiagnostics],
-    };
-    const content = computeContentFingerprint(document);
-    return { ...document, fingerprint: content };
+    return buildTopicDocument(
+      this.runtime.current.data,
+      topicId,
+      this.runtime.instanceId,
+      this.runtime.current.revision,
+    );
   }
 
   /** 当前内容指纹（不含运行字段），供状态与比较使用。 */
@@ -1010,51 +827,6 @@ export class ExportCoordinator {
     const statuses = this.allStatuses();
     this.runtime.broadcastExport(statuses);
   }
-}
-
-function basicNode(node: TopicSnapshot["nodes"][number]): GraphNode {
-  return {
-    id: node.id,
-    topicId: node.topicId,
-    title: node.title,
-    summary: node.summary,
-    number: "",
-    from: node.from,
-    flow: node.flow,
-    state: node.state,
-    ...(node.description !== undefined ? { description: node.description } : {}),
-    ...(node.side !== undefined ? { side: node.side } : {}),
-    ...(node.order !== undefined ? { order: node.order } : {}),
-    sourcePath: node.sourcePath,
-  };
-}
-
-/**
- * 本主题节点需要的全部外部祖先（直至 root）：只带轻量元数据，
- * 不复制它们所在主题的正文或整个工作区。
- */
-function externalAncestors(snapshot: SnapshotData, topic: TopicSnapshot): GraphNode[] {
-  const localIds = new Set(topic.nodes.map((node) => node.id));
-  const byId = new Map(snapshot.graph.nodes.map((node) => [node.id, node]));
-  const boundary: GraphNode[] = [];
-  const seen = new Set<string>();
-  for (const node of topic.nodes) {
-    let current: string | null = node.from;
-    const guard = new Set<string>();
-    while (current !== null && !guard.has(current)) {
-      guard.add(current);
-      const ancestor = byId.get(current);
-      if (ancestor === undefined) break;
-      if (!localIds.has(ancestor.id) && !seen.has(ancestor.id)) {
-        seen.add(ancestor.id);
-        boundary.push(toGraphNode(ancestor));
-      }
-      current = ancestor.from;
-    }
-  }
-  // 稳定顺序：按图的派生顺序。
-  const order = new Map(snapshot.graph.nodes.map((node, index) => [node.id, index]));
-  return boundary.sort((left, right) => (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0));
 }
 
 function errorMessageOf(error: unknown): string {

@@ -10,17 +10,32 @@
  * - 节点正文没有 H2 卡片标记，旧注释不会被写入或当作结构；
  * - description 属于连接（为什么 A 接到 B），改接来源时必须显式重新确认。
  */
-import { parseDocument, stringify as stringifyYaml } from "yaml";
-import type { Document as YamlBaseDocument, ParsedNode as YamlParsedNode } from "yaml";
+import { v2ChangeRequestSchema } from "./changes/v2-request.js";
+import type {
+  PatchNodeOperation,
+  UpdateConnectionOperation,
+  V2CreateTopicOperation,
+  V2CreateNodeOperation,
+  V2UpdateNodeOperation,
+  V2MoveNodeToTopicOperation,
+  V2RemoveLeafOperation,
+  V2SetDiscussionFocusOperation,
+  ReplaceNodeSourceOperation,
+  V2Operation,
+  V2ChangeRequest,
+} from "./changes/v2-request.js";
+export * from "./changes/v2-request.js";
+import {
+  renderNodeText,
+  nodeStateFrom,
+  headerFromParsed,
+  topicStateFrom,
+} from "./changes/v2-text.js";
+import type { NodeFileState, TopicState } from "./changes/v2-text.js";
 import { z } from "zod";
 import {
-  branchSideSchema,
   nextBranchOrder,
-  nodeFlowSchema,
-  nodeIdSchema,
-  nodeStateSchema,
   parseWorkspaceDocuments,
-  topicIdSchema,
   workspaceMetaSchema,
   type Diagnostic,
   type ParsedNode,
@@ -37,7 +52,6 @@ import { groupWorkspaceFiles } from "./workspace.js";
 import {
   TOPIC_META_FILENAME,
   isV2TopicFilePath,
-  nodeHeaderObject,
   nodePath,
   normalizeNewlines,
   parseTopicPath,
@@ -60,208 +74,6 @@ export type { ChangeErrorCode };
 export type { PreparedChanges };
 
 /* ------------------------------------------------------------------ *
- * 操作：低摩擦入口 + 必要结构动作
- * ------------------------------------------------------------------ */
-
-/** 正文模式：片段替换、追加、整篇替换三者互斥。 */
-export interface PatchNodeOperation {
-  readonly op: "patchNode";
-  readonly nodeId: string;
-  readonly title?: string | undefined;
-  readonly state?: V2NodeHeader["state"] | undefined;
-  /** null 删除显式摘要；省略表示不改。 */
-  readonly summary?: string | null | undefined;
-  /** old 必须非空且在正文中恰好出现一次；匹配失败不全局替换。 */
-  readonly replace?: readonly { readonly old: string; readonly new: string }[] | undefined;
-  readonly append?: string | undefined;
-  readonly body?: string | undefined;
-}
-
-/** 连接更新：改接来源时 description 必须显式给出，不能沿用旧解释。 */
-export interface UpdateConnectionOperation {
-  readonly op: "updateConnection";
-  readonly nodeId: string;
-  readonly from?: string | undefined;
-  readonly flow?: V2NodeHeader["flow"] | undefined;
-  readonly side?: V2NodeHeader["side"] | undefined;
-  readonly order?: number | undefined;
-  readonly description?: string | undefined;
-}
-
-export interface V2CreateTopicOperation {
-  readonly op: "createTopic";
-  readonly topicId: string;
-  /** 主题目录名（topics/<dir>），不是文件路径。 */
-  readonly path: string;
-  readonly title: string;
-}
-
-export interface V2CreateNodeOperation {
-  readonly op: "createNode";
-  readonly nodeId: string;
-  readonly topicId: string;
-  readonly title: string;
-  readonly body: string;
-  readonly from: string | null;
-  readonly flow: V2NodeHeader["flow"];
-  readonly state: V2NodeHeader["state"];
-  readonly description?: string | undefined;
-  readonly side?: V2NodeHeader["side"] | undefined;
-  readonly order?: number | undefined;
-  readonly summary?: string | undefined;
-}
-
-export interface V2UpdateNodeOperation {
-  readonly op: "updateNode";
-  readonly nodeId: string;
-  readonly title?: string | undefined;
-  readonly body?: string | undefined;
-  readonly state?: V2NodeHeader["state"] | undefined;
-  readonly summary?: string | null | undefined;
-}
-
-export interface V2MoveNodeToTopicOperation {
-  readonly op: "moveNodeToTopic";
-  readonly nodeId: string;
-  readonly topicId: string;
-}
-
-export interface V2RemoveLeafOperation {
-  readonly op: "removeLeaf";
-  readonly nodeId: string;
-}
-
-export interface V2SetDiscussionFocusOperation {
-  readonly op: "setDiscussionFocus";
-  readonly nodeId: string | null;
-}
-
-/** 源码修复：给出真实节点文件的完整新原文，用于无法解析的文件。 */
-export interface ReplaceNodeSourceOperation {
-  readonly op: "replaceNodeSource";
-  readonly nodeId: string;
-  readonly path: string;
-  readonly raw: string;
-}
-
-export type V2Operation =
-  | V2CreateTopicOperation
-  | V2CreateNodeOperation
-  | V2UpdateNodeOperation
-  | PatchNodeOperation
-  | UpdateConnectionOperation
-  | V2MoveNodeToTopicOperation
-  | V2RemoveLeafOperation
-  | V2SetDiscussionFocusOperation
-  | ReplaceNodeSourceOperation;
-
-export interface V2ChangeRequest {
-  readonly workspaceId: string;
-  readonly requestId: string;
-  readonly expectedFiles: Record<string, string | null>;
-  readonly operations: V2Operation[];
-}
-
-/* ------------------------------------------------------------------ *
- * 严格请求校验（未知／多余字段一律拒绝）
- * ------------------------------------------------------------------ */
-
-const sha256HexSchema = z.string().regex(/^[0-9a-f]{64}$/);
-
-function singleLine(label: string): z.ZodString {
-  return z.string().superRefine((value, ctx) => {
-    if (value.trim().length === 0) ctx.addIssue({ code: "custom", message: label + "不能为空" });
-    else if (/[\r\n]/.test(value)) ctx.addIssue({ code: "custom", message: label + "必须是单行文本" });
-  });
-}
-
-const operationSchema = z.discriminatedUnion("op", [
-  z.strictObject({
-    op: z.literal("createTopic"),
-    topicId: topicIdSchema,
-    path: singleLine("主题目录名"),
-    title: singleLine("主题标题"),
-  }),
-  z.strictObject({
-    op: z.literal("createNode"),
-    nodeId: nodeIdSchema,
-    topicId: topicIdSchema,
-    title: singleLine("标题"),
-    body: z.string(),
-    from: nodeIdSchema.nullable(),
-    flow: nodeFlowSchema,
-    state: nodeStateSchema,
-    description: singleLine("description").optional(),
-    side: branchSideSchema.optional(),
-    order: z.int().optional(),
-    summary: singleLine("summary").optional(),
-  }),
-  z.strictObject({
-    op: z.literal("updateNode"),
-    nodeId: nodeIdSchema,
-    title: singleLine("标题").optional(),
-    body: z.string().optional(),
-    state: nodeStateSchema.optional(),
-    summary: singleLine("summary").nullable().optional(),
-  }),
-  z
-    .strictObject({
-      op: z.literal("patchNode"),
-      nodeId: nodeIdSchema,
-      title: singleLine("标题").optional(),
-      state: nodeStateSchema.optional(),
-      summary: singleLine("summary").nullable().optional(),
-      replace: z
-        // old 是"要精确命中的原文片段"，可以跨行、可以带首尾空白：只要求非空，
-        // 不 trim（否则会改变匹配语义）。唯一性由 countOccurrences 在执行期保证。
-        .array(z.strictObject({ old: z.string().min(1), new: z.string() }))
-        .min(1)
-        .optional(),
-      append: z.string().optional(),
-      body: z.string().optional(),
-    })
-    .superRefine((value, ctx) => {
-      const modes = [
-        value.replace !== undefined,
-        value.append !== undefined,
-        value.body !== undefined,
-      ].filter(Boolean).length;
-      if (modes > 1) {
-        ctx.addIssue({ code: "custom", message: "正文模式互斥：replace／append／body 只能选一个" });
-      }
-    }),
-  z.strictObject({
-    op: z.literal("updateConnection"),
-    nodeId: nodeIdSchema,
-    from: nodeIdSchema.optional(),
-    flow: nodeFlowSchema.optional(),
-    side: branchSideSchema.optional(),
-    order: z.int().optional(),
-    description: singleLine("description").optional(),
-  }),
-  z.strictObject({
-    op: z.literal("moveNodeToTopic"),
-    nodeId: nodeIdSchema,
-    topicId: topicIdSchema,
-  }),
-  z.strictObject({ op: z.literal("removeLeaf"), nodeId: nodeIdSchema }),
-  z.strictObject({ op: z.literal("setDiscussionFocus"), nodeId: nodeIdSchema.nullable() }),
-  z.strictObject({
-    op: z.literal("replaceNodeSource"),
-    nodeId: nodeIdSchema,
-    path: singleLine("路径"),
-    raw: z.string(),
-  }),
-]);
-
-export const v2ChangeRequestSchema = z.strictObject({
-  workspaceId: z.string().min(1),
-  requestId: z.uuid(),
-  expectedFiles: z.record(z.string().min(1), sha256HexSchema.nullable()),
-  operations: z.array(operationSchema),
-});
-
-/* ------------------------------------------------------------------ *
  * 内部工具
  * ------------------------------------------------------------------ */
 
@@ -277,49 +89,6 @@ function nonEmpty(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
   return trimmed.length === 0 ? undefined : trimmed;
-}
-/* ------------------------------------------------------------------ *
- * 候选模型：一份节点文件 = YAML 头 + 正文
- * ------------------------------------------------------------------ */
-
-/**
- * 节点文件的候选状态。
- *
- * 头与正文分开保存：改标题／状态只重写 YAML 头，改正文只换 frontmatter 之后的正文，
- * 两者之间的分隔空行与尾随换行保持原样，因此中文、BOM、CRLF 不会被顺手重排。
- */
-interface NodeFileState {
-  readonly nodeId: string;
-  topicId: string;
-  dir: string;
-  path: string;
-  header: V2NodeHeader;
-  body: string;
-  /** BOM（若有）与起始 --- 行（含其换行）。 */
-  readonly headOpen: string;
-  /** YAML 头之后的结束 --- 行到正文之前（含分隔空行）。 */
-  readonly bodyPrefix: string;
-  /** 扫描时原始的 YAML 头文本；未改头字段时原样写回，避免无谓重排。 */
-  readonly originalHeaderYaml: string;
-  /** 扫描时的头字段快照，用来判断本批是否真的改了头。 */
-  readonly scannedHeader: V2NodeHeader;
-  /** 正文 trim 结束之后到文件结尾的尾随空白。 */
-  readonly bodyTail: string;
-  readonly nl: string;
-  readonly originalText: string | null;
-  /** 本批新建、尚未落盘：被清空时无需输出删除。 */
-  readonly created: boolean;
-}
-
-interface TopicState {
-  topicId: string;
-  dir: string;
-  title: string;
-  metaPath: string;
-  metaText: string;
-  metaOriginal: string | null;
-  readonly nl: string;
-  readonly created: boolean;
 }
 
 /** 无法解析的现有文件：只有针对该文件的源码修复才能处理。 */
@@ -342,131 +111,6 @@ interface Context {
   changedSeen: Set<string>;
   notes: StorageDiagnostic[];
   opNames: string[];
-}
-
-function headerYaml(header: V2NodeHeader, nl: string): string {
-  return normalizeNewlines(stringifyYaml(nodeHeaderObject(header), { lineWidth: 0 }), nl);
-}
-
-function headerEquals(left: V2NodeHeader, right: V2NodeHeader): boolean {
-  return (
-    left.nodeId === right.nodeId &&
-    left.title === right.title &&
-    left.state === right.state &&
-    left.from === right.from &&
-    left.flow === right.flow &&
-    left.description === right.description &&
-    left.side === right.side &&
-    left.order === right.order &&
-    left.summary === right.summary
-  );
-}
-
-/**
- * 重建整份节点文件。
- *
- * 头字段没变时沿用扫描到的原始 YAML 头（含原有字段顺序与引号风格），
- * 只有真正改动的文件才重新序列化，未改动的节点因此可以与原文逐字节相同。
- */
-function renderNodeText(state: NodeFileState): string {
-  const normalized = normalizeNewlines(state.body, state.nl).replace(/\s+$/, "");
-  const headerDiffers = !headerEquals(state.header, state.scannedHeader);
-  const yaml = headerDiffers ? headerYaml(state.header, state.nl) : state.originalHeaderYaml;
-  const head = state.headOpen + yaml + "---" + state.nl + state.bodyPrefix;
-  const tail = state.bodyTail.length > 0 ? state.bodyTail : state.nl;
-  if (normalized.length === 0) return head + tail;
-  return head + normalized + tail;
-}
-
-function renderTopicMetaState(state: TopicState): string {
-  return renderTopicMetaText({ topicId: state.topicId, title: state.title, nl: state.nl });
-}
-
-/**
- * 从原文切出头的三段与正文，保留原始换行与 BOM。
- *
- * 头部边界直接取 core 给出的 frontmatter 范围，因此注释、引号风格、字段顺序都不会被改写；
- * 只有真正改动头字段的文件才重新序列化 YAML。
- */
-function nodeStateFrom(options: {
-  path: string;
-  text: string;
-  node: ParsedNode;
-  header: V2NodeHeader;
-  originalText: string | null;
-  created: boolean;
-}): NodeFileState {
-  const { text } = options;
-  const nl = text.includes("\r\n") ? "\r\n" : "\n";
-  const contentRange = options.node.ranges;
-  const bodyStart = contentRange.body.start;
-  const bodyEnd = contentRange.body.end;
-  const openEnd = text.indexOf("\n");
-  const headOpen = text.slice(0, openEnd === -1 ? text.length : openEnd + 1);
-  const closingAt = findClosingFence(text, headOpen.length);
-  const headerEnd = closingAt === -1 ? Math.min(bodyStart, text.length) : closingAt;
-  const originalHeaderYaml = text.slice(headOpen.length, headerEnd);
-  // 结束 --- 行本身（含其后的换行）；再接 bodyPrefix 就是正文之前的全部字节。
-  const fenceEnd = closingAt === -1 ? headerEnd : text.indexOf("\n", closingAt);
-  const afterFence = fenceEnd === -1 ? text.length : fenceEnd + 1;
-  return {
-    nodeId: options.node.id,
-    topicId: options.node.topicId,
-    dir: parseTopicPath(options.path)?.directory ?? "",
-    path: options.path,
-    header: options.header,
-    body: options.node.body,
-    headOpen,
-    // 结束 --- 行之后到正文之前：保留原有的分隔空行。
-    bodyPrefix: text.slice(afterFence, bodyStart),
-    bodyTail: text.slice(bodyEnd),
-    originalHeaderYaml,
-    scannedHeader: options.header,
-    nl,
-    originalText: options.originalText,
-    created: options.created,
-  };
-}
-
-/** 结束 --- 行的起点位置；找不到时返回 -1（改用正文起点兜底）。 */
-function findClosingFence(text: string, from: number): number {
-  if (from >= text.length) return -1;
-  const found = text.indexOf("\n---", from);
-  return found === -1 ? -1 : found + 1;
-}
-
-/* ------------------------------------------------------------------ *
- * 载入：先用 core 解析整份工作区
- * ------------------------------------------------------------------ */
-
-function headerFromParsed(node: ParsedNode): V2NodeHeader {
-  const header: V2NodeHeader = {
-    nodeId: node.id,
-    title: node.title,
-    state: node.state,
-    from: node.from,
-    flow: node.flow,
-  };
-  if (node.description !== undefined) header.description = node.description;
-  if (node.side !== undefined) header.side = node.side;
-  if (node.order !== undefined) header.order = node.order;
-  if (node.summaryExplicit) header.summary = node.summary;
-  return header;
-}
-
-function topicStateFrom(topic: ParsedTopic, file: WorkspaceFile | undefined): TopicState {
-  const dir = topic.dir ?? "";
-  const text = file?.text ?? topic.document.text;
-  return {
-    topicId: topic.topicId,
-    dir,
-    title: topic.title,
-    metaPath: topic.document.path,
-    metaText: text,
-    metaOriginal: text,
-    nl: text.includes("\r\n") ? "\r\n" : "\n",
-    created: false,
-  };
 }
 
 /**

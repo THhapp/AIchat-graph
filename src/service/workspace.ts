@@ -1,7 +1,7 @@
 /**
  * 单个工作区的运行时协调器。
  *
- * 启动顺序（ARCHITECTURE 8.2／10）：
+ * 启动顺序：
  *   root realpath → 安全 runtime 目录 → 根级 writer 锁 → recover
  *   → 全量加载并验证 → 启动 HTTP → 启动 watcher → 发布 service.json。
  *
