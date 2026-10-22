@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": [
+    "src/core/**/*.ts",
+    "src/storage/**/*.ts",
+    "src/index/**/*.ts",
+    "src/service/**/*.ts",
+    "src/cli/**/*.ts",
+    "src/shared/**/*.ts",
+    "src/export/**/*.ts"
+  ],
+  "exclude": ["tests", "src/web", "dist", "node_modules"]
+}

@@ -1,0 +1,67 @@
+{
+  "name": "aichat-graph",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.17.0",
+    "npm": "11.13.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev:web": "vite",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "build:node": "tsc -p tsconfig.build.json",
+    "build:web": "npm run build:web-app && npm run build:web-offline",
+    "build": "npm run build:node && npm run build:web",
+    "start": "node dist/cli/index.js",
+    "test": "vitest run",
+    "test:web": "vitest run tests/web",
+    "build:web-app": "vite build",
+    "build:web-offline": "vite build --config vite.offline.config.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@xyflow/react": "12.12.0",
+    "chokidar": "6.0.0",
+    "hono": "4.13.13",
+    "katex": "0.16.47",
+    "proper-lockfile": "4.1.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "rehype-katex": "7.0.1",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5",
+    "write-file-atomic": "8.0.0",
+    "yaml": "2.8.2",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/mdast": "4.0.4",
+    "@types/node": "24.10.1",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/write-file-atomic": "4.0.3",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "4.0.18"
+  },
+  "bin": {
+    "aichat": "dist/cli/index.js"
+  }
+}

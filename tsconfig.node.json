@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": [
+    "src/core/**/*.ts",
+    "src/storage/**/*.ts",
+    "src/index/**/*.ts",
+    "src/service/**/*.ts",
+    "src/cli/**/*.ts",
+    "src/shared/**/*.ts",
+    "src/export/**/*.ts",
+    "tests/**/*.ts",
+    "vite.config.ts",
+    "vite.offline.config.ts"
+  ],
+  "exclude": ["tests/web/**", "src/web/**", "dist", "node_modules"]
+}

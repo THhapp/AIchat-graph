@@ -1,0 +1,75 @@
+# AIchat-graph .gitignore
+# Local-only. keeps source, docs, tests and fixtures tracked.
+
+# Dependencies and build output (generated, re-creatable)
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Workspace runtime data (never source content)
+.aichat/
+**/.aichat/
+
+# Env, secrets and keys
+.env
+.env.*
+*.env
+.envrc
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+id_rsa*
+id_ed25519*
+secrets/
+credentials/
+
+# Logs and crash dumps
+*.log
+logs/
+npm-debug.log*
+yarn-error.log*
+*.stackdump
+
+# Machine-local launcher configuration (kept out of the repo on purpose)
+/launcher.local.json
+*.local.json
+/.local/
+
+# Local workspaces that must not be committed by accident.
+# The default workspace lives under LOCALAPPDATA, outside this repo. These rules are
+# anchored to the repository root on purpose: a nested workspace/ inside a fixture
+# directory must stay tracked, and workspace.json / topics/ are never ignored by name.
+/workspace/
+/workspaces/
+/.data/
+local-workspace/
+workspaces.local/
+.aichat-local/
+
+# Windows shell links and OS junk
+*.lnk
+*.url
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor / tool scratch space
+.vscode/
+.idea/
+*.swp
+*.tmp
+.tmp-*/
+*.bak
+
+# Private background material: kept on disk, deliberately excluded from the
+# public repository. Do not delete these files; they are just not published.
+/DEVELOPMENT_PROMPT.md
+/thinking-map-design.md
+/docs/reference/
+
+# Notes: tests/fixtures/** (Markdown, JSON, images) is intentionally NOT ignored.
+# skills/** and src/** are source and must stay tracked.

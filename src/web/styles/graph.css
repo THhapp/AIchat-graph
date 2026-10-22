@@ -1,0 +1,149 @@
+/* React Flow canvas + cards. Colors come from tokens only. */
+.canvas-host { position: relative; min-width: 0; min-height: 0; background: var(--bg); }
+.canvas-host__empty { display: flex; height: 100%; align-items: center; justify-content: center; }
+
+.canvas { position: absolute; inset: 0; }
+
+.canvas__overlay {
+  position: absolute;
+  z-index: 5;
+  inset-block-start: var(--space-3);
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-soft);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: min(520px, 90%);
+}
+.canvas__overlay--error { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); background: var(--panel-bg); }
+
+.react-flow { background: var(--bg); }
+.react-flow__attribution { font-size: 10px; background: transparent; color: var(--text-muted); }
+.react-flow__attribution a { color: inherit; }
+.react-flow__controls { box-shadow: var(--shadow-1); border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); }
+.react-flow__controls-button {
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-soft);
+  fill: currentColor;
+  width: 26px; height: 26px;
+}
+.react-flow__controls-button:hover { background: var(--bg-hover); }
+.react-flow__minimap { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-sunken) !important; }
+.react-flow__node { cursor: pointer; }
+
+/* card */
+.topic-card {
+  width: var(--card-width);
+  height: var(--card-height);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-left: 3px solid var(--state-reference-fg);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+  color: var(--text);
+  overflow: hidden;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.topic-card[data-state='agreed'] { border-left-color: var(--state-agreed-fg); }
+.topic-card[data-state='proposed'] { border-left-color: var(--state-proposed-fg); }
+.topic-card[data-flow='branch'][data-state='agreed'] { border-left-color: var(--state-branch-fg); }
+.topic-card[data-active='true'] {
+  box-shadow: 0 0 0 2px var(--accent), var(--shadow-2);
+  border-color: var(--accent);
+}
+.topic-card[data-selected='true'] {
+  outline: 2px solid var(--selected);
+  outline-offset: 2px;
+}
+.topic-card[data-selected='true'][data-active='true'] { outline-color: var(--selected); }
+
+.topic-card__head { display: flex; align-items: center; gap: var(--space-2); min-height: 20px; }
+.topic-card__number {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.topic-card__spacer { flex: 1; }
+.topic-card__toggle {
+  font-size: var(--text-xs);
+  line-height: 1;
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  color: var(--text-soft);
+}
+.topic-card__toggle:hover { background: var(--bg-hover); color: var(--text); }
+.topic-card__title {
+  font-size: var(--text-md);
+  font-weight: 640;
+  line-height: var(--leading-tight);
+  letter-spacing: 0.005em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.topic-card__summary {
+  flex: 1;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  min-height: 0;
+}
+.topic-card__foot { display: flex; align-items: baseline; gap: var(--space-2); min-height: 14px; min-width: 0; }
+.topic-card__flow { font-size: var(--text-2xs); color: var(--text-muted); flex: none; }
+.topic-card__desc {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.topic-card__open {
+  font-size: var(--text-2xs);
+  line-height: 1;
+  padding: 1px 5px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  flex: none;
+}
+.topic-card__open:hover { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
+
+.rf-handle { opacity: 0; pointer-events: none; width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; }
+
+/* edges */
+.rf-edge { stroke: var(--edge); stroke-width: 1.25; }
+.rf-edge--branch { stroke-dasharray: 3 3; }
+.react-flow__edge.selected .rf-edge { stroke: var(--accent); }
+.rf-edge__label {
+  font-size: 10px;
+  fill: var(--text-muted);
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
