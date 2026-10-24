@@ -39,14 +39,13 @@
 .react-flow__minimap { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-sunken) !important; }
 .react-flow__node { cursor: pointer; }
 
-/* card */
+/* card — sizes mirror src/web/graph/cardMetrics.ts */
 .topic-card {
-  width: var(--card-width);
-  height: var(--card-height);
+  width: 360px;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-3);
+  gap: 4px;
+  padding: 12px;
   background: var(--card-bg);
   border: 1px solid var(--card-border);
   border-left: 3px solid var(--state-reference-fg);
@@ -69,7 +68,7 @@
 }
 .topic-card[data-selected='true'][data-active='true'] { outline-color: var(--selected); }
 
-.topic-card__head { display: flex; align-items: center; gap: var(--space-2); min-height: 20px; }
+.topic-card__head { display: flex; align-items: center; gap: var(--space-2); height: 24px; min-height: 24px; }
 .topic-card__number {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -88,21 +87,23 @@
   color: var(--text-soft);
 }
 .topic-card__toggle:hover { background: var(--bg-hover); color: var(--text); }
+/* The full title is always readable: it wraps, never clamps. Its height is
+   estimated by cardMetrics and handed back through the layout result. */
 .topic-card__title {
-  font-size: var(--text-md);
+  flex: none;
+  font-size: 15px;
   font-weight: 640;
-  line-height: var(--leading-tight);
+  line-height: 20px;
   letter-spacing: 0.005em;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
+/* Three-line preview with a fixed box, so editing a summary never resizes the card. */
 .topic-card__summary {
-  flex: 1;
-  font-size: var(--text-sm);
-  line-height: 1.5;
+  flex: none;
+  height: 60px;
+  font-size: 13px;
+  line-height: 20px;
   color: var(--text-soft);
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -111,17 +112,8 @@
   word-break: break-word;
   min-height: 0;
 }
-.topic-card__foot { display: flex; align-items: baseline; gap: var(--space-2); min-height: 14px; min-width: 0; }
+.topic-card__foot { display: flex; align-items: center; gap: var(--space-2); height: 16px; min-height: 16px; min-width: 0; }
 .topic-card__flow { font-size: var(--text-2xs); color: var(--text-muted); flex: none; }
-.topic-card__desc {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--text-2xs);
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .topic-card__open {
   font-size: var(--text-2xs);
   line-height: 1;
@@ -136,11 +128,55 @@
 .rf-handle { opacity: 0; pointer-events: none; width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; }
 
 /* edges */
-.rf-edge { stroke: var(--edge); stroke-width: 1.25; }
-.rf-edge--branch { stroke-dasharray: 3 3; }
+/* Connector weight is screen-fixed, not graph-fixed, so a 1.25px dash stays
+   legible when the whole canvas is zoomed out to ~0.64 ("fit all"); in graph
+   units it shrinks to ~0.8 device px and the layer effectively disappears in
+   the light theme.
+   The zoom compensation is `--edge-scale`, published by GraphCanvas and inherited
+   from `.canvas`. `vector-effect: non-scaling-stroke` was removed because it
+   cannot do this job here: the zoom is a CSS transform on an HTML ancestor of the
+   SVG, and non-scaling-stroke only cancels transforms inside the SVG document
+   (measured at 0.64: a 1.5px line painted 0.96px either way).
+   How far to scale up is decided on the GraphCanvas side, so the rules here stay
+   a plain multiply. At zoom 1 the multiplier is 1 and every value equals the old
+   one. */
+.rf-edge {
+  stroke: var(--edge);
+  stroke-width: calc(1.25px * var(--edge-scale, 1));
+}
+/* Dash pitch is scaled with the width: without it the 3/3 rhythm would collapse
+   to 1.9/1.9 at fit zoom and read as a broken dotted line. */
+.rf-edge--branch {
+  stroke-dasharray: calc(3px * var(--edge-scale, 1)) calc(3px * var(--edge-scale, 1));
+}
+/* Shared trunk between sibling branches: display geometry only. It reads as the
+   structure, not as one relationship — solid, one step heavier than a branch,
+   same colour so it never fades below the branches in the light theme. It takes
+   no pointer events so panning never snags on it. */
+.rf-edge--trunk {
+  stroke: var(--edge);
+  stroke-width: calc(1.5px * var(--edge-scale, 1));
+  stroke-dasharray: none;
+  stroke-linecap: butt;
+  pointer-events: none;
+}
 .react-flow__edge.selected .rf-edge { stroke: var(--accent); }
+/* Where a line leaves a card: a small filled dot on the card border, so the
+   source of a run is visible without reading the whole path. Decoration only —
+   it must never swallow a pan or hover gesture. The radius follows `--edge-scale`
+   so it keeps its ratio to the stroke; browsers without the CSS `r` property fall
+   back to the `r` attribute, i.e. graph units. */
+.rf-edge__origin {
+  fill: var(--edge);
+  pointer-events: none;
+  r: calc(3.2px * var(--edge-scale, 1));
+}
+/* Relationship sentence drawn on the connector: the rect is the canvas colour so
+   the line is interrupted instead of crossing the words. Sizes come from
+   cardMetrics (EDGE_LABEL_FONT / EDGE_LABEL_LINE_HEIGHT / padding). */
+.rf-edge__label-bg { fill: var(--bg); }
 .rf-edge__label {
-  font-size: 10px;
+  font-size: 11px;
   fill: var(--text-muted);
   paint-order: stroke;
   stroke: var(--bg);

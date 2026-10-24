@@ -53,7 +53,7 @@ export function readStructureVersion(raw: Record<string, unknown>): number | str
   return typeof value === 'number' || typeof value === 'string' ? value : null;
 }
 
-export function normalizeNodes(rawNodes: unknown, diagnostics: DiagnosticSink): WorkingNode[] {
+export function normalizeNodes(rawNodes: unknown, diagnostics: DiagnosticSink, cardHeight: number): WorkingNode[] {
   if (!Array.isArray(rawNodes)) {
     diagnostics.add('invalid-input', 'nodes 必须是数组');
     return [];
@@ -99,11 +99,13 @@ export function normalizeNodes(rawNodes: unknown, diagnostics: DiagnosticSink): 
       parentId = parentCandidate;
     }
 
-    let side: LayoutSide = 'right';
+    let declaredSide: LayoutSide | null = null;
     if (flow === 'branch') {
-      if (raw.side === 'left') side = 'left';
-      else if (raw.side === undefined || raw.side === null || raw.side === 'right') side = 'right';
-      else diagnostics.add('invalid-node', 'branch.side 无效，按 right 处理', id);
+      if (raw.side === 'left' || raw.side === 'right') {
+        declaredSide = raw.side;
+      } else if (raw.side !== undefined && raw.side !== null) {
+        diagnostics.add('invalid-node', 'branch.side 无效，按未声明（自动择侧）处理', id);
+      }
     }
 
     let order: number | null = null;
@@ -114,13 +116,20 @@ export function normalizeNodes(rawNodes: unknown, diagnostics: DiagnosticSink): 
       }
     }
 
+    let height = cardHeight;
+    if (raw.height !== undefined && raw.height !== null) {
+      if (typeof raw.height === 'number' && Number.isFinite(raw.height) && raw.height > 0) height = raw.height;
+      else diagnostics.add('invalid-node', '卡片高度提示无效，按默认高度处理', id);
+    }
+
     result.push({
       id,
       inputIndex: index,
       flow,
       parentId,
-      side,
+      declaredSide,
       order,
+      height,
       label: typeof raw.label === 'string' ? raw.label : null,
       topicId: typeof raw.topicId === 'string' ? raw.topicId : null,
     });
@@ -379,7 +388,8 @@ export function buildVisibleTree(
   return { roots, nextByParent, branchesByParent, parentOf };
 }
 
-function compareBranches(a: WorkingNode, b: WorkingNode): number {
+/** 同源 branch 的稳定顺序：order 升序，缺失后置，同序/同缺按 node.id。 */
+export function compareBranches(a: WorkingNode, b: WorkingNode): number {
   if (a.order !== null && b.order !== null) {
     if (a.order !== b.order) return a.order - b.order;
     return compareIds(a.id, b.id);

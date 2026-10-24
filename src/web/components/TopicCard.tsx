@@ -1,15 +1,16 @@
 import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
-import type { GraphNode } from '../../shared/protocol.js';
-import { StateChip, truncate } from './display.js';
-
-/** One line only: the card shows the start, the full text lives in the detail panel. */
-const CARD_DESC_LIMIT = 42;
+import type { BranchSide, GraphNode } from '../../shared/protocol.js';
+import { StateChip } from './display.js';
 
 export interface TopicCardData extends Record<string, unknown> {
   node: GraphNode;
+  /** Card height in px, already matched by layout and by the graph geometry. */
+  height: number;
   active: boolean;
+  /** Side the incoming branch edge actually landed on; null when unknown. */
+  resolvedSide: BranchSide | null;
   hiddenCount: number;
   collapsed: boolean;
   childCount: number;
@@ -18,14 +19,28 @@ export interface TopicCardData extends Record<string, unknown> {
   onOpenDetail: (id: string) => void;
 }
 
-/** Fixed 360x152 card. Title clamps to two lines, summary to three. */
+/** Local hint only: the relationship sentence is drawn on the connector. */
+function sideLabel(side: BranchSide | null): string {
+  if (side === 'left') return '左分支';
+  if (side === 'right') return '右分支';
+  return '分支';
+}
+
+/**
+ * Variable-height card. The title wraps in full and its height comes from the
+ * layout result; the summary keeps a fixed three-line preview so cards do not
+ * change height while someone types. The relationship sentence is not repeated
+ * here — it belongs to the connector.
+ */
 function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
-  const { node, active, hiddenCount, collapsed, childCount, onToggleCollapse, onOpenDetail } = data as TopicCardData;
-  // description is the format-2 truth; label is legacy format-1 compatibility.
-  const edgeText = (node.description ?? node.label ?? '').trim();
+  const { node, height, active, resolvedSide, hiddenCount, collapsed, childCount, onToggleCollapse, onOpenDetail } =
+    data as TopicCardData;
+  // Prefer the side the layout actually used; fall back to the declared one.
+  const side = resolvedSide ?? node.side ?? null;
   return (
     <article
       className="topic-card"
+      style={{ height }}
       data-state={node.state}
       data-flow={node.flow}
       data-active={active ? 'true' : 'false'}
@@ -66,13 +81,8 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
       <p className="topic-card__summary">{node.summary}</p>
       <footer className="topic-card__foot">
         <span className="topic-card__flow">
-          {node.flow === 'branch' ? (node.side === 'left' ? '左分支' : '右分支') : ''}
+          {node.flow === 'branch' ? sideLabel(side) : ''}
         </span>
-        {edgeText !== '' ? (
-          <span className="topic-card__desc" title={edgeText}>
-            {truncate(edgeText, CARD_DESC_LIMIT)}
-          </span>
-        ) : null}
       </footer>
       <Handle type="source" position={Position.Bottom} className="rf-handle" isConnectable={false} />
     </article>

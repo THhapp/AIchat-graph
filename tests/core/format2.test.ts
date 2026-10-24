@@ -251,3 +251,62 @@ describe("主题模式兼容", () => {
     expect(invalid.diagnostics[0]?.code).toBe("WORKSPACE_SCHEMA_INVALID");
   });
 });
+
+describe("格式 2：branch 的 side 只表示来源显式声明", () => {
+  const workspace: WorkspaceMeta = { schemaVersion: 2, workspaceId: "ws_side", name: "方向", activeNode: null };
+  const dir = "topics/方向";
+  const topicId = "t_00000000000000000000000000000001";
+  const rootId = "n_00000000000000000000000000000001";
+  const plainId = "n_00000000000000000000000000000002";
+  const leftId = "n_00000000000000000000000000000003";
+
+  function nodeDocument(id: string, title: string, fields: readonly string[]): WorkspaceDocument {
+    return {
+      path: dir + "/" + id + ".md",
+      text: "---\n" + ["nodeId: " + id, "title: " + title, "state: agreed", ...fields].join("\n") + "\n---\n\n" + title + "的正文。\n",
+    };
+  }
+
+  /** explicitRight 为 true 时给缺省分支补一个显式 side，用来证明 side 不参与编号。 */
+  function documents(explicitRight = false): WorkspaceDocument[] {
+    return [
+      { path: dir + "/topic.md", text: "---\ntopicId: " + topicId + "\ntitle: 方向\n---\n" },
+      nodeDocument(rootId, "根", ["from: null", "flow: root"]),
+      nodeDocument(plainId, "未写方向", [
+        "from: " + rootId,
+        "flow: branch",
+        "description: 来源没有指定方向",
+        ...(explicitRight ? ["side: right"] : []),
+        "order: 10",
+      ]),
+      nodeDocument(leftId, "写了左侧", [
+        "from: " + rootId,
+        "flow: branch",
+        "description: 来源指定左侧",
+        "side: left",
+        "order: 20",
+      ]),
+    ];
+  }
+
+  it("缺省分支不输出 side，显式 side 原样保留，编号与补 side 前一致", () => {
+    const result = parseWorkspaceDocuments({ workspace, documents: documents() });
+    if (!result.ok || !result.graph) {
+      throw new Error("方向用例未通过：" + result.diagnostics.map(formatDiagnostic).join(" | "));
+    }
+    const plain = result.graph.nodes.find((node) => node.id === plainId)!;
+    expect("side" in plain).toBe(false);
+    expect(plain.number).toBe("01-01");
+    const left = result.graph.nodes.find((node) => node.id === leftId)!;
+    expect(left.side).toBe("left");
+    expect(left.number).toBe("01-02");
+
+    const explicit = parseWorkspaceDocuments({ workspace, documents: documents(true) });
+    expect(explicit.ok).toBe(true);
+    const numbers = (nodes: readonly { id: string; number: string }[]) =>
+      Object.fromEntries(nodes.map((node) => [node.id, node.number]));
+    expect(numbers(explicit.graph!.nodes)).toEqual(numbers(result.graph.nodes));
+    const explicitPlain = explicit.graph!.nodes.find((node) => node.id === plainId)!;
+    expect(explicitPlain.side).toBe("right");
+  });
+});

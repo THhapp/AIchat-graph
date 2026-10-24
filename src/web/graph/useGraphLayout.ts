@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LayoutInput, LayoutPosition, LayoutResult } from '../layout/types.js';
+import { CARD_BASE_HEIGHT, CARD_WIDTH, LAYOUT_HORIZONTAL_GAP, LAYOUT_VERTICAL_GAP } from './cardMetrics.js';
 import { LayoutFailureError, LayoutStaleError, type LayoutEngineSlot } from './layoutBridge.js';
 import type { GraphView } from './viewModel.js';
 
@@ -55,10 +56,11 @@ export function useGraphLayout(view: GraphView | null, slot: LayoutEngineSlot): 
       nodes: view.layoutNodes,
       visibleNodeIds: [...view.visibleIds],
       collapsedNodeIds: view.collapsedIds,
-      cardWidth: 360,
-      cardHeight: 152,
-      verticalGap: 64,
-      horizontalGap: 88,
+      cardWidth: CARD_WIDTH,
+      // Nodes carry their own height; this is the fallback for any row without one.
+      cardHeight: CARD_BASE_HEIGHT,
+      verticalGap: LAYOUT_VERTICAL_GAP,
+      horizontalGap: LAYOUT_HORIZONTAL_GAP,
       previousPositions: previousPositions.current,
       structureVersion: key,
     };

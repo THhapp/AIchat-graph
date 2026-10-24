@@ -37,7 +37,10 @@ export interface WorkspaceNodeView extends ParsedNode {
   readonly number: string;
   readonly nextId: string | null;
   readonly branchIds: readonly string[];
-  /** branch 未写 side 时，视图规范化为 right；源文件仍保持原样。 */
+  /**
+   * 仅当源记录显式声明了 side 时才存在；缺失表示来源未指定方向，
+   * core 不补默认值，由阅读端自行择侧。
+   */
   readonly side?: ParsedNode["side"] | undefined;
 }
 
@@ -407,7 +410,8 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
       const branches = branchEntriesOf(node.id).map((branch) => branch.id);
       return {
         ...node,
-        ...(node.flow === "branch" ? { side: node.side ?? "right" } : {}),
+        // 只在来源显式声明 side 时透传；缺省不补值，交由阅读端择侧。
+        ...(node.flow === "branch" && node.side !== undefined ? { side: node.side } : {}),
         number,
         nextId: nextChildOf(node.id)?.id ?? null,
         branchIds: branches,

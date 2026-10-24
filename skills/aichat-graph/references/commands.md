@@ -52,6 +52,8 @@
 
 正文来源写法：`--body "短文本"`、`--body-file <路径>`、`--body-stdin`；追加用 `--append-file`，局部替换用 `--replace-file`（`[{old,new}]` 或 `{replace:[{old,new}]}`，`old` 必须非空且唯一匹配）。
 
+概述使用已有节点的 `edit --summary`。创建命令没有该参数时，先把概述写成正文首段供程序派生；需要独立的显式概述再读取新节点、用真实凭据补设。不要向创建命令传不存在的 `--summary`。
+
 ```powershell
 node "<aichat-cli>" edit --ref "<实际读取凭据>" --append-file "<补充正文.md>" --workspace "<工作区>"
 node "<aichat-cli>" branch --from-ref "<实际读取凭据>" --title '输入分辨率改变后的处理' --description '从固定尺寸实例延伸到可变尺寸的网络设计' --body-file "<分支正文.md>" --workspace "<工作区>"

@@ -3,6 +3,7 @@ import type { ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { GraphNode, GraphResponse, OfflineTopicDocument } from '../../shared/protocol.js';
 import { buildGraphView } from '../graph/viewModel.js';
+import { CARD_BASE_HEIGHT, CARD_WIDTH, LAYOUT_HORIZONTAL_GAP, LAYOUT_VERTICAL_GAP } from '../graph/cardMetrics.js';
 import { computeLayout } from '../layout/index.js';
 import type { LayoutResult } from '../layout/types.js';
 import { searchGraph } from '../lib/search.js';
@@ -108,17 +109,18 @@ function OfflineReader(): React.JSX.Element {
     [graph, collapsed],
   );
 
-  // Deterministic synchronous layout: same module the live reader uses.
+  // Deterministic synchronous layout: same module, same input shape and the same
+  // card metrics as the live reader.
   const layout = useMemo<LayoutResult | null>(() => {
     if (view === null) return null;
     return computeLayout({
       nodes: view.layoutNodes,
       visibleNodeIds: [...view.visibleIds],
       collapsedNodeIds: view.collapsedIds,
-      cardWidth: 360,
-      cardHeight: 152,
-      verticalGap: 64,
-      horizontalGap: 88,
+      cardWidth: CARD_WIDTH,
+      cardHeight: CARD_BASE_HEIGHT,
+      verticalGap: LAYOUT_VERTICAL_GAP,
+      horizontalGap: LAYOUT_HORIZONTAL_GAP,
       structureVersion: view.structureKey,
     });
   }, [view]);

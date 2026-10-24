@@ -79,8 +79,6 @@
   --state-reference-bg: var(--slate-100);
 
   /* component */
-  --card-width: 360px;
-  --card-height: 152px;
   --card-bg: var(--bg-raised);
   --card-border: var(--border);
   --panel-bg: var(--bg-raised);

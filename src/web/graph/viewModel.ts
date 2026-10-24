@@ -1,5 +1,19 @@
 import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
 import type { LayoutNodeInput } from '../layout/types.js';
+import { cardHeightForTitle } from './cardMetrics.js';
+
+/** The relationship sentence drawn on the connector: description wins, label is format-1 compat. */
+export function connectionText(node: Pick<GraphNode, 'description' | 'label'>): string {
+  return (node.description ?? node.label ?? '').trim();
+}
+
+/**
+ * A layout input row plus this card's own height. Layout accepts a per-node height
+ * hint; the shared `cardHeight` stays the fallback for callers that omit it.
+ */
+export interface LayoutNodeWithHeight extends LayoutNodeInput {
+  height: number;
+}
 
 export interface GraphView {
   nodes: GraphNode[];
@@ -8,9 +22,13 @@ export interface GraphView {
   topicFilter: string | null;
   /** Descendants hidden behind each collapsed node, for the "+N" badge. */
   hiddenDescendantCounts: Map<string, number>;
-  /** Changes only with structure/filter/collapse: text edits keep the same key. */
+  /**
+   * Changes with structure, filter, collapse and title height. Relationship text
+   * presence is included; the sentence itself is not, so editing wording never
+   * moves the cards. Summary text never affects geometry.
+   */
   structureKey: string;
-  layoutNodes: LayoutNodeInput[];
+  layoutNodes: LayoutNodeWithHeight[];
   /** Number of direct children in the whole graph (0 = leaf). */
   childCounts: Map<string, number>;
 }
@@ -109,7 +127,7 @@ export function buildGraphView(
   }
 
   const nodes = graph.nodes.filter((node) => visibleIds.has(node.id));
-  const layoutNodes: LayoutNodeInput[] = nodes.map((node) => {
+  const layoutNodes: LayoutNodeWithHeight[] = nodes.map((node) => {
     // Shared legacy topics can enter from outside the reading boundary. Only
     // the layout treats that entry as a local root; source relationship stays.
     const localRoot = node.from !== null && !byId.has(node.from);
@@ -119,8 +137,11 @@ export function buildGraphView(
       flow: localRoot ? 'root' : node.flow,
       side: !localRoot && node.flow === 'branch' ? node.side ?? null : null,
       order: !localRoot && node.flow === 'branch' ? node.order ?? null : null,
-      label: node.label ?? null,
+      // Layout only uses this to decide whether an edge carries a label and where
+      // its anchor sits; the text itself never changes coordinates.
+      label: connectionText(node) || null,
       topicId: node.topicId,
+      height: cardHeightForTitle(node.title),
     };
   });
 
@@ -134,7 +155,17 @@ export function buildGraphView(
 
   const keyParts = nodes
     .map((node) =>
-      [node.id, node.from ?? '', node.flow, node.side ?? '', String(node.order ?? ''), node.label ?? '', node.topicId].join('~'),
+      [
+        node.id,
+        node.from ?? '',
+        node.flow,
+        node.side ?? '',
+        String(node.order ?? ''),
+        // Presence only: a rewording must not relayout, adding/removing must.
+        connectionText(node) === '' ? '' : 'L',
+        String(cardHeightForTitle(node.title)),
+        node.topicId,
+      ].join('~'),
     )
     .sort();
   const structureKey = [topicFilter ?? '*', [...collapsed].sort().join(','), keyParts.join('|')].join('#');

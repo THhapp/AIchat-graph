@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphResponse } from '../../src/shared/protocol.js';
-import { buildGraphView, scopeGraphToTopic } from '../../src/web/graph/viewModel.js';
+import { buildGraphView, connectionText, scopeGraphToTopic } from '../../src/web/graph/viewModel.js';
+import { cardHeightForTitle, textWidth, wrapByWidth } from '../../src/web/graph/cardMetrics.js';
 import { parseReadingState, pruneReadingState, emptyReadingState, switchReadingTopic } from '../../src/web/data/readingState.js';
 import { resolveLink, resolveResourceKey, safeUrlTransform, stripNodeComments } from '../../src/web/components/MarkdownBody.js';
 import { searchGraph } from '../../src/web/lib/search.js';
 import { buildContinuationPrompt } from '../../src/web/lib/prompt.js';
 import { computeLayout } from '../../src/web/layout/index.js';
+import type { LayoutEdgeRoute, LayoutInput, LayoutResult } from '../../src/web/layout/types.js';
+import { buildOrthogonalPath, pathLength } from '../../src/web/components/edgePath.js';
+import { buildFlowEdges } from '../../src/web/components/GraphCanvas.js';
+import { layoutEdgeLabel } from '../../src/web/components/RouteEdge.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string): GraphResponse['nodes'][number] {
   return {
@@ -95,6 +100,95 @@ describe('view model', () => {
     const view = buildGraphView(focused, new Set(), 't_1');
     expect(view.visibleIds.has('n2')).toBe(true);
     expect(view.visibleIds.has('n9')).toBe(false);
+  });
+});
+
+describe('card height and connector labels', () => {
+  it('returns a stable height for the same title', () => {
+    expect(cardHeightForTitle('排版约定')).toBe(cardHeightForTitle('排版约定'));
+    expect(textWidth('排版约定', 15)).toBeGreaterThan(textWidth('ab', 15));
+  });
+
+  it('grows the card for a title that needs more rows', () => {
+    const short = cardHeightForTitle('短标题');
+    const long = cardHeightForTitle('这是一个明显需要换行的很长标题'.repeat(4));
+    expect(long).toBeGreaterThan(short);
+  });
+
+  it('never shrinks a card while mixed Chinese and Latin text grows', () => {
+    const base = 'Graph layout 排版约定 with wrapping 规则';
+    let previous = cardHeightForTitle('');
+    for (let index = 1; index <= base.length; index += 1) {
+      const height = cardHeightForTitle(base.slice(0, index));
+      expect(height).toBeGreaterThanOrEqual(previous);
+      previous = height;
+    }
+  });
+
+  it('wraps connector text and ellipsizes after the allowed lines', () => {
+    const text = '这条关系说明足够长，需要在连线上折成多行，超出限制以后用省略号收尾。';
+    const lines = wrapByWidth(text, 120, 11, 2);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]?.endsWith('…')).toBe(true);
+    for (const line of lines) expect(textWidth(line, 11)).toBeLessThanOrEqual(120 + 1e-6);
+  });
+
+  it('never leaves a one- or two-glyph widow on a connector row', () => {
+    const sentences = [
+      '用明确左侧对照自动择侧',
+      '把并列分支单独走一遍',
+      '从一个侧枝再分出方向',
+      '检查后续节点的分支位置',
+    ];
+    for (const sentence of sentences) {
+      const lines = wrapByWidth(sentence, 104, 11, 3);
+      expect(lines).toHaveLength(2);
+      expect([...(lines[lines.length - 1] ?? '')].length).toBeGreaterThanOrEqual(3);
+      expect(lines.join('')).toBe(sentence);
+      for (const line of lines) expect(textWidth(line, 11)).toBeLessThanOrEqual(104);
+      // Pure function: the same sentence always folds the same way.
+      expect(wrapByWidth(sentence, 104, 11, 3)).toEqual(lines);
+    }
+  });
+
+  it('keeps a mixed Latin tail intact instead of halving it', () => {
+    const untouched = wrapByWidth('把 layout 规则写成短句说明', 104, 11, 3);
+    expect(untouched).toEqual(['把 layout 规则写成', '短句说明']);
+
+    // Would be a two-glyph widow, but the row holds a Latin word.
+    const guarded = wrapByWidth('先定 layout 再排版位置', 104, 11, 3);
+    expect(guarded).toEqual(['先定 layout 再排版', '位置']);
+
+    for (const line of [...untouched, ...guarded]) {
+      expect(textWidth(line, 11)).toBeLessThanOrEqual(104);
+    }
+  });
+
+  it('changes the structure key with title height but not with the summary', () => {
+    const before = buildGraphView(graph, new Set(), null);
+    const longTitle = '一个足够长而必须换行的标题'.repeat(8);
+    const retitled = { ...graph, nodes: graph.nodes.map((item, index) => (index === 0 ? { ...item, title: longTitle } : item)) };
+    expect(buildGraphView(retitled, new Set(), null).structureKey).not.toBe(before.structureKey);
+
+    const resummarized = { ...graph, nodes: graph.nodes.map((item) => ({ ...item, summary: '改过的概述'.repeat(20) })) };
+    expect(buildGraphView(resummarized, new Set(), null).structureKey).toBe(before.structureKey);
+  });
+
+  it('passes title height and the relationship sentence to layout', () => {
+    const described = {
+      ...graph,
+      nodes: graph.nodes.map((item) => (item.id === 'n2' ? { ...item, description: '因为要解释排版分工，所以接在主线之后。' } : item)),
+    };
+    const view = buildGraphView(described, new Set(), null);
+    expect(view.layoutNodes.find((item) => item.id === 'n1')?.height).toBe(cardHeightForTitle('根节点'));
+    expect(view.layoutNodes.find((item) => item.id === 'n2')?.label).toBe('因为要解释排版分工，所以接在主线之后。');
+
+    // Format 1 keeps the legacy label as the connector text.
+    const legacy = { ...graph, nodes: graph.nodes.map((item) => (item.id === 'n3' ? { ...item, label: '旧格式关系' } : item)) };
+    expect(buildGraphView(legacy, new Set(), null).layoutNodes.find((item) => item.id === 'n3')?.label).toBe('旧格式关系');
+    expect(connectionText({ description: '关系句', label: '旧标签' })).toBe('关系句');
+    expect(connectionText({ label: '旧标签' })).toBe('旧标签');
+    expect(connectionText({ description: '   ', label: '旧标签' })).toBe('');
   });
 });
 
@@ -275,5 +369,282 @@ describe('resource keys resolve against the node file', () => {
     expect(resolveResourceKey('../../../../outside.png', 'topics/a.md')).toBeNull();
     expect(resolveResourceKey('https://example.com/p.png', 'topics/a.md')).toBeNull();
     expect(resolveResourceKey('//cdn.example.com/p.png', 'topics/a.md')).toBeNull();
+  });
+});
+
+describe('connector paths', () => {
+  it('keeps a two-point connector a plain straight line', () => {
+    expect(buildOrthogonalPath([{ x: 0, y: 0 }, { x: 100, y: 0 }])).toBe('M 0 0 L 100 0');
+    expect(buildOrthogonalPath([{ x: 0, y: 0 }, { x: 0, y: 40 }])).toBe('M 0 0 L 0 40');
+    expect(buildOrthogonalPath([])).toBe('');
+  });
+
+  it('rounds a corner on both sides of it by the shared radius', () => {
+    const path = buildOrthogonalPath([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }]);
+    expect(path).toBe('M 0 0 L 94 0 Q 100 0 100 6 L 100 100');
+  });
+
+  it('leaves corners alone when a segment is shorter than two radii', () => {
+    // The 10px middle segment cannot host two 6px fillets, so nothing is cut.
+    const points = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 10 }, { x: 0, y: 10 }];
+    expect(buildOrthogonalPath(points)).toBe('M 0 0 L 100 0 L 100 10 L 0 10');
+    // A single short run between two long ones keeps only the corner it can round.
+    const mixed = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 500 }];
+    expect(buildOrthogonalPath(mixed).startsWith('M 0 0 L 94 0 Q 100 0 100 6')).toBe(true);
+  });
+
+  it('keeps the vertex list of a polyline predictable', () => {
+    const points = [{ x: 10, y: 10 }, { x: 60, y: 10 }, { x: 60, y: 40 }, { x: 130, y: 40 }];
+    const path = buildOrthogonalPath(points);
+    expect(path).toBe('M 10 10 L 54 10 Q 60 10 60 16 L 60 34 Q 60 40 66 40 L 130 40');
+    // Rounded corners only shorten the drawn line.
+    expect(pathLength(points)).toBeLessThan(pathLength(points, 0));
+    expect(pathLength(points, 0)).toBeCloseTo(50 + 30 + 70, 6);
+  });
+});
+
+describe('trunked branch labels', () => {
+  /** Parent with three right-side branches, one of them branching again. */
+  const nodes: LayoutInput['nodes'] = [
+    { id: 'p', from: null, flow: 'root', label: '根' },
+    { id: 'c1', from: 'p', flow: 'branch', side: 'right', order: 10, label: '第一条并列分支的关系文字会换行' },
+    { id: 'c2', from: 'p', flow: 'branch', side: 'right', order: 20, label: '第二条并列分支的关系文字同样需要两三行空间才能读完' },
+    { id: 'c3', from: 'p', flow: 'branch', side: 'right', order: 30, label: '第三条' },
+    { id: 'g1', from: 'c1', flow: 'branch', side: 'right', order: 10, label: '枝内再分支' },
+    { id: 'g2', from: 'c1', flow: 'branch', side: 'right', order: 20, label: '枝内再分支的第二条' },
+  ];
+  const layout = computeLayout({ nodes, visibleNodeIds: nodes.map((item) => item.id) });
+
+  it('keeps the label box on its own stub, clear of the trunk and the target centre', () => {
+    const trunks = new Map(layout.branchTrunks.map((trunk) => [trunk.from + '~' + trunk.side, trunk]));
+    let checked = 0;
+    for (const route of layout.edgeRoutes) {
+      if (route.join === undefined || route.side === undefined) continue;
+      const trunk = trunks.get(route.from + '~' + route.side);
+      const target = layout.positions[route.to];
+      const end = route.points[route.points.length - 1];
+      if (trunk === undefined || target === undefined || end === undefined) continue;
+      const text = nodes.find((item) => item.id === route.to)?.label ?? '';
+      const box = layoutEdgeLabel(route, text);
+      expect(box).not.toBeNull();
+      if (box === null) continue;
+      // Both bounds are measured on the stub itself: 8 below the join, 4 above
+      // the point where the drop line reaches the card centre.
+      expect(box.top).toBeGreaterThanOrEqual(route.join.y + 8 - 0.001);
+      expect(box.top + box.height).toBeLessThanOrEqual(end.y - 4 + 0.001);
+      expect(box.top).toBeGreaterThan(trunk.trunkY);
+      checked += 1;
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  it('never puts a label box on top of a card', () => {
+    const cards = Object.entries(layout.positions).map(([id, position]) => ({
+      x: position.x,
+      y: position.y,
+      width: layout.cardWidth,
+      height: layout.heights[id] ?? layout.cardHeight,
+    }));
+    for (const route of layout.edgeRoutes) {
+      const text = nodes.find((item) => item.id === route.to)?.label ?? '';
+      const box = layoutEdgeLabel(route, text);
+      if (box === null) continue;
+      for (const card of cards) {
+        const overlapX = box.left < card.x + card.width - 0.5 && box.left + box.width > card.x + 0.5;
+        const overlapY = box.top < card.y + card.height - 0.5 && box.top + box.height > card.y + 0.5;
+        expect(overlapX && overlapY).toBe(false);
+      }
+    }
+  });
+});
+
+describe('branch label bounds', () => {
+  /** A right-side branch: trunk at y=328, card edge x=520, target centre y=476. */
+  function rightBranch(overrides: Partial<LayoutEdgeRoute> = {}): LayoutEdgeRoute {
+    return {
+      id: 'p->c', from: 'p', to: 'c', flow: 'branch', side: 'right',
+      join: { x: 472, y: 328 },
+      points: [{ x: 472, y: 328 }, { x: 472, y: 476 }, { x: 520, y: 476 }],
+      labelAnchor: { x: 472, y: 420 },
+      labelWidth: 80,
+      ...overrides,
+    };
+  }
+
+  it('centres the box on the anchor, where the drop line runs', () => {
+    const box = layoutEdgeLabel(rightBranch(), '关系文字');
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    // The drop line at x=472 passes through the middle of the board.
+    expect(box.centerX).toBeCloseTo(472, 6);
+    expect(box.left).toBeCloseTo(472 - box.width / 2, 6);
+  });
+
+  it('mirrors the centring for a left branch', () => {
+    const route = rightBranch({
+      side: 'left',
+      join: { x: 168, y: 328 },
+      points: [{ x: 168, y: 328 }, { x: 168, y: 476 }, { x: 120, y: 476 }],
+      labelAnchor: { x: 168, y: 420 },
+    });
+    const box = layoutEdgeLabel(route, '关系文字');
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    expect(box.centerX).toBeCloseTo(168, 6);
+  });
+
+  it('hangs the box between the join and the target centre', () => {
+    const box = layoutEdgeLabel(rightBranch(), '关系文字');
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    expect(box.top).toBeGreaterThanOrEqual(328 + 8);
+    // 476 is where the drop line reaches the target centre, not the card top.
+    expect(box.top + box.height).toBeLessThanOrEqual(476 - 4);
+  });
+
+  it('keeps the box top at least 8px below the trunk', () => {
+    // Anchor almost on the trunk: the box must still hang below it.
+    const box = layoutEdgeLabel(rightBranch({ labelAnchor: { x: 472, y: 330 } }), '关系文字');
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    expect(box.top).toBeCloseTo(328 + 8, 6);
+  });
+
+  it('presses the join but never crosses the target centre when the stub is too short', () => {
+    // 32px of stub cannot hold a three-line board below the trunk pad.
+    const route = rightBranch({
+      points: [{ x: 472, y: 328 }, { x: 472, y: 360 }, { x: 520, y: 360 }],
+      labelAnchor: { x: 472, y: 344 },
+    });
+    const box = layoutEdgeLabel(route, '一条需要三行才能读完的关系文字');
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    expect(box.top).toBeLessThan(328 + 8);
+    expect(box.top + box.height).toBeCloseTo(360, 6);
+  });
+
+  it('keeps the board off the target card edge when centring would cross it', () => {
+    // A gap narrower than the board: hugging the card wins, centring does not.
+    const box = layoutEdgeLabel(rightBranch({ labelWidth: 200 }), '一条需要三行才能读完的关系文字');
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    expect(box.left + box.width).toBeCloseTo(520, 6);
+
+    const left = layoutEdgeLabel(
+      rightBranch({
+        side: 'left',
+        join: { x: 168, y: 328 },
+        points: [{ x: 168, y: 328 }, { x: 168, y: 476 }, { x: 120, y: 476 }],
+        labelAnchor: { x: 168, y: 420 },
+        labelWidth: 200,
+      }),
+      '一条需要三行才能读完的关系文字',
+    );
+    expect(left).not.toBeNull();
+    if (left === null) return;
+    // 120 is the card's right edge; the board may not start left of it.
+    expect(left.left).toBeCloseTo(120, 6);
+  });
+
+  describe('a branch with no join (single Z)', () => {
+    /** Source edge x=520, channel x=564, card edge x=608. */
+    function loneZ(sourceCentreY: number, targetCentreY: number, anchorY: number): LayoutEdgeRoute {
+      return {
+        id: 'p->c', from: 'p', to: 'c', flow: 'branch', side: 'right',
+        points: [
+          { x: 520, y: sourceCentreY },
+          { x: 564, y: sourceCentreY },
+          { x: 564, y: targetCentreY },
+          { x: 608, y: targetCentreY },
+        ],
+        labelAnchor: { x: 564, y: anchorY },
+        labelWidth: 72,
+      };
+    }
+
+    it('centres on the anchor while the channel can hold the board', () => {
+      const box = layoutEdgeLabel(loneZ(400, 560, 480), '关系文字');
+      expect(box).not.toBeNull();
+      if (box === null) return;
+      expect(box.centerX).toBeCloseTo(564, 6);
+      expect(box.top).toBeCloseTo(480 - box.height / 2, 6);
+    });
+
+    it('falls back to the run midpoint when the board cannot fit (off-mid anchor guard)', () => {
+      // Defensive branch only: layout always anchors a lone branch on midY,
+      // which already is the midpoint of its vertical run, so on real routes
+      // this clamp changes nothing. The fixture is deliberately off-mid (405
+      // against a 400..420 run) to prove the guard exists for a future anchor
+      // change. It does not make the corners visible — an 18px board on a 20px
+      // run covers them, and only a longer rise can fix that.
+      const box = layoutEdgeLabel(loneZ(400, 420, 405), '关系文字');
+      expect(box).not.toBeNull();
+      if (box === null) return;
+      expect(box.top).toBeCloseTo((400 + 420) / 2 - box.height / 2, 6);
+      expect(box.top).not.toBeCloseTo(405 - box.height / 2, 6);
+    });
+  });
+
+  it('never produces a negative width in a narrow gap', () => {
+    const box = layoutEdgeLabel(rightBranch({ labelWidth: 40 }), '一条需要三行才能读完的关系文字');
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.left).toBeLessThanOrEqual(520);
+  });
+});
+
+describe('connector edge list', () => {
+  const view = buildGraphView(graph, new Set(), null);
+
+  /** One trunk over n1~right plus a branch route that leaves it. */
+  const layout: LayoutResult = {
+    positions: {
+      n1: { x: 0, y: 0 }, n2: { x: 0, y: 216 }, n3: { x: 448, y: 400 },
+      n4: { x: 448, y: 616 }, n5: { x: 0, y: 432 },
+    },
+    edgeRoutes: [
+      {
+        id: 'n1->n3', from: 'n1', to: 'n3', flow: 'branch' as const, side: 'right' as const,
+        points: [{ x: 472, y: 400 }, { x: 508, y: 400 }],
+        join: { x: 472, y: 328 },
+      },
+    ],
+    branchTrunks: [
+      {
+        id: 'n1~right', from: 'n1', side: 'right' as const, to: 'n3', trunkY: 328,
+        points: [{ x: 360, y: 76 }, { x: 388, y: 76 }, { x: 388, y: 328 }, { x: 472, y: 328 }],
+      },
+    ],
+    hiddenCounts: {}, diagnostics: [],
+    bounds: { x: 0, y: 0, width: 808, height: 768 },
+    cardWidth: 360, cardHeight: 152, heights: {}, layoutVersion: 1, structureVersion: null,
+  };
+
+  it('keeps one edge per relationship and one path per trunk', () => {
+    const edges = buildFlowEdges(layout, view);
+    const relationEdges = edges.filter((edge) => edge.type === 'route');
+    const trunkEdges = edges.filter((edge) => edge.type === 'trunk');
+    expect(relationEdges.map((edge) => edge.id).sort()).toEqual(['n1->n2', 'n1->n3', 'n2->n5', 'n3->n4']);
+    expect(trunkEdges.map((edge) => edge.id)).toEqual(['trunk|n1~right']);
+    expect(edges.length).toBe(relationEdges.length + trunkEdges.length);
+  });
+
+  it('draws trunks as non-interactive display geometry', () => {
+    const trunk = buildFlowEdges(layout, view).find((edge) => edge.type === 'trunk');
+    expect(trunk?.source).toBe('n1');
+    expect(trunk?.target).toBe('n3');
+    expect(trunk?.selectable).toBe(false);
+    expect(trunk?.focusable).toBe(false);
+    expect(trunk?.deletable).toBe(false);
+    expect(trunk?.label).toBeUndefined();
+  });
+
+  it('carries the route, not a label box, in the edge data', () => {
+    // The label is derived from the route alone; no card metric is smuggled in.
+    const edges = buildFlowEdges(layout, view);
+    const branch = edges.find((edge) => edge.id === 'n1->n3');
+    expect((branch?.data as { route?: unknown } | undefined)?.route).toBeDefined();
+    expect(edges.find((edge) => edge.type === 'trunk')?.label).toBeUndefined();
   });
 });

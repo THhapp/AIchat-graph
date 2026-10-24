@@ -14,10 +14,15 @@ export interface LayoutNodeInput {
   /** 有效输入中 root 为 null，其余节点为工作区内的父节点 ID。 */
   from?: string | null | undefined;
   flow: LayoutFlow;
-  /** 仅 branch 使用；缺省规范化为 right。 */
+  /** 仅 branch：源记录明确声明的方向；null/undefined 表示由布局自动择侧。 */
   side?: LayoutSide | null | undefined;
   /** 仅 branch 使用；整数升序，缺失时按 ID 排在后面。 */
   order?: number | null | undefined;
+  /**
+   * 卡片高度提示（px）。布局只把它当作几何量，绝不从标题/正文推导。
+   * 非法值回退 cardHeight。
+   */
+  height?: number | null | undefined;
   /** 仅用于生成 labelAnchor，不参与坐标和碰撞计算。 */
   label?: string | null | undefined;
   /** 保留字段；当前不输出主题框，不参与坐标。 */
@@ -38,7 +43,25 @@ export interface LayoutRect extends LayoutPoint {
 }
 
 /**
+ * 同一来源同一侧的并列分支共用干线；纯显示几何，不是思想节点或关系。
+ * 干线自源卡出口横出、竖直上升到 trunkY，再水平延伸到最远接出点。
+ */
+export interface LayoutBranchTrunk {
+  /** 稳定 id：`${from}~${side}`。 */
+  id: string;
+  from: string;
+  side: LayoutSide;
+  /** 最远成员节点 id：仅用于界面把它挂成一条边，不表示关系。 */
+  to: string;
+  /** 出口横段 → 上升竖段 → 横向干线（止于最远接出点）。 */
+  points: LayoutPoint[];
+  /** 干线所在 y。 */
+  trunkY: number;
+}
+
+/**
  * 正交折线。首尾点落在卡片边缘，中间点只做水平/垂直移动。
+ * branch 边可能只画干线之外的独占段，共享段见 LayoutBranchTrunk。
  */
 export interface LayoutEdgeRoute {
   /** 稳定边 ID：`${from}->${to}`。 */
@@ -46,11 +69,16 @@ export interface LayoutEdgeRoute {
   from: string;
   to: string;
   flow: 'next' | 'branch';
-  /** branch 边的规范化方向；next 边省略。 */
+  /** branch：最终实际落位的一侧（显式或自动），供界面显示方向；next 省略。 */
   side?: LayoutSide;
+  /** branch 边：干线上的接出点；单条直连（无干线）时省略。 */
+  join?: LayoutPoint;
+  /** branch 边：独占支线。有 join 时 points[0] 等于 join。 */
   points: LayoutPoint[];
-  /** 有 label 的边在最长线段中点上的放置点；文本宽度不参与计算。 */
+  /** 关系文字的放置中心；没有 label 时省略。 */
   labelAnchor?: LayoutPoint;
+  /** 关系文字的可用宽度（px）；没有 label 时省略。 */
+  labelWidth?: number;
 }
 
 export type LayoutDiagnosticCode =
@@ -69,6 +97,7 @@ export type LayoutDiagnosticCode =
   | 'visibility-root-hidden'
   | 'cycle'
   | 'unreachable-node'
+  | 'branch-band-shifted'
   | 'route-fallback'
   | 'previous-positions-ignored'
   | 'diagnostics-truncated';
@@ -105,12 +134,19 @@ export interface LayoutResult {
   /** 仅可见节点，键为稳定节点 ID，值为左上角坐标。 */
   positions: Record<string, LayoutPosition>;
   edgeRoutes: LayoutEdgeRoute[];
+  /** 共享干线；单张直连的组不产出。 */
+  branchTrunks: LayoutBranchTrunk[];
   /** 折叠节点 -> 被隐藏的后代数；省略 0。 */
   hiddenCounts: Record<string, number>;
   diagnostics: LayoutDiagnostic[];
+  /** 按每张卡的实际高度计算的包围盒。 */
   bounds: LayoutRect;
+  /** 默认卡片宽度；单卡可能是其他宽度提示，此处仍是默认值。 */
   cardWidth: number;
+  /** 默认卡片高度；单卡实际高度见 heights。 */
   cardHeight: number;
+  /** 每个可见节点的实际卡片高度（含 height 提示，缺省用 cardHeight）。 */
+  heights: Record<string, number>;
   /** 本模块输出契约版本。 */
   layoutVersion: number;
   /** 回显调用方的 structureVersion；未提供时为 null。 */
@@ -121,5 +157,5 @@ export const DEFAULT_CARD_WIDTH = 360;
 export const DEFAULT_CARD_HEIGHT = 152;
 export const DEFAULT_VERTICAL_GAP = 64;
 export const DEFAULT_HORIZONTAL_GAP = 88;
-export const LAYOUT_VERSION = 1;
+export const LAYOUT_VERSION = 4;
 export const MAX_LAYOUT_DIAGNOSTICS = 32;

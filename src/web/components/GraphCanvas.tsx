@@ -7,6 +7,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useNodesState,
+  useOnViewportChange,
   useReactFlow,
   type Edge,
   type Node,
@@ -14,12 +15,13 @@ import {
   type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
-import type { LayoutResult } from '../layout/types.js';
-import type { GraphView } from '../graph/viewModel.js';
+import type { GraphNode, GraphResponse, BranchSide } from '../../shared/protocol.js';
+import type { LayoutBranchTrunk, LayoutResult } from '../layout/types.js';
+import { connectionText, type GraphView } from '../graph/viewModel.js';
 import type { SavedViewport } from '../data/readingState.js';
 import { TopicCard, type TopicCardData } from './TopicCard.js';
 import { RouteEdge } from './RouteEdge.js';
+import { TrunkEdge } from './TrunkEdge.js';
 
 export interface CanvasProps {
   graph: GraphResponse;
@@ -44,12 +46,97 @@ export interface CanvasProps {
 }
 
 const nodeTypes = { topic: TopicCard };
-const edgeTypes = { route: RouteEdge };
+const edgeTypes = { route: RouteEdge, trunk: TrunkEdge };
+
+/**
+ * Display edges for one layout result.
+ *
+ * One relationship is still exactly one edge (and one label), but the shared
+ * geometry of sibling branches is now a separate, relationship-free edge: the
+ * trunk is drawn once and every branch only paints its own exclusive stub from
+ * the join down to its target. Counting stays checkable — relationship edges
+ * equal the visible parent links, display paths equal that plus the trunks.
+ */
+export function buildFlowEdges(layout: LayoutResult, view: GraphView): Edge[] {
+  const routes = new Map(layout.edgeRoutes.map((route) => [route.id, route]));
+  const edges: Edge[] = [];
+
+  // Trunks first, so the branch stubs are painted over the shared run.
+  for (const trunk of layout.branchTrunks ?? []) {
+    if (trunk.points.length < 2) continue;
+    // `to` is only the node that mounts the display edge (the farthest member);
+    // the geometry comes from `points`, never from the node positions.
+    if (!view.visibleIds.has(trunk.from) || !view.visibleIds.has(trunk.to)) continue;
+    if (layout.positions[trunk.from] === undefined || layout.positions[trunk.to] === undefined) continue;
+    edges.push({
+      id: 'trunk|' + trunk.id,
+      source: trunk.from,
+      target: trunk.to,
+      type: 'trunk',
+      className: 'rf-edge--trunk',
+      data: { trunk },
+      selectable: false,
+      focusable: false,
+      deletable: false,
+    });
+  }
+
+  for (const node of view.nodes) {
+    if (node.from === null || !view.visibleIds.has(node.from)) continue;
+    if (layout.positions[node.id] === undefined || layout.positions[node.from] === undefined) continue;
+    const id = node.from + '->' + node.id;
+    const route = routes.get(id) ?? null;
+    edges.push({
+      id,
+      source: node.from,
+      target: node.id,
+      type: 'route',
+      className: 'rf-edge--' + node.flow,
+      // Format 2 keeps the relationship sentence in description; label is the
+      // legacy format-1 field. The connector is now the only place it is drawn.
+      label: connectionText(node) || undefined,
+      data: { flow: node.flow, route },
+      selectable: false,
+      focusable: false,
+      deletable: false,
+    });
+  }
+  return edges;
+}
 
 function CanvasInner(props: CanvasProps): React.JSX.Element {
   const { graph, view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, anchorScreen } = props;
   const { fitView, getNode, setViewport, getViewport } = useReactFlow();
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Connector strokes are screen-fixed, not graph-fixed (see graph.css): the
+   * canvas zoom is a CSS transform on `.react-flow__viewport`, an HTML ancestor of
+   * the edge <svg>, so an SVG `vector-effect` cannot cancel it — measured, a 1.5px
+   * line still painted 0.96px at 0.64. CSS therefore gets the scale and multiplies
+   * the stroke back up.
+   *
+   * At 1x and above the scale stays 1: zooming in keeps 1.25 flow px, so the line
+   * thickens together with the cards.
+   * Below 1x it is `min(1 / zoom, 5)`. The 5 is exactly minZoom, so the stroke
+   * still paints 1.25 / 1.5 screen px at 0.2 instead of fading into a sub-pixel
+   * hairline (a 2x cap left 0.6px there, i.e. the fix kept a blind spot).
+   * At 0.2 a connector is then ~3.5x the card border (measured: the 1px border
+   * paints 0.36px, not 0.2px — Chrome keeps a minimum coverage). That ratio is
+   * deliberate rather than a leftover asymmetry: at that zoom the card text is
+   * unreadable and the connectors are the only layer still expressing structure.
+   *
+   * Published as a custom property, not React state: zooming then costs one style
+   * write per frame instead of re-rendering every edge. `useOnViewportChange` fires
+   * from the same transform handler as `onMove` (and also for programmatic
+   * setViewport / fitView), which is why init and "view all" need no extra write.
+   * The callback identity must be stable — the hook re-registers it per identity.
+   */
+  const publishEdgeScale = useCallback((viewport: Viewport) => {
+    const edgeScale = viewport.zoom < 1 ? Math.min(1 / viewport.zoom, 5) : 1;
+    containerRef.current?.style.setProperty('--edge-scale', String(edgeScale));
+  }, []);
+  useOnViewportChange({ onChange: publishEdgeScale });
 
   /** React Flow viewport x/y are relative to its container, not the page. */
   const containerOrigin = (): { x: number; y: number; width: number; height: number } => {
@@ -76,25 +163,36 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
     if (layout === null) return [];
     const children = view.childCounts;
     const collapsed = new Set(view.collapsedIds);
+    // Each card keeps its own height (title wrap); width stays shared by the layout.
+    const heights = layout.heights;
+    // The side a branch actually landed on, so the card hint matches the drawing.
+    const edgeSides = new Map<string, BranchSide>();
+    for (const route of layout.edgeRoutes) {
+      if (route.side !== undefined) edgeSides.set(route.id, route.side);
+    }
     const result: Node<TopicCardData>[] = [];
     for (const node of view.nodes) {
       const position = layout.positions[node.id];
       // A node without coordinates must never reach React Flow: it would be
       // initialised with an undefined position and crash the reader.
       if (position === undefined || !Number.isFinite(position.x) || !Number.isFinite(position.y)) continue;
+      const height = heights[node.id] ?? layout.cardHeight;
       result.push({
         id: node.id,
         type: 'topic',
         position: { x: position.x, y: position.y },
         width: layout.cardWidth,
-        height: layout.cardHeight,
+        height,
         draggable: false,
         connectable: false,
         selectable: true,
         selected: node.id === selectedNodeId,
         data: {
           node,
+          height,
           active: node.id === activeNodeId,
+          // Only the incoming edge carries this node's direction.
+          resolvedSide: node.from === null ? null : edgeSides.get(node.from + '->' + node.id) ?? null,
           // The UI owns this number: it counts descendants hidden by this collapse
           // within the current topic filter. Layout only receives already-filtered
           // input, so its hiddenCounts cannot know about them.
@@ -109,29 +207,11 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
     return result;
   }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, onOpenNodeDetail]);
 
+  // `layout` is the dependency that carries `edgeRoutes` and `branchTrunks`
+  // together, so a new trunk set always rebuilds the edge list.
   const flowEdges = useMemo<Edge[]>(() => {
     if (layout === null) return [];
-    const routes = new Map(layout.edgeRoutes.map((route) => [route.id, route]));
-    const edges: Edge[] = [];
-    for (const node of view.nodes) {
-      if (node.from === null || !view.visibleIds.has(node.from)) continue;
-      if (layout.positions[node.id] === undefined || layout.positions[node.from] === undefined) continue;
-      const id = node.from + '->' + node.id;
-      const route = routes.get(id) ?? null;
-      edges.push({
-        id,
-        source: node.from,
-        target: node.id,
-        type: 'route',
-        className: 'rf-edge--' + node.flow,
-        label: node.label,
-        data: { flow: node.flow, route },
-        selectable: false,
-        focusable: false,
-        deletable: false,
-      });
-    }
-    return edges;
+    return buildFlowEdges(layout, view);
   }, [layout, view]);
 
   useEffect(() => {

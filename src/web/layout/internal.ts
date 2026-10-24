@@ -21,8 +21,11 @@ export interface WorkingNode {
   inputIndex: number;
   flow: LayoutFlow;
   parentId: string | null;
-  side: LayoutSide;
+  /** 源记录明确声明的方向；null 表示由布局自动择侧。 */
+  declaredSide: LayoutSide | null;
   order: number | null;
+  /** 实际卡片高度；已按 height 提示或 cardHeight 归一。 */
+  height: number;
   label: string | null;
   topicId: string | null;
 }
@@ -35,7 +38,17 @@ export interface BlockNode {
 
 export interface Block {
   width: number;
-  height: number;
+  /** head 卡的实际高度；同带落位按它判断卡片占用。 */
+  headHeight: number;
+  /** 全块最低边界（head 为原点，向下为正）。 */
+  bottom: number;
+  /** head 上方需要预留的走廊高度，供父 block 判断落位。 */
+  topExtent: number;
+  /**
+   * 本块 head 所在带的分组嵌套深度：0 表示这条带上只有父组一层，
+   * 成员自己在带内再分支时再加一层。干线按它逐层抬高，同带上的组不共线。
+   */
+  bandDepth: number;
   nodes: BlockNode[];
 }
 
@@ -64,6 +77,12 @@ export interface MeasureContext {
   diagnostics: DiagnosticSink;
   memo: Map<string, Block>;
   visiting: Set<string>;
+  /** 每个 branch 的实际落位方向（显式或自动），路由与界面提示复用。 */
+  sides: Map<string, LayoutSide>;
+  /** 并列分组深度：`${from}~${side}` -> 该组在带内的嵌套层数（父组为 0）。 */
+  groupDepths: Map<string, number>;
+  /** branch 节点在父 block 内落到的列（从 1 起，越靠近主脊越小）。 */
+  columns: Map<string, number>;
 }
 
 export function compareIds(a: string, b: string): number {
@@ -80,11 +99,13 @@ export function emptyResult(
   return {
     positions: {},
     edgeRoutes: [],
+    branchTrunks: [],
     hiddenCounts: {},
     diagnostics,
     bounds: { x: 0, y: 0, width: 0, height: 0 },
     cardWidth: config.cardWidth,
     cardHeight: config.cardHeight,
+    heights: {},
     layoutVersion: LAYOUT_VERSION,
     structureVersion,
   };

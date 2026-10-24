@@ -45,7 +45,10 @@ export interface GraphNode {
   from: string | null;
   flow: NodeFlow;
   state: NodeState;
-  /** branch only; normalized to 'right' when the source omits it. */
+  /**
+   * branch only; present only when the source record declares a side explicitly.
+   * Absent means "the source did not choose"; the reading side picks the side.
+   */
   side?: BranchSide;
   /** branch only; integer ordering among siblings of the same source. */
   order?: number;

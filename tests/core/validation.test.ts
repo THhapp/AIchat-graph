@@ -316,7 +316,7 @@ describe("工作区图约束", () => {
     expect(graphCodes([rootOrder])).toContain("NODE_FLOW_FIELD_INVALID");
   });
 
-  it("branch 省略 side／order 时仍校验通过，视图规范化为 right", () => {
+  it("branch 省略 side／order 时仍校验通过，视图不补 side", () => {
     const text = renderTopic({
       nodes: [
         baseNodes[0]!,
@@ -327,7 +327,7 @@ describe("工作区图约束", () => {
     const result = validateWorkspace({ workspace: workspaceMeta(null), topics: [topicOf(text)] });
     expect(result.ok).toBe(true);
     const branches = result.graph!.nodes.filter((node) => node.flow === "branch");
-    expect(branches.map((node) => node.side)).toEqual(["left", "right"]);
+    expect(branches.map((node) => node.side)).toEqual(["left", undefined]);
     expect(branches.map((node) => node.number)).toEqual(["01-01", "01-02"]);
     expect(result.graph!.nodes.find((node) => node.id === N2)?.order).toBeUndefined();
   });

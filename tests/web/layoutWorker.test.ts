@@ -35,7 +35,9 @@ function result(ids: string[], version: string): LayoutResult {
   return {
     positions,
     edgeRoutes: [],
+    branchTrunks: [],
     hiddenCounts: {},
+    heights: {},
     diagnostics: [],
     bounds: { x: 0, y: 0, width: 360, height: 216 * ids.length },
     cardWidth: 360,

@@ -28,15 +28,16 @@ export function StateChip({ node, active = false }: { node: Pick<GraphNode, 'sta
   );
 }
 
-export function flowLabel(node: Pick<GraphNode, 'flow' | 'side'>): string {
+/**
+ * `resolvedSide` is the side layout actually used for this branch. Without an
+ * explicit or resolved direction the label stays neutral instead of claiming a
+ * right-hand branch the drawing may contradict.
+ */
+export function flowLabel(node: Pick<GraphNode, 'flow' | 'side'>, resolvedSide?: 'left' | 'right' | null): string {
   if (node.flow === 'root') return '根节点';
   if (node.flow === 'next') return '纵向续接';
-  return node.side === 'left' ? '左侧分支' : '右侧分支';
-}
-/** Truncates by code points so Chinese text is never cut mid-surrogate. */
-export function truncate(text: string, limit: number): string {
-  const trimmed = text.trim();
-  const chars = [...trimmed];
-  if (chars.length <= limit) return trimmed;
-  return chars.slice(0, limit).join('') + '…';
+  const side = resolvedSide ?? node.side ?? null;
+  if (side === 'left') return '左侧分支';
+  if (side === 'right') return '右侧分支';
+  return '分支';
 }
