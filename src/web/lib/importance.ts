@@ -77,41 +77,69 @@ export function importanceErrorMessage(error: unknown): string {
 }
 
 export interface UseImportanceOptions {
-  node: GraphNode | null;
-  /** Hash of the body currently displayed for this node, or null. */
-  expectedHash: string | null;
   onApplied: (node: GraphNode) => void;
   onRefresh: () => void;
 }
 
-export interface ImportanceState {
-  busy: boolean;
-  error: string | null;
-  set: (important: boolean) => void;
+export interface ImportanceError {
+  /** Stable node id the failed write was for. */
+  nodeId: string;
+  message: string;
 }
 
-export function useImportance({ node, expectedHash, onApplied, onRefresh }: UseImportanceOptions): ImportanceState {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const abort = useRef<AbortController | null>(null);
+export interface ImportanceState {
+  /** Stable node ids with a write in flight; cards and the detail panel read this. */
+  busyIds: ReadonlySet<string>;
+  /** Latest failed write, if any; independent from the current selection. */
+  error: ImportanceError | null;
+  /**
+   * Writes one node's flag. `expectedHash` is optional: the detail panel supplies
+   * the body hash it actually displayed, a card operation submits without one.
+   */
+  set: (node: GraphNode, important: boolean, expectedHash?: string | null) => void;
+  clearError: () => void;
+}
 
-  useEffect(() => () => { abort.current?.abort(); }, []);
+/**
+ * One write state for every target node. The detail panel and canvas cards both
+ * use this hook, so a card can be marked without first selecting it and there is
+ * no second copy of busy/error state. A successful write is mirrored locally
+ * through `onApplied` and followed by a graph refresh; the service stays the
+ * source of truth.
+ */
+export function useImportance({ onApplied, onRefresh }: UseImportanceOptions): ImportanceState {
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [error, setError] = useState<ImportanceError | null>(null);
+  const aborts = useRef(new Map<string, AbortController>());
 
-  // A different card must not inherit the previous failure message.
-  const nodeId = node?.id ?? null;
-  useEffect(() => { setError(null); }, [nodeId]);
+  useEffect(() => () => {
+    for (const controller of aborts.current.values()) controller.abort();
+    aborts.current.clear();
+  }, []);
 
-  const set = useCallback((important: boolean) => {
-    if (node === null) return;
+  const markBusy = useCallback((nodeId: string, busy: boolean) => {
+    setBusyIds((current) => {
+      const next = new Set(current);
+      if (busy) next.add(nodeId);
+      else next.delete(nodeId);
+      return next;
+    });
+  }, []);
+
+  const clearError = useCallback(() => { setError(null); }, []);
+
+  const set = useCallback((node: GraphNode, important: boolean, expectedHash: string | null = null) => {
+    const nodeId = node.id;
+    const previous = aborts.current.get(nodeId);
+    previous?.abort();
     const controller = new AbortController();
-    abort.current?.abort();
-    abort.current = controller;
-    setBusy(true);
+    aborts.current.set(nodeId, controller);
+    markBusy(nodeId, true);
     setError(null);
     writeImportance(
       {
         topicId: node.topicId,
-        nodeId: node.id,
+        nodeId,
         important,
         ...(expectedHash !== null ? { expectedHash } : {}),
       },
@@ -119,18 +147,20 @@ export function useImportance({ node, expectedHash, onApplied, onRefresh }: UseI
     ).then(
       (result) => {
         if (controller.signal.aborted) return;
-        setBusy(false);
+        if (aborts.current.get(nodeId) === controller) aborts.current.delete(nodeId);
+        markBusy(nodeId, false);
         onApplied(result.node);
         // The service owns the source; the local snapshot only mirrors the answer.
         onRefresh();
       },
       (cause: unknown) => {
         if (controller.signal.aborted) return;
-        setBusy(false);
-        setError(importanceErrorMessage(cause));
+        if (aborts.current.get(nodeId) === controller) aborts.current.delete(nodeId);
+        markBusy(nodeId, false);
+        setError({ nodeId, message: importanceErrorMessage(cause) });
       },
     );
-  }, [node, expectedHash, onApplied, onRefresh]);
+  }, [markBusy, onApplied, onRefresh]);
 
-  return { busy, error, set };
+  return { busyIds, error, set, clearError };
 }

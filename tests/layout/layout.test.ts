@@ -171,11 +171,12 @@ describe('computeLayout', () => {
     expect(p07.y).toBe(clusterBottom + VG);
     expect(p07.y).toBeGreaterThan(p06.y + H + VG);
 
-    // 侧枝独占右侧一列，枝内 next 沿本列继续；再分支属于分支自己的块，整条带下移 24（层级提示）。
+    // 侧枝独占右侧一列，枝内 next 沿本列继续；再分支属于分支自己的块：
+    // 分支 head 的直接子项统一落在 head 下方那条带（有 next 时与 next 同层再下移 24）。
     expect(p0603.x).toBeGreaterThan(p06.x + W);
     expect(p0603.y).toBe(p06.y);
     expect(p0604.x).toBe(p0603.x);
-    expect(position(result, '06-03-01').y).toBe(p0603.y + 24);
+    expect(position(result, '06-03-01').y).toBe(p0603.y + H + VG + 24);
     expect(p0604.y).toBeGreaterThan(p0603.y + H);
 
     // 06-03 的 next 不会接到 07 上。
@@ -204,8 +205,8 @@ describe('computeLayout', () => {
     const p0631 = position(result, '06-03-01');
     const p0632 = position(result, '06-03-02');
     expect(p0631.x).toBeGreaterThan(p0603.x + W);
-    // 再分支属于它自己的父节点：落在父分支所在带的外侧列，且整条子分支带下移 24（层级提示）。
-    expect(p0631.y).toBe(p0603.y + 24);
+    // 再分支属于它自己的父节点：落在父分支下方那条带（父分支有 next，故与 next 同层再下移 24）。
+    expect(p0631.y).toBe(p0603.y + H + VG + 24);
     expect(p0632.x).toBe(p0631.x);
     expect(p0632.y).toBe(p0631.y + H + VG);
     expect(overlaps(result)).toEqual([]);
@@ -307,10 +308,11 @@ describe('computeLayout', () => {
     // 入口侧成员与出口侧成员共用 head 下方那一条带：入口侧只走一次 Z 形短折，没有干线、没有 join。
     expect(result.branchTrunks.some((item) => item.id === 'b~left')).toBe(false);
     expect(back.join).toBeUndefined();
-    // 入口侧出线从卡片底边分出：父节点连进来的横线在卡片中心行，若也从那里横出就会与它重合。
+    // 入口侧出线从同侧边的第二个端口分出（中心下方固定偏移），
+    // 父节点连进来的中心行横线仍接目标侧边中心；左右镜像。
     expect(back.points).toEqual([
-      { x: b.x, y: b.y + H },
-      { x: b.x - HG / 2, y: b.y + H },
+      { x: b.x, y: b.y + H / 2 + 18 },
+      { x: b.x - HG / 2, y: b.y + H / 2 + 18 },
       { x: b.x - HG / 2, y: bBack.y + H / 2 },
       { x: bBack.x + W, y: bBack.y + H / 2 },
     ]);
@@ -344,9 +346,9 @@ describe('computeLayout', () => {
 
     const into = route(result, 'r->br');
     const out = route(result, 'br->bl');
-    // 进入父卡：父卡朝向来源那一侧的中心行；从父卡分出：左支从父卡底边分出。
+    // 进入父卡：父卡朝向来源那一侧的中心行；从父卡分出：左支从同侧边中心下方的第二个端口分出。
     expect(into.points[into.points.length - 1]).toEqual({ x: br.x, y: br.y + H / 2 });
-    expect(out.points[0]).toEqual({ x: br.x, y: br.y + H });
+    expect(out.points[0]).toEqual({ x: br.x, y: br.y + H / 2 + 18 });
     // 两条线不重合：没有任何一截被画两遍。
     expect(sharedSegments(into.points, out.points)).toEqual([]);
     expect(overlaps(result)).toEqual([]);
@@ -354,7 +356,7 @@ describe('computeLayout', () => {
     expect(result.diagnostics).toEqual([]);
   });
 
-  it('moves the whole child band with its shared trunk, still leaving from the bottom edge', () => {
+  it('moves the whole child band with its shared trunk, still leaving from the side second port', () => {
     const result = layout([
       node('r', null, 'root'),
       node('br', 'r', 'branch', { side: 'right', order: 10 }),
@@ -368,10 +370,10 @@ describe('computeLayout', () => {
     expect(bands.size).toBe(1);
     expect(position(result, 'bl1').y).toBeGreaterThan(br.y + H);
 
-    // 多条入口侧成员共用干线，出口同样落在父卡底边，且不与进入父卡的线重合。
+    // 多条入口侧成员共用干线，出口同样落在同侧边的第二个端口，且不与进入父卡的线重合。
     const trunk = result.branchTrunks.find((item) => item.id === 'br~left');
     if (trunk === undefined) throw new Error('missing trunk br~left');
-    expect(trunk.points[0]).toEqual({ x: br.x, y: br.y + H });
+    expect(trunk.points[0]).toEqual({ x: br.x, y: br.y + H / 2 + 18 });
     expect(sharedSegments(route(result, 'r->br').points, trunk.points)).toEqual([]);
     expect(overlaps(result)).toEqual([]);
     expect(penetrated(result)).toEqual([]);

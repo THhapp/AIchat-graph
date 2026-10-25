@@ -260,6 +260,39 @@ describe('branch columns', () => {
     expect(penetrated(result)).toEqual([]);
   });
 
+  it('gives same-level branch heads one child-band rule regardless of which side branches', () => {
+    const result = computeLayout({
+      nodes: [
+        node('r', null, 'root'),
+        // 两个同级分支 head：一个带入口侧子分支（左），只有向外子分支的另一个在左侧。
+        node('pr', 'r', 'branch', { side: 'right', order: 10 }),
+        node('prn', 'pr', 'next'),
+        node('prEntry', 'pr', 'branch', { side: 'left', order: 10 }),
+        node('pl', 'r', 'branch', { side: 'left', order: 20 }),
+        node('plOut', 'pl', 'branch', { side: 'left', order: 10 }),
+      ],
+    });
+    const pr = pos(result, 'pr');
+    const pl = pos(result, 'pl');
+    const childBand = pr.y + H + VG + 24;
+
+    // 两个 head 本身仍在同一层。
+    expect(pl.y).toBe(pr.y);
+    // 入口侧子分支与向外侧子分支落在同一条下方带；不再一边 row0、一边 row1。
+    expect(pos(result, 'prEntry').y).toBe(childBand);
+    expect(pos(result, 'plOut').y).toBe(childBand);
+    // 分支内部 next 仍按正常行距推进；直接子项在 next 行再下移 24。
+    expect(pos(result, 'prn').y).toBe(pr.y + H + VG);
+    expect(pos(result, 'prEntry').y).toBe(pos(result, 'prn').y + 24);
+    // 主线纵向、子分支横向。
+    expect(pos(result, 'prEntry').x + W).toBeLessThan(pr.x);
+    expect(pos(result, 'plOut').x + W).toBeLessThan(pl.x);
+
+    expect(overlaps(result)).toEqual([]);
+    expect(penetrated(result)).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
   it('keeps an unrelated upper group in place when a lower branch gains a child', () => {
     const base: LayoutNodeInput[] = [
       node('r', null, 'root'),
@@ -277,9 +310,10 @@ describe('branch columns', () => {
     // 上方 a1/a2 与 b1 不在同一段区间，因此原来的全局列宽扩张不再发生。
     for (const id of ['r', 'a1', 'a2', 'b1']) expect(pos(after, id)).toEqual(pos(before, id));
 
-    // 子分支只占 b1 自己那一列外侧的一格，落回嵌套带的 24px 提示。
+    // 子分支只占 b1 自己那一列外侧的一格，并落在分支 head 下方的统一带：
+    // b1 没有 next，带在卡片下方一个行距再下移 24。
     expect(pos(after, 'b1x').x).toBe(pos(after, 'b1').x + W + HG);
-    expect(pos(after, 'b1x').y).toBe(pos(after, 'b1').y + 24);
+    expect(pos(after, 'b1x').y).toBe(pos(after, 'b1').y + H + VG + 24);
 
     expect(overlaps(after)).toEqual([]);
     expect(penetrated(after)).toEqual([]);
@@ -359,7 +393,7 @@ describe('branch columns', () => {
 
 describe('lone branch routing', () => {
   /**
-   * 标签板水平区间，按 `RouteEdge.tsx` 的 `layoutEdgeLabel` 复算：以 `labelAnchor.x` 居中，
+   * 标签板水平区间，按 `components/routeLabels.ts` 的 `layoutEdgeLabel` 复算：以 `labelAnchor.x` 居中，
    * 宽 = `min(labelWidth, 最长行宽) + 两侧内边距`。
    *
    * 行数上限写死 3：只适用于 branch（`MAX_LABEL_LINES.branch = 3`；next 是 2），别把这个辅助复用到 next 边。
@@ -525,9 +559,9 @@ describe('nested band offset', () => {
     // 父节点自己的兄弟带完全不动：甲/乙/丙 仍然同一个 y。
     for (const id of ['a', 'b', 'c']) expect(pos(result, id).y).toBe(r.y);
 
-    // 分支自己的子分支带整条下移 24，组内仍同带、彼此不错开。
-    expect(pos(result, 'b1').y).toBe(b.y + 24);
-    expect(pos(result, 'b2').y).toBe(b.y + 24);
+    // 分支自己的子分支带统一落在 head 下方（b 无 next：卡高 + 行距 + 24），组内仍同带、彼此不错开。
+    expect(pos(result, 'b1').y).toBe(b.y + H + VG + 24);
+    expect(pos(result, 'b2').y).toBe(b.y + H + VG + 24);
     // 层级提示只改纵向位置，列序不变。
     expect(pos(result, 'b2').x).toBeGreaterThan(pos(result, 'b1').x);
 
@@ -606,10 +640,10 @@ describe('acceptance structure', () => {
     expect(pos(result, 'b3').x + W).toBeLessThan(r.x);
     expect(pos(result, 'ml').x + W).toBeLessThan(s3.x);
 
-    // 再分支：属于它自己的父节点，落在父分支所在带的外侧列，且整条带下移 24（层级提示）。
+    // 再分支：属于它自己的父节点，落在父分支下方那条带的外侧列。
     const b2 = pos(result, 'b2');
     const b2x = pos(result, 'b2x');
-    expect(b2x.y).toBe(b2.y + 24);
+    expect(b2x.y).toBe(b2.y + H + VG + 24);
     expect(Math.abs(b2x.x - r.x)).toBeGreaterThan(Math.abs(b2.x - r.x));
     expect(b2x.x).not.toBe(pos(result, 'b1').x);
     expect(b2x.x).not.toBe(pos(result, 'b3').x);
@@ -688,7 +722,7 @@ describe('band self-check', () => {
     expect(penetrated(after)).toEqual([]);
   });
 
-  it('(c) a nested branch stays on its parent band, in an outer column, without touching siblings', () => {
+  it('(c) a nested branch sits below its parent band, in an outer column, without touching siblings', () => {
     const nested = [
       ...base,
       node('b2x', 'b2', 'branch', { side: 'right', order: 10 }),
@@ -698,8 +732,8 @@ describe('band self-check', () => {
     const after = computeLayout({ nodes: nested });
     const b2 = pos(after, 'b2');
     const b2x = pos(after, 'b2x');
-    // 子分支带整体下移 24：仍与父同一带（同一水平组），但纵向低 24，避免被读成第四个并列方向。
-    expect(b2x.y).toBe(b2.y + 24);
+    // 子分支带统一落在 head 下方：b2 有 next，带与 next 同层再下移 24，不再与父卡同带。
+    expect(b2x.y).toBe(b2.y + H + VG + 24);
     expect(b2x.x).toBeGreaterThan(b2.x + W);
     // 再分支只加宽自己那一列，父块的带内位置不变：以主根为原点比较。
     const rel = (result: LayoutResult, id: string) => {
@@ -714,14 +748,14 @@ describe('band self-check', () => {
     expect(pos(after, 'b3').x).toBeGreaterThan(b2x.x + W);
 
     // 父组与成员的再分组各自一条干线，深度不同 → 干线不共线。
-    // 子组的带整体下移 24，干线要按"未下移的那条带"算，所以补偿 24 后反而比父组高一层。
+    // 子组带在父卡下方，嵌套干线仍在自己的带上方、父带之下。
     const parent = after.branchTrunks.find((trunk) => trunk.id === 'r~right');
     const child = after.branchTrunks.find((trunk) => trunk.id === 'b2~right');
     expect(parent?.trunkY).toBe(b2.y - 18);
-    expect(child?.trunkY).toBe(b2.y + 24 - 18 - 14 - 24);
+    expect(child?.trunkY).toBe(b2x.y - 18 - 24);
     expect(parent?.trunkY).not.toBe(child?.trunkY);
-    // 嵌套层的干线在父层之上，层级方向与卡片的下移方向一致。
-    expect(child?.trunkY).toBe((parent?.trunkY ?? 0) - 14);
+    // 嵌套层的干线在父层之下，卡片与干线一起向下展开。
+    expect(child?.trunkY).toBe((parent?.trunkY ?? 0) + H + VG);
     expect(route(after, 'b2->b2x').join?.y).toBe(child?.trunkY);
     expect(route(after, 'b2->b2x').join?.y).not.toBe(route(after, 'r->b2').join?.y);
     expect(overlaps(after)).toEqual([]);

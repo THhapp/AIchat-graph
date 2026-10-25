@@ -4,8 +4,9 @@
  * 本模块不读文件、不调用服务、不调用模型，也不保存历史快照或分页会话。
  * 节点、正文、哈希和在线凭据全部由调用方传入；相同输入得到相同输出。
  *
- * 预算覆盖最终 ReadViewResponse 的 JSON.stringify(...).length（UTF-16 code units），
- * 包括 envelope、items、boundaries、page.next、budget.used 与 fingerprint。
+ * 预算覆盖最终输出的 UTF-16 长度：serializeReadView 的紧凑 JSON 加结尾换行。
+ * envelope、items、boundaries、page.next、budget.used 与 fingerprint 全部计入；
+ * CLI stdout 与服务 HTTP 响应复用同一字符串，不另做格式化或紧凑重算。
  */
 import { createHash } from "node:crypto";
 import { DEFAULT_READ_LENGTH, locateSection, sliceBody } from "../core/index.js";
@@ -78,6 +79,15 @@ export interface ReadViewBuildInput {
 
 export const DEFAULT_READ_BUDGET = 12000;
 export const MAX_READ_BUDGET = 1_000_000;
+
+/**
+ * read 的唯一输出序列化：紧凑 JSON + 结尾换行。
+ * budget.used、minimum/required 与 CLI stdout／HTTP 响应都量这一份字符串，
+ * 避免预算按紧凑 JSON、输出按缩进 JSON 的偏差。
+ */
+export function serializeReadView(response: ReadViewResponse): string {
+  return JSON.stringify(response) + "\n";
+}
 
 const CURSOR_VERSION = 1;
 const AUTO_CONTENT_LENGTH = DEFAULT_READ_LENGTH;
@@ -691,12 +701,12 @@ function finalizeResponse(
   let used = 0;
   let response = assemble(used);
   for (let attempt = 0; attempt < 16; attempt += 1) {
-    const length = JSON.stringify(response).length;
+    const length = serializeReadView(response).length;
     if (length === used) return response;
     used = length;
     response = assemble(used);
   }
-  const length = JSON.stringify(response).length;
+  const length = serializeReadView(response).length;
   if (length !== used) {
     used = length;
     response = assemble(used);
@@ -710,7 +720,7 @@ function pageLength(
   hasMore: boolean,
   next: string | undefined,
 ): number {
-  return JSON.stringify(finalizeResponse(ctx, items, hasMore, next, "auto")).length;
+  return serializeReadView(finalizeResponse(ctx, items, hasMore, next, "auto")).length;
 }
 
 function budgetTooSmall(ctx: ViewContext, minimum: number): ReadViewError {
@@ -785,7 +795,7 @@ function navigationPage(
       throw cursorError("续读标记的 offset 超出当前范围", { offset, total, view: ctx.input.view });
     }
     const response = finalizeResponse(ctx, [], false, undefined, "auto");
-    const length = JSON.stringify(response).length;
+    const length = serializeReadView(response).length;
     if (length > ctx.input.budget) throw budgetTooSmall(ctx, length);
     return response;
   }
@@ -949,7 +959,7 @@ function contentExplicitPage(
 ): ReadViewResponse {
   const items = nodes.map((node) => explicitContentItem(ctx.input, node, options));
   const response = finalizeResponse(ctx, items, false, undefined, "explicit");
-  const required = JSON.stringify(response).length;
+  const required = serializeReadView(response).length;
   if (required > ctx.input.budget) {
     throw new ReadViewError(
       "BUDGET_EXCEEDED",

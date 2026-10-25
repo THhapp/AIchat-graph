@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphResponse } from '../../src/shared/protocol.js';
 import { buildGraphView, connectionText, scopeGraphToTopic } from '../../src/web/graph/viewModel.js';
-import { cardHeightForTitle, textWidth, wrapByWidth } from '../../src/web/graph/cardMetrics.js';
+import { CARD_BASE_HEIGHT, CARD_WIDTH, LAYOUT_HORIZONTAL_GAP, LAYOUT_VERTICAL_GAP, cardHeightForTitle, textWidth, wrapByWidth } from '../../src/web/graph/cardMetrics.js';
 import { parseReadingState, pruneReadingState, emptyReadingState, switchReadingTopic } from '../../src/web/data/readingState.js';
 import { resolveLink, resolveResourceKey, safeUrlTransform, stripNodeComments } from '../../src/web/components/MarkdownBody.js';
 import { searchGraph } from '../../src/web/lib/search.js';
@@ -10,7 +10,7 @@ import { computeLayout } from '../../src/web/layout/index.js';
 import type { LayoutEdgeRoute, LayoutInput, LayoutResult } from '../../src/web/layout/types.js';
 import { buildOrthogonalPath, pathLength } from '../../src/web/components/edgePath.js';
 import { buildFlowEdges } from '../../src/web/graph/flowEdges.js';
-import { layoutEdgeLabel } from '../../src/web/components/RouteEdge.js';
+import { layoutEdgeLabel, type EdgeLabelBox } from '../../src/web/components/routeLabels.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string): GraphResponse['nodes'][number] {
   return {
@@ -636,5 +636,216 @@ describe('connector edge list', () => {
     const branch = edges.find((edge) => edge.id === 'n1->n3');
     expect((branch?.data as { route?: unknown } | undefined)?.route).toBeDefined();
     expect(edges.find((edge) => edge.type === 'trunk')?.label).toBeUndefined();
+  });
+});
+
+describe('placed relationship labels', () => {
+  type Point = { x: number; y: number };
+
+  function branch(id: string, from: string, side: 'left' | 'right', order: number, description: string): GraphResponse['nodes'][number] {
+    return {
+      ...node(id, from, 'branch', id, id),
+      side,
+      order,
+      description,
+    };
+  }
+
+  function described(id: string, from: string | null, flow: 'root' | 'next', description: string): GraphResponse['nodes'][number] {
+    return { ...node(id, from, flow, id, id), description };
+  }
+
+  /**
+   * Dense representative topology with labels on every kind of connector:
+   * a three-member right trunk, a left branch, next edges, and a branch that
+   * branches again near the parent.
+   */
+  const labeled: GraphResponse = {
+    instanceId: 'inst-labels',
+    revision: 1,
+    workspaceId: 'w_labels',
+    activeNode: null,
+    stale: false,
+    diagnostics: [],
+    nodes: [
+      described('r', null, 'root', '根节点到主线的说明文字'),
+      described('n2', 'r', 'next', '主线关系说明，继续向下阅读下一个要点'),
+      branch('b1', 'r', 'right', 10, '第一条并列分支的关系文字会换行并保持完整'),
+      branch('b2', 'r', 'right', 20, '第二条并列分支的关系文字同样需要两三行空间'),
+      branch('b3', 'r', 'right', 30, '第三条分支的说明'),
+      branch('l1', 'n2', 'left', 10, '左侧分支的说明文字不应压到主线或其他线'),
+      described('b1n', 'b1', 'next', '枝内 next 的关系说明'),
+      branch('b1x', 'b1', 'right', 10, '再分支的独立入口说明'),
+      described('l1n', 'l1', 'next', '左侧枝内后续说明'),
+    ],
+    topics: [{
+      id: 't_1',
+      title: '标签',
+      path: 'topics/标签.md',
+      nodeIds: ['r', 'n2', 'b1', 'b2', 'b3', 'l1', 'b1n', 'b1x', 'l1n'],
+      fileHash: 'labels',
+    }],
+  };
+
+  const view = buildGraphView(labeled, new Set(), null);
+  const layout = computeLayout({
+    nodes: view.layoutNodes,
+    visibleNodeIds: [...view.visibleIds],
+    cardWidth: CARD_WIDTH,
+    cardHeight: CARD_BASE_HEIGHT,
+    verticalGap: LAYOUT_VERTICAL_GAP,
+    horizontalGap: LAYOUT_HORIZONTAL_GAP,
+  });
+
+  interface LabelEdge {
+    id: string;
+    route: LayoutEdgeRoute;
+    box: EdgeLabelBox;
+    text: string;
+  }
+
+  function labelledEdges(result: LayoutResult, graphView: typeof view): LabelEdge[] {
+    const found: LabelEdge[] = [];
+    for (const edge of buildFlowEdges(result, graphView)) {
+      if (edge.type !== 'route') continue;
+      const data = edge.data as { route?: LayoutEdgeRoute | null; labelBox?: EdgeLabelBox | null } | undefined;
+      if (data?.route === undefined || data.route === null) continue;
+      const text = typeof edge.label === 'string' ? edge.label.trim() : '';
+      if (text === '') continue;
+      if (data.labelBox === undefined || data.labelBox === null) continue;
+      found.push({ id: data.route.id, route: data.route, box: data.labelBox, text });
+    }
+    return found;
+  }
+
+  const cards = Object.entries(layout.positions).map(([id, position]) => ({
+    id,
+    x: position.x,
+    y: position.y,
+    width: layout.cardWidth,
+    height: layout.heights[id] ?? layout.cardHeight,
+  }));
+
+  function cardHits(box: EdgeLabelBox): string[] {
+    return cards
+      .filter((card) =>
+        box.left < card.x + card.width - 0.5 &&
+        box.left + box.width > card.x + 0.5 &&
+        box.top < card.y + card.height - 0.5 &&
+        box.top + box.height > card.y + 0.5)
+      .map((card) => card.id);
+  }
+
+  function segmentHits(points: readonly Point[], box: EdgeLabelBox): boolean {
+    for (let index = 1; index < points.length; index += 1) {
+      const a = points[index - 1];
+      const b = points[index];
+      if (a === undefined || b === undefined) continue;
+      if (Math.abs(a.y - b.y) < 0.01) {
+        if (a.y <= box.top + 0.5 || a.y >= box.top + box.height - 0.5) continue;
+        if (Math.min(Math.max(a.x, b.x), box.left + box.width - 0.5) > Math.max(Math.min(a.x, b.x), box.left + 0.5)) {
+          return true;
+        }
+      } else if (Math.abs(a.x - b.x) < 0.01) {
+        if (a.x <= box.left + 0.5 || a.x >= box.left + box.width - 0.5) continue;
+        if (Math.min(Math.max(a.y, b.y), box.top + box.height - 0.5) > Math.max(Math.min(a.y, b.y), box.top + 0.5)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * A board is attached to its own exclusive stub when it either rides the line
+   * or sits immediately beside it (the runner-up candidate layout uses the
+   * one-pixel offset when riding would hide a shared trunk riser).
+   */
+  function onOwnStub(route: LayoutEdgeRoute, box: EdgeLabelBox): boolean {
+    const x = box.centerX;
+    const y = box.top + box.height / 2;
+    for (let index = 1; index < route.points.length; index += 1) {
+      const a = route.points[index - 1];
+      const b = route.points[index];
+      if (a === undefined || b === undefined) continue;
+      if (Math.abs(a.y - b.y) < 0.01) {
+        const low = Math.min(a.x, b.x);
+        const high = Math.max(a.x, b.x);
+        const rides = Math.abs(y - a.y) < 0.01 && x >= low - 0.01 && x <= high + 0.01;
+        const below = Math.abs(box.top - (a.y + 1)) < 0.1;
+        const above = Math.abs(box.top + box.height - (a.y - 1)) < 0.1;
+        const axisOverlap = Math.min(high, box.left + box.width) - Math.max(low, box.left) > 0.5;
+        if (rides || ((below || above) && axisOverlap)) return true;
+      }
+      if (Math.abs(a.x - b.x) < 0.01) {
+        const low = Math.min(a.y, b.y);
+        const high = Math.max(a.y, b.y);
+        const rides = Math.abs(x - a.x) < 0.01 && y >= low - 0.01 && y <= high + 0.01;
+        const right = Math.abs(box.left - (a.x + 1)) < 0.1;
+        const left = Math.abs(box.left + box.width - (a.x - 1)) < 0.1;
+        const axisOverlap = Math.min(high, box.top + box.height) - Math.max(low, box.top) > 0.5;
+        if (rides || ((right || left) && axisOverlap)) return true;
+      }
+    }
+    return false;
+  }
+
+  function inside(box: EdgeLabelBox, point: Point): boolean {
+    return point.x > box.left + 0.5 && point.x < box.left + box.width - 0.5 &&
+      point.y > box.top + 0.5 && point.y < box.top + box.height - 0.5;
+  }
+
+  const edges = labelledEdges(layout, view);
+
+  it('places every sentence exactly once and keeps the wording complete', () => {
+    expect(edges).toHaveLength(labeled.nodes.length - 1);
+    for (const edge of edges) {
+      expect(edge.box.lines.join('').replace(/\s+/g, '')).toBe(edge.text.replace(/\s+/g, ''));
+      expect(edge.box.lines.join('')).not.toContain('…');
+    }
+  });
+
+  it('keeps every label on its own exclusive stub, off cards and shared trunks', () => {
+    for (const edge of edges) {
+      expect(onOwnStub(edge.route, edge.box), edge.id).toBe(true);
+      expect(cardHits(edge.box)).toEqual([]);
+      // The shared geometry is painted once and never interrupted by a label.
+      for (const trunk of layout.branchTrunks) {
+        expect(segmentHits(trunk.points, edge.box), edge.id + ' vs ' + trunk.id).toBe(false);
+      }
+      // A trunked branch label hangs below its join rather than on the trunk.
+      if (edge.route.join !== undefined) {
+        expect(edge.box.top).toBeGreaterThan(edge.route.join.y);
+      }
+    }
+  });
+
+  it('keeps labels clear of other relationship lines, corners and other labels', () => {
+    for (let index = 0; index < edges.length; index += 1) {
+      const edge = edges[index];
+      if (edge === undefined) continue;
+      for (const other of edges) {
+        if (other.id === edge.id) continue;
+        // Another relationship's path is never painted over.
+        expect(segmentHits(other.route.points, edge.box)).toBe(false);
+        // Nor is a corner of it hidden by the board.
+        for (const point of other.route.points) expect(inside(edge.box, point)).toBe(false);
+        // Two labels never overlap.
+        const overlap =
+          edge.box.left < other.box.left + other.box.width - 0.5 &&
+          edge.box.left + edge.box.width > other.box.left + 0.5 &&
+          edge.box.top < other.box.top + other.box.height - 0.5 &&
+          edge.box.top + edge.box.height > other.box.top + 0.5;
+        expect(overlap).toBe(false);
+      }
+      for (const trunk of layout.branchTrunks) {
+        for (const point of trunk.points) expect(inside(edge.box, point)).toBe(false);
+      }
+    }
+  });
+
+  it('is deterministic and independent of route input order', () => {
+    const again = labelledEdges(layout, view);
+    expect(again.map((edge) => [edge.id, edge.box])).toEqual(edges.map((edge) => [edge.id, edge.box]));
   });
 });

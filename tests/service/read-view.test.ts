@@ -195,12 +195,21 @@ afterEach(async () => {
 
 interface JsonResult<T> {
   status: number;
+  /** 原始响应文本；read 端点应与 budget.used 逐字符一致。 */
+  text: string;
+  contentType: string | null;
   body: T;
 }
 
 async function getJson<T>(url: string): Promise<JsonResult<T>> {
   const response = await fetch(url);
-  return { status: response.status, body: (await response.json()) as T };
+  const text = await response.text();
+  return {
+    status: response.status,
+    text,
+    contentType: response.headers.get("content-type"),
+    body: JSON.parse(text) as T,
+  };
 }
 
 function readUrl(url: string, query: string): string {
@@ -228,8 +237,10 @@ async function collectPages(base: string, budget: number): Promise<ReadViewRespo
     );
     expect(result.status, JSON.stringify(result.body)).toBe(200);
     const page = result.body;
-    expect(page.budget.used).toBeLessThanOrEqual(budget);
-    expect(JSON.stringify(page).length).toBe(page.budget.used);
+    // 原始 HTTP 文本就是引擎的预算序列化：紧凑 JSON + 结尾换行。
+    expect(page.budget.used).toBe(result.text.length);
+    expect(result.text.length).toBeLessThanOrEqual(budget);
+    expect(result.text.endsWith("\n")).toBe(true);
     pages.push(page);
     if (!page.page.hasMore) return pages;
     expect(page.page.next).toBeTruthy();
@@ -278,7 +289,9 @@ describe("GET /api/agent/read", () => {
     expect(body.topicTitle).toBe("主线主题");
     expect(body.scope).toMatchObject({ kind: "topic", nodeCount: 6 });
     expect(body.page.hasMore).toBe(false);
-    expect(body.budget.used).toBe(JSON.stringify(body).length);
+    expect(body.budget.used).toBe(full.text.length);
+    expect(full.text.endsWith("\n")).toBe(true);
+    expect(full.contentType).toContain("application/json");
 
     const items = body.items as ReadOverviewItem[];
     expect(items.map((item) => item.role + ":" + item.id)).toEqual([

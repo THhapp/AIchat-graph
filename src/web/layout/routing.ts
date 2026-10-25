@@ -8,6 +8,7 @@ import type {
   LayoutSide,
 } from './types.js';
 import {
+  ENTRY_PORT_OFFSET,
   NESTED_BAND_OFFSET,
   TRUNK_OFFSET,
   TRUNK_STEP,
@@ -100,7 +101,7 @@ export function buildEdgeRoutes(
   // 分支节点的子分支带整条下移 NESTED_BAND_OFFSET，逐级累计。
   // 干线 y 要相对"未加这条位移的那条带"来算，否则父带下移 24 会把嵌套干线压到父干线
   // 下方 10px，层级读反。位移量按父链上 branch 节点的个数还原，而不是用 depth 乘：
-  // 入口带上的 depth 表示同一条带里的层号（entryRank），不是嵌套级数。
+  // 同一条带上的多个来源共用一个 band，depth 表示带内层号，不是嵌套级数。
   const bandShifts = new Map<string, number>();
   const bandShiftOf = (id: string): number => {
     const cached = bandShifts.get(id);
@@ -219,11 +220,13 @@ export function buildEdgeRoutes(
 
     const sourceCenterY = source.y + parent.height / 2;
     const sourceEdge = group.side === 'right' ? source.x + cardWidth : source.x;
-    // 入口侧（分支节点背向自己方向的那一侧）的子分支带落在 head 下方；
-    // 若仍从中心行横出，这截横段会与父节点连进来的那条横线重合，两个方向读不出区别。
-    // 改从卡片底边分出：入口在中心行，分出在底边，两者分开一条卡高。
+    // 入口侧（分支节点背向自己方向的那一侧）的子分支从同一侧边的第二个端口分出：
+    // 中心下方固定偏移，左右镜像。父节点连进来的横线仍在侧边中心，两个方向可分辨；
+    // 不退到底边/底角，起点圆点与实际路径首点（包括干线起点）都落在这个端口上。
     const onEntrySide = entrySides.get(group.from) === group.side;
-    const exitY = onEntrySide ? source.y + parent.height : sourceCenterY;
+    const exitY = onEntrySide
+      ? Math.min(sourceCenterY + ENTRY_PORT_OFFSET, source.y + parent.height - 2)
+      : sourceCenterY;
     const first = group.members[0];
     if (first === undefined) continue;
 

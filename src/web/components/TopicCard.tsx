@@ -14,6 +14,10 @@ export interface TopicCardData extends Record<string, unknown> {
   childCount: number;
   /** This node is part of the current topic's `GraphResponse.lastChanges[topicId].nodeIds`. */
   recent: boolean;
+  /** An importance write for this card is in flight; the button keeps its size. */
+  importanceBusy: boolean;
+  /** Omitted in the read-only offline reader, so no write control is rendered. */
+  onToggleImportant?: (node: GraphNode, important: boolean) => void;
   onToggleCollapse: (id: string) => void;
 }
 
@@ -25,8 +29,9 @@ export interface TopicCardData extends Record<string, unknown> {
  * marker instead, inside the height the card already had.
  */
 function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
-  const { node, height, active, hiddenCount, collapsed, childCount, recent, onToggleCollapse } = data as TopicCardData;
+  const { node, height, active, hiddenCount, collapsed, childCount, recent, importanceBusy, onToggleImportant, onToggleCollapse } = data as TopicCardData;
   const important = node.important;
+  const importanceLabel = (important ? '取消重要标记：' : '标记为重要：') + node.number + ' ' + node.title;
   return (
     <article
       className="topic-card"
@@ -44,7 +49,27 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
         <span className="topic-card__number">{node.number}</span>
         <StateChip node={node} active={active} />
         <span className="topic-card__spacer" />
-        {important ? (
+        {onToggleImportant !== undefined ? (
+          <button
+            type="button"
+            className="topic-card__pin topic-card__pin--action nodrag nopan"
+            aria-pressed={important}
+            aria-busy={importanceBusy}
+            aria-label={importanceLabel}
+            title={importanceBusy ? '正在保存…' : important ? '取消重要标记（写回源文件）' : '标记为重要（写回源文件）'}
+            disabled={importanceBusy}
+            data-busy={importanceBusy ? 'true' : 'false'}
+            onClick={(event) => {
+              // The whole card selects / opens detail; the pin is its own control.
+              event.stopPropagation();
+              onToggleImportant(node, !important);
+            }}
+            onDoubleClick={(event) => { event.stopPropagation(); }}
+            onPointerDown={(event) => { event.stopPropagation(); }}
+          >
+            {important ? '★' : '☆'}
+          </button>
+        ) : important ? (
           <span className="topic-card__pin" title="已标记为重要" aria-label="已标记为重要">★</span>
         ) : null}
         {childCount > 0 ? (

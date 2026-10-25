@@ -157,14 +157,20 @@ export function App(): React.JSX.Element {
     setReading((current) => (current === null ? current : toggleNavNode(current, node.topicId, nodeId)));
   }, [graph]);
 
+  const selectedDetailHash = selectedNode !== null && details.nodeDetail !== null && details.nodeDetail.node.id === selectedNode.id
+    ? details.nodeDetail.fileHash
+    : null;
+  const applyImportanceNode = useCallback((node: GraphNode) => {
+    setNodeOverrides((current) => ({ ...current, [node.id]: node }));
+  }, []);
   const importance = useImportance({
-    node: selectedNode,
-    expectedHash: details.nodeDetail !== null && details.nodeDetail.node.id === selectedNode?.id
-      ? details.nodeDetail.fileHash
-      : null,
-    onApplied: (node) => { setNodeOverrides((current) => ({ ...current, [node.id]: node })); },
+    onApplied: applyImportanceNode,
     onRefresh: snapshot.refresh,
   });
+  const importantErrorForSelected = selectedNode !== null && importance.error?.nodeId === selectedNode.id
+    ? importance.error.message
+    : null;
+  const importantBusyForSelected = selectedNode !== null && importance.busyIds.has(selectedNode.id);
 
   const toggleLeft = useCallback(() => {
     setReading((current) => (current === null ? current : toggleLeftPanel(current)));
@@ -356,6 +362,12 @@ export function App(): React.JSX.Element {
         error={snapshot.error}
         onRefresh={() => { snapshot.refresh(); }}
       />
+      {importance.error !== null ? (
+        <div className="banner banner--error" role="alert">
+          <span className="banner__text">{importance.error.message}</span>
+          <button type="button" onClick={importance.clearError}>知道了</button>
+        </div>
+      ) : null}
 
       <div
         className="app-main"
@@ -413,6 +425,8 @@ export function App(): React.JSX.Element {
               savedViewport={reading?.viewport ?? null}
               anchorNodeId={anchorNodeId}
               recentNodeIds={recent}
+              importanceBusyIds={importance.busyIds}
+              onToggleImportant={importance.set}
             />
           )}
         </main>
@@ -457,10 +471,15 @@ export function App(): React.JSX.Element {
               copied={copied}
               onCopyLocate={copyLocate}
               locateCopied={locateCopied}
-              importanceBusy={importance.busy}
-              importanceError={importance.error}
+              importanceBusy={importantBusyForSelected}
+              importanceError={importantErrorForSelected}
               {...(selectedNode !== null
-                ? { important: importanceOf(selectedNode), onToggleImportant: (next: boolean) => { importance.set(next); } }
+                ? {
+                    important: importanceOf(selectedNode),
+                    onToggleImportant: (next: boolean) => {
+                      importance.set(selectedNode, next, selectedDetailHash);
+                    },
+                  }
                 : {})}
               resolvePathToNode={(path) => graph.nodes.find((candidate) => candidate.sourcePath === path)?.id ?? null}
               onOpenNode={(id) => { selectNodeAndOpen(id); }}

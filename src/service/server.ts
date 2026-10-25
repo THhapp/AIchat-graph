@@ -29,6 +29,7 @@ import type {
 import { applyChanges, applyAgentChange, checkChanges } from "./changes.js";
 import { parseAgentReadQuery, readAgentNode } from "./agent/read.js";
 import { readAgentView } from "./agent/read-view.js";
+import { serializeReadView } from "../index/read-view.js";
 import { setNodeImportance } from "./importance.js";
 import type { ExportCoordinator as ExportCoordinatorType } from "./export.js";
 import { ServiceError, serviceErrorFromUnknown } from "./errors.js";
@@ -203,9 +204,17 @@ export function createApp(options: AppOptions): Hono {
   });
 
   // 渐进读取：overview / structure / content；cursor 续读只另带 budget。
-  api.get("/agent/read", (c) =>
-    jsonResponse(c, readAgentView({ runtime, editRefs: runtime.editRefs, query: c.req.queries() })),
-  );
+  // 响应与引擎预算使用同一序列化（紧凑 JSON + 结尾换行），长度即 budget.used。
+  api.get("/agent/read", (c) => {
+    const response = readAgentView({
+      runtime,
+      editRefs: runtime.editRefs,
+      query: c.req.queries(),
+    });
+    return c.body(serializeReadView(response), 200, {
+      "content-type": "application/json; charset=utf-8",
+    });
+  });
 
   api.get("/search", (c) => {
     const query = c.req.query("q") ?? "";

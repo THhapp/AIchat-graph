@@ -229,6 +229,7 @@
   background: var(--panel-bg);
   max-height: 44vh;
   overflow: auto;
+  overscroll-behavior: contain;
   flex: 0 0 auto;
 }
 .export-panel__hint {

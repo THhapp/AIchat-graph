@@ -43,7 +43,8 @@ describe('directory fold versus graph fold', () => {
     const topicNodes = graph.nodes.filter((item) => item.topicId === 't_1');
 
     const rows = visibleTreeNodes(topicNodes, new Set(navCollapsedNodeIds(state.navTree, 't_1')));
-    expect(rows.map((row) => row.id)).toEqual(['n05', 'n06']);
+    // The directory folder of 06 hides its branch 06-01, not the mainline 07.
+    expect(rows.map((row) => row.id)).toEqual(['n05', 'n06', 'n07']);
 
     const view = buildGraphView(graph, new Set(state.collapsedNodeIds), 't_1');
     expect(state.collapsedNodeIds).toEqual([]);

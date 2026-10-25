@@ -181,9 +181,10 @@ async function collectPages(
   for (let index = 0; index < 100; index += 1) {
     expect(result.exitCode, result.stderr).toBe(0);
     const page = jsonOf(result.stdout);
-    expect(JSON.stringify(page).length).toBe(page.budget.used);
+    // budget.used 必须与真实 stdout（紧凑 JSON + 换行）逐字符一致。
+    expect(page.budget.used).toBe(result.stdout.length);
     if (options.budget !== undefined) {
-      expect(page.budget.used).toBeLessThanOrEqual(options.budget);
+      expect(result.stdout.length).toBeLessThanOrEqual(options.budget);
     }
     pages.push(page);
     if (!page.page.hasMore) return pages;
@@ -208,7 +209,9 @@ describe("read --node 统一输出", () => {
     const root = await newWorkspace();
     await start(root);
 
-    const online = await read(["--node", NODE_B], root);
+    const onlineRun = await cli(["--node", NODE_B], root);
+    expect(onlineRun.exitCode, onlineRun.stderr).toBe(0);
+    const online = jsonOf(onlineRun.stdout);
     const offline = await read(["--node", NODE_B, "--offline"], root);
 
     expect(online.view).toBe("content");
@@ -261,7 +264,8 @@ describe("read --node 统一输出", () => {
 
     // 预算与分页在顶层；items 只保留内容阅读所需的字段。
     expect(online.budget).toMatchObject({ unit: "utf16", limit: 12000, mode: "auto" });
-    expect(online.budget.used).toBe(JSON.stringify(online).length);
+    expect(online.budget.used).toBe(onlineRun.stdout.length);
+    expect(onlineRun.stdout.endsWith("\n")).toBe(true);
     expect(online.page.hasMore).toBe(true);
     expect(online.page.next).toBeTruthy();
 
@@ -397,16 +401,19 @@ describe("read --node 统一输出", () => {
       ).toBe("BUDGET_EXCEEDED");
     }
 
-    const paged = await read(
+    const pagedRun = await cli(
       ["--node", NODE_A, "--node", NODE_B, "--length", "5000", "--budget", "60000"],
       root,
     );
+    expect(pagedRun.exitCode, pagedRun.stderr).toBe(0);
+    const paged = jsonOf(pagedRun.stdout);
     expect(paged.budget).toMatchObject({
       unit: "utf16",
       limit: 60000,
       mode: "explicit",
     });
-    expect(paged.budget.used).toBe(JSON.stringify(paged).length);
+    expect(paged.budget.used).toBe(pagedRun.stdout.length);
+    expect(pagedRun.stdout.length).toBeLessThanOrEqual(60000);
     expect(paged.page).toEqual({ hasMore: false });
     expect(contentItems(paged)).toHaveLength(2);
     for (const item of contentItems(paged)) {
@@ -427,20 +434,75 @@ describe("read --node 统一输出", () => {
     }
   });
 
+  it("最小预算与显式超预算的 details 按同一序列化对应原始 stdout", async () => {
+    const root = await newWorkspace();
+    await start(root);
+
+    // 极小预算：minimum 必须能直接作为 budget 成功，且 stdout 不超它。
+    const tooSmall = await cli(["--node", NODE_A, "--budget", "1"], root);
+    expect(tooSmall.exitCode, tooSmall.stderr).toBe(2);
+    expect(tooSmall.stdout).toBe("");
+    const minimumError = JSON.parse(tooSmall.stderr) as {
+      error: { code: string; details?: { minimum?: number } };
+    };
+    expect(minimumError.error.code).toBe("BUDGET_TOO_SMALL");
+    const minimum = Number(minimumError.error.details?.minimum);
+    expect(Number.isInteger(minimum)).toBe(true);
+    expect(minimum).toBeGreaterThan(1);
+
+    const atMinimum = await cli(
+      ["--node", NODE_A, "--budget", String(minimum)],
+      root,
+    );
+    expect(atMinimum.exitCode, atMinimum.stderr).toBe(0);
+    const minimumPage = jsonOf(atMinimum.stdout);
+    expect(atMinimum.stdout.length).toBeLessThanOrEqual(minimum);
+    expect(minimumPage.budget.used).toBe(atMinimum.stdout.length);
+    expect(minimumPage.budget.limit).toBe(minimum);
+    expect(contentItems(minimumPage).length).toBeGreaterThan(0);
+
+    // 显式 full 超预算：required 按同一份紧凑序列化计量。
+    const exceeded = await cli(["--node", NODE_A, "--full", "--budget", "300"], root);
+    expect(exceeded.exitCode, exceeded.stderr).toBe(2);
+    expect(exceeded.stdout).toBe("");
+    const exceededError = JSON.parse(exceeded.stderr) as {
+      error: { code: string; details?: { required?: number } };
+    };
+    expect(exceededError.error.code).toBe("BUDGET_EXCEEDED");
+    const required = Number(exceededError.error.details?.required);
+    expect(Number.isInteger(required)).toBe(true);
+    expect(required).toBeGreaterThan(300);
+
+    // 用足够预算读取同一显式内容：原始 stdout 长度只应因 limit/used
+    // 的位数不同而与 required 略有出入，不是缩进 JSON 的长度。
+    const retry = await cli(
+      ["--node", NODE_A, "--full", "--budget", String(required + 1000)],
+      root,
+    );
+    expect(retry.exitCode, retry.stderr).toBe(0);
+    const retryPage = jsonOf(retry.stdout);
+    expect(retryPage.budget.used).toBe(retry.stdout.length);
+    expect(retry.stdout.length).toBeLessThanOrEqual(required + 1000);
+    expect(Math.abs(retry.stdout.length - required)).toBeLessThanOrEqual(10);
+  });
+
   it("--start 是显式读取：多卡从该偏移切片，整个响应仍须满足 budget", async () => {
     const root = await newWorkspace();
     await start(root);
 
-    const payload = await read(
+    const payloadRun = await cli(
       ["--node", NODE_A, "--node", NODE_B, "--start", "100"],
       root,
     );
+    expect(payloadRun.exitCode, payloadRun.stderr).toBe(0);
+    const payload = jsonOf(payloadRun.stdout);
     expect(payload.budget).toMatchObject({
       unit: "utf16",
       limit: 12000,
       mode: "explicit",
     });
-    expect(payload.budget.used).toBe(JSON.stringify(payload).length);
+    expect(payload.budget.used).toBe(payloadRun.stdout.length);
+    expect(payloadRun.stdout.length).toBeLessThanOrEqual(12000);
     expect(payload.page).toEqual({ hasMore: false });
     expect(contentItems(payload)).toHaveLength(2);
     for (const item of contentItems(payload)) {

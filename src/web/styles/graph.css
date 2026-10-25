@@ -1,5 +1,5 @@
 /* React Flow canvas + cards. Colors come from tokens only. */
-.canvas-host { position: relative; min-width: 0; min-height: 0; background: var(--bg); }
+.canvas-host { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
 .canvas-host__empty { display: flex; height: 100%; align-items: center; justify-content: center; }
 
 .canvas { position: absolute; inset: 0; }
@@ -133,13 +133,36 @@
   background: var(--danger);
   flex: none;
 }
-/* Importance marker: a glyph inside the 24px header row, never a new box. */
+/* Importance marker: a glyph inside the 24px header row, never a new box.
+   The live button keeps that 24px box in every state (idle, marked, busy), so
+   layout-reserved card height cannot change when the flag is toggled. */
 .topic-card__pin {
-  font-size: var(--text-2xs);
+  font-size: var(--text-sm);
   line-height: 1;
   color: var(--danger);
   flex: none;
 }
+.topic-card__pin--action {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.topic-card__pin--action:hover { background: var(--bg-hover); color: var(--danger); }
+.topic-card__pin--action[aria-pressed='true'] {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+.topic-card__pin--action:disabled { opacity: 0.55; cursor: progress; }
+.topic-card__pin--action[data-busy='true'] { cursor: progress; }
 
 .rf-handle { opacity: 0; pointer-events: none; width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; }
 

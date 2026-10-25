@@ -4,6 +4,7 @@ import {
   decodeReadCursor,
   ReadViewError,
   DEFAULT_READ_BUDGET,
+  serializeReadView,
 } from "../../src/index/read-view.js";
 import type {
   ReadViewBuildInput,
@@ -122,8 +123,9 @@ function collectPages(
   let cursor: string | undefined;
   for (let page = 0; page < 1000; page += 1) {
     const response = make(cursor);
-    expect(response.budget.used).toBe(JSON.stringify(response).length);
-    expect(JSON.stringify(response).length).toBeLessThanOrEqual(budget);
+    expect(response.budget.used).toBe(serializeReadView(response).length);
+    expect(serializeReadView(response).length).toBeLessThanOrEqual(budget);
+    expect(serializeReadView(response).endsWith("\n")).toBe(true);
     expect(response.budget.limit).toBe(budget);
     responses.push(response);
     if (!response.page.hasMore) return responses;
@@ -537,8 +539,8 @@ describe("content", () => {
         contentOptions,
         { editRefs: refs },
       );
-      expect(response.budget.used).toBe(JSON.stringify(response).length);
-      expect(JSON.stringify(response).length).toBeLessThanOrEqual(budget);
+      expect(response.budget.used).toBe(serializeReadView(response).length);
+      expect(serializeReadView(response).length).toBeLessThanOrEqual(budget);
       const items = response.items as ReadContentItem[];
       expect(items.length).toBeGreaterThan(0);
       for (const item of items) {
@@ -572,8 +574,8 @@ describe("content", () => {
     // minimum 不是偏小的空页长度：按它读取必须真正返回一张最小候选卡片。
     const smallest = contentPage(undefined, minimum, [node], {});
     expect(smallest.items.length).toBeGreaterThan(0);
-    expect(smallest.budget.used).toBe(JSON.stringify(smallest).length);
-    expect(JSON.stringify(smallest).length).toBeLessThanOrEqual(minimum);
+    expect(smallest.budget.used).toBe(serializeReadView(smallest).length);
+    expect(serializeReadView(smallest).length).toBeLessThanOrEqual(minimum);
 
     // 再少一个单元就放不下。
     const below = expectError(
@@ -658,7 +660,7 @@ describe("fingerprint 与续读", () => {
     );
     const response = structurePage(token, 1140, { kind: "subtree", from: "br1" }, changed);
     expect(response.ok).toBe(true);
-    expect(response.budget.used).toBe(JSON.stringify(response).length);
+    expect(response.budget.used).toBe(serializeReadView(response).length);
   });
 
   it("subtree 边界外部父节点标题变化使 token stale", () => {

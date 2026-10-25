@@ -169,17 +169,35 @@ describe('directory folds are their own state', () => {
 });
 
 describe('directory tree rows', () => {
-  it('hides the descendants of a folded node and keeps the rest', () => {
-    const rows = visibleTreeNodes(tree, new Set(['n06']));
-    expect(rows.map((row) => row.id)).toEqual(['n05', 'n06']);
-    expect(hiddenTreeCounts(tree, new Set(['n06'])).get('n06')).toBe(6);
+  it('nests a branch chain under its source instead of after the whole mainline', () => {
+    const rows = visibleTreeNodes(tree, new Set());
+    expect(rows.map((row) => row.id)).toEqual([
+      'n05', 'n06',
+      'n0601', 'n0602',
+      'n0603', 'n060301', 'n060302',
+      'n07',
+    ]);
   });
 
-  it('keeps the folded node itself and its ancestors visible', () => {
-    const rows = visibleTreeNodes(tree, new Set(['n0601']));
-    expect(rows.map((row) => row.id)).toEqual(['n05', 'n06', 'n07', 'n0601', 'n0603', 'n060301', 'n060302']);
-    expect(hiddenTreeCounts(tree, new Set(['n0601'])).get('n0601')).toBe(1);
-    expect(treeChildCounts(tree).get('n06')).toBe(3);
+  it('folds only the directory subtree, never the mainline next sibling', () => {
+    const rows = visibleTreeNodes(tree, new Set(['n06']));
+    // 07 is the next mainline sibling of 06; folding 06's branches must not hide it.
+    expect(rows.map((row) => row.id)).toEqual(['n05', 'n06', 'n07']);
+    expect(hiddenTreeCounts(tree, new Set(['n06'])).get('n06')).toBe(5);
+  });
+
+  it('keeps a folded node itself and its ancestors visible', () => {
+    // 06-03 hides its own branch subtree only; 06-02 stays as the sibling continuation.
+    const rows = visibleTreeNodes(tree, new Set(['n0603']));
+    expect(rows.map((row) => row.id)).toEqual(['n05', 'n06', 'n0601', 'n0602', 'n0603', 'n07']);
+    expect(hiddenTreeCounts(tree, new Set(['n0603'])).get('n0603')).toBe(2);
+    expect(treeChildCounts(tree).get('n06')).toBe(2);
+  });
+
+  it('has no directory children for a node whose only continuation is next', () => {
+    // 06-01's next (06-02) is a same-level sibling in the directory.
+    expect(treeChildCounts(tree).get('n0601')).toBeUndefined();
+    expect(hiddenTreeCounts(tree, new Set(['n0601'])).get('n0601')).toBeUndefined();
   });
 
   it('ignores ids that are not part of this topic', () => {

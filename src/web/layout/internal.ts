@@ -32,6 +32,12 @@ export const TRUNK_OFFSET = 18;
 export const TRUNK_STEP = 14;
 /** 分支块自己的子分支带整体下移的距离，只用于层级提示，不改变带内规则。 */
 export const NESTED_BAND_OFFSET = 24;
+/**
+ * 入口侧子分支的出口端口：同侧边中心下方的固定偏移。
+ * 父节点连进来的横线落在中心行，两个方向共用一个点会读成同一条线；
+ * 第二个端口让入口与出口在同一侧边上仍然可分辨，也不必退到卡片底角。
+ */
+export const ENTRY_PORT_OFFSET = 18;
 
 export interface WorkingNode {
   id: string;

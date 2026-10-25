@@ -132,6 +132,38 @@ function route(result: LayoutResult, id: string) {
   return found;
 }
 
+/** 两条正交折线中被重复描画的共线正长度段。 */
+function sharedSegments(a: { x: number; y: number }[], b: { x: number; y: number }[]): string[] {
+  const segments = (points: { x: number; y: number }[]) => {
+    const list: { left: number; right: number; top: number; bottom: number }[] = [];
+    for (let index = 1; index < points.length; index += 1) {
+      const p = points[index - 1];
+      const q = points[index];
+      if (p === undefined || q === undefined) continue;
+      list.push({
+        left: Math.min(p.x, q.x),
+        right: Math.max(p.x, q.x),
+        top: Math.min(p.y, q.y),
+        bottom: Math.max(p.y, q.y),
+      });
+    }
+    return list;
+  };
+  const found: string[] = [];
+  for (const one of segments(a)) {
+    for (const other of segments(b)) {
+      const bothHorizontal = one.bottom - one.top < 0.01 && other.bottom - other.top < 0.01;
+      const bothVertical = one.right - one.left < 0.01 && other.right - other.left < 0.01;
+      if (bothHorizontal && Math.abs(one.top - other.top) < 0.01) {
+        if (Math.min(one.right, other.right) - Math.max(one.left, other.left) > 0.01) found.push('horizontal');
+      } else if (bothVertical && Math.abs(one.left - other.left) < 0.01) {
+        if (Math.min(one.bottom, other.bottom) - Math.max(one.top, other.top) > 0.01) found.push('vertical');
+      }
+    }
+  }
+  return found;
+}
+
 function trunkOf(result: LayoutResult, from: string, side: 'left' | 'right'): LayoutBranchTrunk {
   const id = from + '~' + side;
   const found = result.branchTrunks.find((candidate) => candidate.id === id);
@@ -147,6 +179,80 @@ const threeSiblings: LayoutNodeInput[] = [
   node('b2', 'r', 'branch', { side: 'right', order: 20 }),
   node('b3', 'r', 'branch', { side: 'right', order: 30 }),
 ];
+
+describe('entry-side exit port', () => {
+  it('leaves from the second side port on both sides instead of the card bottom', () => {
+    const result = computeLayout({
+      nodes: [
+        node('r', null, 'root'),
+        node('pR', 'r', 'branch', { side: 'right', order: 10 }),
+        node('cR', 'pR', 'branch', { side: 'left', order: 10 }),
+        node('pL', 'r', 'branch', { side: 'left', order: 20 }),
+        node('cL', 'pL', 'branch', { side: 'right', order: 10 }),
+      ],
+    });
+    const pR = pos(result, 'pR');
+    const pL = pos(result, 'pL');
+    const port = H / 2 + 18;
+
+    // 入口侧的出口与父节点连进来的中心行横线分开，但仍落在同一侧边上；
+    // 起点就是路径首点，不退到底边或底角。
+    const rightOut = route(result, 'pR->cR');
+    expect(rightOut.points[0]).toEqual({ x: pR.x, y: pR.y + port });
+    expect(rightOut.points[0]?.y).not.toBe(pR.y + H);
+    expect(rightOut.points[0]?.y).not.toBe(pR.y + H / 2);
+
+    // 左侧镜像使用右侧边的第二个端口。
+    const leftOut = route(result, 'pL->cL');
+    expect(leftOut.points[0]).toEqual({ x: pL.x + W, y: pL.y + port });
+
+    // 进入父卡的入线仍接目标侧边中心，两个方向不共线。
+    const intoRight = route(result, 'r->pR');
+    const intoLeft = route(result, 'r->pL');
+    expect(intoRight.points[intoRight.points.length - 1]).toEqual({ x: pR.x, y: pR.y + H / 2 });
+    expect(intoLeft.points[intoLeft.points.length - 1]).toEqual({ x: pL.x + W, y: pL.y + H / 2 });
+    expect(rightOut.points[0]).not.toEqual(intoRight.points[intoRight.points.length - 1]);
+    expect(leftOut.points[0]).not.toEqual(intoLeft.points[intoLeft.points.length - 1]);
+
+    // 源关系没有被改写。
+    expect(rightOut.from).toBe('pR');
+    expect(rightOut.to).toBe('cR');
+    expect(leftOut.from).toBe('pL');
+    expect(leftOut.to).toBe('cL');
+    expect(penetrated(result)).toEqual([]);
+  });
+
+  it('starts a shared entry-side trunk at the same second port as a lone branch', () => {
+    const result = computeLayout({
+      nodes: [
+        node('r', null, 'root'),
+        node('pR', 'r', 'branch', { side: 'right', order: 10 }),
+        node('c1', 'pR', 'branch', { side: 'left', order: 10 }),
+        node('c2', 'pR', 'branch', { side: 'left', order: 20 }),
+        node('pL', 'r', 'branch', { side: 'left', order: 20 }),
+        node('c3', 'pL', 'branch', { side: 'right', order: 10 }),
+        node('c4', 'pL', 'branch', { side: 'right', order: 20 }),
+      ],
+    });
+    const pR = pos(result, 'pR');
+    const pL = pos(result, 'pL');
+    const port = H / 2 + 18;
+    const rightTrunk = trunkOf(result, 'pR', 'left');
+    const leftTrunk = trunkOf(result, 'pL', 'right');
+
+    // 干线首点就是实际路径首点（起点圆点挂在这里），仍在卡片侧边上。
+    expect(rightTrunk.points[0]).toEqual({ x: pR.x, y: pR.y + port });
+    expect(leftTrunk.points[0]).toEqual({ x: pL.x + W, y: pL.y + port });
+    // 两条入口干线各自从第二个端口分出，不落到卡片底边。
+    expect(rightTrunk.points[0]?.y).not.toBe(pR.y + H);
+    expect(leftTrunk.points[0]?.y).not.toBe(pL.y + H);
+    // 干线共享段与进入卡片的线不重合。
+    expect(sharedSegments(route(result, 'r->pR').points, rightTrunk.points)).toEqual([]);
+    expect(sharedSegments(route(result, 'r->pL').points, leftTrunk.points)).toEqual([]);
+    expect(penetrated(result)).toEqual([]);
+    expect(overlaps(result)).toEqual([]);
+  });
+});
 
 describe('branch trunk', () => {
   it('draws one shared trunk for three same-side siblings and joins every branch on it', () => {
@@ -245,8 +351,8 @@ describe('branch trunk', () => {
     const outer = trunkOf(result, 'bn', 'left');
     expect(outer.from).toBe('bn');
     expect(outer.to).toBe('bl2');
-    // 入口侧的子分支从卡片底边分出（见下），但 bn 是 next 节点：连进来的线是自上而下的竖线，
-    // 中心行横线不会与出口重合，所以它的干线仍从中心行横出。
+    // 入口侧的子分支改从同侧边第二个端口分出（见下），但 bn 是 next 节点：
+    // 连进来的线是自上而下的竖线，中心行横线不会与出口重合，所以它的干线仍从中心行横出。
     expect(outer.points[0]).toEqual({ x: bn.x, y: bn.y + H / 2 });
     // 干线止于唯一成员的接出点，支线从这一点下到目标中心。
     expect(outer.points[outer.points.length - 1]).toEqual({ x: bl2.x + W + HG / 2, y: outer.trunkY });
@@ -255,12 +361,12 @@ describe('branch trunk', () => {
     expect(edge.points[0]).toEqual(edge.join);
 
     // 列 1 的单张走 Z 形短折：出口横段 → 空隙正中的竖向通道 → 入卡横段，不产干线、不带 join。
-    // 入口侧（左边）的出口横段同样落在卡片底边，而不是中心行。
+    // 入口侧（左边）的出口横段从同侧边中心下方固定偏移的第二个端口分出，左右镜像。
     const inner = route(result, 'br->bl');
     expect(inner.join).toBeUndefined();
     expect(inner.points).toEqual([
-      { x: br.x, y: br.y + H },
-      { x: br.x - HG / 2, y: br.y + H },
+      { x: br.x, y: br.y + H / 2 + 18 },
+      { x: br.x - HG / 2, y: br.y + H / 2 + 18 },
       { x: br.x - HG / 2, y: bl.y + H / 2 },
       { x: bl.x + W, y: bl.y + H / 2 },
     ]);
@@ -285,25 +391,26 @@ describe('branch trunk', () => {
       ],
     });
     const b2 = pos(result, 'b2');
+    const b2x = pos(result, 'b2x');
     const parent = trunkOf(result, 'r', 'right');
     const nested = trunkOf(result, 'b2', 'right');
 
-    // 子分支带整体下移 24，干线要相对"未下移的那条带"来算：补偿掉这段位移后，
-    // 嵌套干线落在父干线之上一个 TRUNK_STEP，层级方向与卡片的下移方向一致。
-    expect(pos(result, 'b2x').y).toBe(b2.y + NESTED_BAND_OFFSET);
+    // 分支 head 的直接子项统一落在 head 下方那条带（b2 没有 next，带在卡下 + 行距），
+    // 子分支带整体再下移 24；干线相对未下移的带计算，所以嵌套干线仍在自己带的上方。
+    expect(b2x.y).toBe(b2.y + H + VG + NESTED_BAND_OFFSET);
     expect(parent.trunkY).toBe(b2.y - TRUNK_OFFSET);
-    expect(nested.trunkY).toBe(b2.y + NESTED_BAND_OFFSET - TRUNK_OFFSET - TRUNK_STEP - NESTED_BAND_OFFSET);
-    expect(pos(result, 'b2x').y - nested.trunkY).toBe(TRUNK_OFFSET + TRUNK_STEP + NESTED_BAND_OFFSET);
-    // 两条干线仍在不同 y 上，不会共线叠画；嵌套组那条更高，且仍在自己带的上方。
+    expect(nested.trunkY).toBe(b2x.y - TRUNK_OFFSET - NESTED_BAND_OFFSET);
+    expect(b2x.y - nested.trunkY).toBe(TRUNK_OFFSET + NESTED_BAND_OFFSET);
+    // 两条干线仍在不同 y 上，不会共线叠画；子分支在父卡下方，它的干线也在父带之下。
     expect(nested.trunkY).not.toBe(parent.trunkY);
-    expect(nested.trunkY).toBeLessThan(parent.trunkY);
-    expect(nested.trunkY).toBeLessThan(pos(result, 'b2').y + NESTED_BAND_OFFSET);
+    expect(nested.trunkY).toBeGreaterThan(parent.trunkY);
+    expect(nested.trunkY).toBeLessThan(b2x.y);
     expect(route(result, 'b2->b2x').join?.y).toBe(nested.trunkY);
     expect(overlaps(result)).toEqual([]);
     expect(penetrated(result)).toEqual([]);
   });
 
-  it('puts a nested group trunk above its parent trunk, strictly inside its own columns', () => {
+  it('puts a nested group trunk below the parent band, strictly inside its own columns', () => {
     // 父节点两个并列分支，其中一个分支自己有两个子分支：嵌套组 k=2，会产生嵌套干线。
     const result = computeLayout({
       nodes: [
@@ -316,6 +423,7 @@ describe('branch trunk', () => {
     });
     const b1 = pos(result, 'b1');
     const b2 = pos(result, 'b2');
+    const b2x = pos(result, 'b2x');
     const parent = trunkOf(result, 'r', 'right');
     const nested = trunkOf(result, 'b2', 'right');
 
@@ -324,9 +432,9 @@ describe('branch trunk', () => {
     expect(parent.to).toBe('b2');
     expect(nested.to).toBe('b2y');
 
-    // 嵌套干线在父干线之上（y 更小），正好高一层 TRUNK_STEP：层级方向与卡片的下移方向一致。
-    expect(nested.trunkY).toBeLessThan(parent.trunkY);
-    expect(parent.trunkY - nested.trunkY).toBe(TRUNK_STEP);
+    // 子分支带在父卡下方，嵌套干线也跟着落在父带之下；两者不会被读成同一条线。
+    expect(nested.trunkY).toBeGreaterThan(parent.trunkY);
+    expect(nested.trunkY - parent.trunkY).toBe(H + VG);
 
     // 嵌套干线的横段只走自己的列区间：从父卡（b2）右边缘之外出发，
     // 止于最外子分支的落点，不回头越过父带的其它卡（b1 在更内侧）。
@@ -337,8 +445,8 @@ describe('branch trunk', () => {
     expect(Math.min(...flat)).toBeGreaterThan(b1.x + W);
     expect(Math.max(...flat)).toBe(dropOf('b2y'));
     expect(Math.max(...flat)).toBeGreaterThan(dropOf('b2x'));
-    // 两级垂直段都从父组干线所在的带上方经过：两条干线不共线、不与卡片相撞。
-    expect(nested.trunkY).toBeLessThan(b2.y);
+    // 嵌套干线仍在自己的带上方，且不与任何卡片或其它线冲突。
+    expect(nested.trunkY).toBeLessThan(b2x.y);
     expect(diagonals(result)).toEqual([]);
     expect(overlaps(result)).toEqual([]);
     expect(penetrated(result)).toEqual([]);

@@ -16,6 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { LayoutResult } from '../layout/types.js';
+import type { GraphNode } from '../../shared/protocol.js';
 import type { GraphView } from '../graph/viewModel.js';
 import { buildFlowEdges } from '../graph/flowEdges.js';
 import type { SavedViewport } from '../data/readingState.js';
@@ -46,13 +47,17 @@ export interface CanvasProps {
    * change it.
    */
   recentNodeIds?: ReadonlySet<string>;
+  /** Stable node ids with an importance write in flight. */
+  importanceBusyIds?: ReadonlySet<string>;
+  /** Writes one node's important flag from its card; omitted in the read-only offline reader. */
+  onToggleImportant?: (node: GraphNode, important: boolean) => void;
 }
 
 const nodeTypes = { topic: TopicCard };
 const edgeTypes = { route: RouteEdge, trunk: TrunkEdge };
 
 function CanvasInner(props: CanvasProps): React.JSX.Element {
-  const { view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, recentNodeIds } = props;
+  const { view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, recentNodeIds, importanceBusyIds, onToggleImportant } = props;
   const { fitView, getNode, setViewport, getViewport } = useReactFlow();
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -94,7 +99,13 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
   const didInitialFit = useRef(false);
   const lastFitSignal = useRef(0);
   const lastStructureKey = useRef('');
-  const lastCentered = useRef<string | null>(null);
+  /**
+   * Id whose selection has already been handled. Initialised with the restored
+   * selection (if any): a reload keeps its saved viewport and must not jump to
+   * centre. Starting from null is deliberate — the first directory/search pick
+   * in a topic without a restored selection is a user action and may centre.
+   */
+  const lastCentered = useRef<string | null>(selectedNodeId);
   /**
    * Screen positions of the layout currently drawn, keyed by node id. Compensating by
    * the layout delta (instead of a DOM measurement made after re-render) works whether
@@ -140,12 +151,14 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
           collapsed: collapsed.has(node.id),
           childCount: children.get(node.id) ?? 0,
           recent: recentNodeIds?.has(node.id) ?? false,
+          importanceBusy: importanceBusyIds?.has(node.id) ?? false,
+          ...(onToggleImportant !== undefined ? { onToggleImportant } : {}),
           onToggleCollapse,
         },
       });
     }
     return result;
-  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, recentNodeIds]);
+  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, recentNodeIds, importanceBusyIds, onToggleImportant]);
 
   // `layout` is the dependency that carries `edgeRoutes` and `branchTrunks`
   // together, so a new trunk set always rebuilds the edge list.
@@ -257,16 +270,20 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
   }, [getViewport, setViewport]);
 
   // Selection from outside the canvas centres the card without changing zoom.
+  // A restored selection was already consumed by the initial ref value above;
+  // only a later, user-driven change reaches this effect.
   useEffect(() => {
     if (selectedNodeId === null || layout === null) return;
-    if (lastCentered.current === null) {
-      lastCentered.current = selectedNodeId;
-      return;
-    }
     if (lastCentered.current === selectedNodeId) return;
-    lastCentered.current = selectedNodeId;
+    // Wait for the geometry of the current structure; an older result still on
+    // screen must not be used to compute a centre.
+    if (layout.structureVersion !== null && String(layout.structureVersion) !== view.structureKey) return;
+    // A node hidden by graph folding has no position to centre on. Do not expand
+    // ancestors implicitly; leave the selection intact and retry if it becomes
+    // visible through a later layout change.
     const node = getNode(selectedNodeId);
     if (node === undefined) return;
+    lastCentered.current = selectedNodeId;
     requestAnimationFrame(() => {
       const current = getViewport();
       const origin = containerOrigin();
@@ -281,7 +298,7 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
         { duration: 160 },
       );
     });
-  }, [selectedNodeId, layout, getNode, getViewport, setViewport]);
+  }, [selectedNodeId, layout, view.structureKey, getNode, getViewport, setViewport]);
 
   useEffect(() => {
     if (fitSignal === lastFitSignal.current) return;

@@ -2,7 +2,24 @@
 *::before,
 *::after { box-sizing: border-box; }
 
-html, body, #root { height: 100%; }
+html, body, #root {
+  /* Plain 100% is the fallback; dvh keeps a mobile/dynamic browser toolbar
+     from leaving a blank strip below the status bar. */
+  height: 100%;
+  height: 100dvh;
+}
+/* The SPA owns the viewport. Only panels scroll (see .panel__scroll and
+   .export-panel); the document itself must never move and reveal the shell
+   background below the status bar. This is an isolation boundary, not a cover
+   for a child overflow: the measurements put .app exactly at the viewport. */
+html, body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+#root {
+  min-height: 0;
+  overflow: hidden;
+}
 
 body {
   margin: 0;
@@ -64,6 +81,7 @@ code, pre, kbd { font-family: var(--font-mono); }
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -87,6 +105,9 @@ code, pre, kbd { font-family: var(--font-mono); }
 .app-main {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) auto;
+  /* Explicit minmax(0,1fr) keeps the single implicit row from growing past the
+     shell when a panel/canvas child has tall content. */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
   flex: 1 1 0;
@@ -112,7 +133,7 @@ code, pre, kbd { font-family: var(--font-mono); }
   flex: none;
 }
 .panel__title { font-size: var(--text-sm); font-weight: 620; letter-spacing: 0.02em; color: var(--text-soft); }
-.panel__scroll { overflow: auto; flex: 1; min-height: 0; }
+.panel__scroll { overflow: auto; flex: 1; min-height: 0; overscroll-behavior: contain; }
 
 .app-status {
   display: flex;

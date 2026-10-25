@@ -8,6 +8,7 @@ import {
   ReadViewError,
   buildReadView,
   decodeReadCursor,
+  serializeReadView,
   type ReadContentOptions,
   type ReadCursorState,
   type ReadViewBuildInput,
@@ -513,8 +514,8 @@ function contentItemLine(item: ReadContentItem, source: "online" | "disk"): stri
 }
 
 /**
- * 输出读取结果：JSON 原样返回响应；文本只给可粘贴的续读命令，
- * 不暴露 cursor 的 JSON 结构。
+ * 输出读取结果：JSON 直接写引擎的预算序列化（紧凑 JSON + 换行），
+ * 与 budget.used 逐字符一致；文本只给可粘贴的续读命令，不暴露 cursor 的 JSON 结构。
  */
 export function emitReadViewText(
   payload: ReadViewResponse,
@@ -522,7 +523,7 @@ export function emitReadViewText(
   mode: "json" | "text",
 ): void {
   if (mode === "json") {
-    emit(ctx, "json", payload, []);
+    ctx.stdout(serializeReadView(payload));
     return;
   }
 

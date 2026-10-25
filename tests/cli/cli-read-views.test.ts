@@ -228,8 +228,9 @@ async function collectPages(
   for (let index = 0; index < 100; index += 1) {
     const page = payloadOf(result);
     if (budget !== undefined) {
-      expect(page.budget.used).toBeLessThanOrEqual(budget);
-      expect(JSON.stringify(page).length).toBe(page.budget.used);
+      // budget.used 与实际 stdout（紧凑 JSON + 换行）逐字符一致。
+      expect(result.stdout.length).toBe(page.budget.used);
+      expect(result.stdout.length).toBeLessThanOrEqual(budget);
     }
     pages.push(page);
     if (!page.page.hasMore) return pages;
@@ -275,7 +276,8 @@ describe("aichat read 渐进读取", () => {
     const root = await newWorkspace();
     await start(root);
 
-    const payload = payloadOf(await cli([MAIN_TOPIC], root));
+    const defaultRun = await cli([MAIN_TOPIC], root);
+    const payload = payloadOf(defaultRun);
     expect(payload.ok).toBe(true);
     expect(payload.command).toBe("read");
     expect(payload.view).toBe("overview");
@@ -286,7 +288,9 @@ describe("aichat read 渐进读取", () => {
     expect(payload.scope).toMatchObject({ kind: "topic", nodeCount: 6 });
     expect(payload.budget.limit).toBe(12000);
     expect(payload.budget.used).toBeLessThanOrEqual(12000);
-    expect(JSON.stringify(payload).length).toBe(payload.budget.used);
+    expect(defaultRun.stdout.length).toBe(payload.budget.used);
+    expect(defaultRun.stdout.endsWith("\n")).toBe(true);
+    expect(defaultRun.stdout.slice(0, -1)).not.toContain("\n");
 
     const items = payload.items as ReadOverviewItem[];
     expect(items.map((item) => item.role + ":" + item.id)).toEqual([

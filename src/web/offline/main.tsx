@@ -345,6 +345,7 @@ function OfflineReader(): React.JSX.Element {
               onOpenNode={(id) => { setSelectedNodeId(id); setTab('node'); }}
               resources={state?.doc.resources ?? {}}
               boundaryNodes={state?.doc.boundaryNodes ?? []}
+              important={selectedNode?.important === true}
               onCopyContinuation={() => {
                 copyText(
                   '离线导出：' + (selectedTopic?.title ?? '') + (selectedNode ? ' · ' + selectedNode.number + ' ' + selectedNode.title : '') +
