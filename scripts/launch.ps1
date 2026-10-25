@@ -53,7 +53,7 @@ if ($Port -eq 0) {
   if ($Mode -eq 'Development') { $Port = 4318 }
 }
 $RequiredOutputs = @('dist\cli\index.js', 'dist\web\index.html', 'dist\offline\reader.js', 'dist\offline\reader.css')
-$InputPaths = @('src', 'index.html', 'package.json', 'package-lock.json', 'vite.config.ts', 'vite.offline.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'tsconfig.web.json', 'tsconfig.build.json')
+$InputPaths = @('src', 'index.html', 'package.json', 'package-lock.json', 'vite.config.ts', 'vite.offline.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'tsconfig.web.json', 'tsconfig.build.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'licenses', 'scripts\generate-notices.mjs')
 . (Join-Path $PSScriptRoot 'daily-snapshot.ps1')
 
 # ===========================================================================

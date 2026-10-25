@@ -1,6 +1,7 @@
 {
   "name": "aichat-graph",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "engines": {
@@ -14,20 +15,28 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.txt"
   ],
   "scripts": {
+    "notices": "node scripts/generate-notices.mjs",
+    "notices:check": "node scripts/generate-notices.mjs --check",
+    "predev:web": "npm run notices",
     "dev:web": "vite",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "prebuild:node": "npm run notices -- --copy-dist",
     "build:node": "tsc -p tsconfig.build.json",
     "build:web": "npm run build:web-app && npm run build:web-offline",
     "build": "npm run build:node && npm run build:web",
     "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:web": "vitest run tests/web",
+    "prebuild:web-app": "npm run notices -- --copy-dist",
     "build:web-app": "vite build",
+    "prebuild:web-offline": "npm run notices -- --copy-dist",
     "build:web-offline": "vite build --config vite.offline.config.ts"
   },
   "dependencies": {

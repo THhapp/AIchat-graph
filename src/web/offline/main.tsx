@@ -11,6 +11,7 @@ import { copyText as writeClipboard } from '../lib/clipboard.js';
 import { GraphCanvas } from '../components/GraphCanvas.js';
 import { DetailPanel } from '../components/DetailPanel.js';
 import { Sidebar } from '../components/Sidebar.js';
+import { LicenseNotices } from '../components/LicenseNotices.js';
 import { bodyById, readEmbeddedDocument, toGraphResponse, OfflineDocumentError } from './document.js';
 import '../styles/tokens.css';
 import '../styles/base.css';
@@ -366,6 +367,7 @@ function OfflineReader(): React.JSX.Element {
         <span className="app-status__spacer" />
         <span>资源 {String(Object.keys(resources).length)}</span>
         <span>离线成品无法写回源文件</span>
+        <LicenseNotices />
       </footer>
     </div>
   );

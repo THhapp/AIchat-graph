@@ -1,3 +1,5 @@
+import { LicenseNotices } from './LicenseNotices.js';
+
 export interface AppHeaderProps {
   /** Displayed workspace name, already falling back to its id. */
   workspaceName: string;
@@ -133,6 +135,7 @@ export function AppFooter(props: AppFooterProps): React.JSX.Element {
       ) : null}
       <span className="app-status__spacer" />
       <span>实例 {props.instanceId.slice(0, 8)} · r{props.revision}</span>
+      <LicenseNotices />
       <a href="/api/diagnostics" target="_blank" rel="noreferrer">诊断</a>
     </footer>
   );

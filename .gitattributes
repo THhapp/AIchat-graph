@@ -6,6 +6,9 @@
 *.bat text eol=crlf
 *.ps1 text eol=crlf
 
+# Generated upstream notices retain the original license text and whitespace.
+/THIRD_PARTY_NOTICES.txt linguist-generated=true -whitespace
+
 # Binary fixtures and assets must never be converted.
 *.png binary
 *.jpg binary

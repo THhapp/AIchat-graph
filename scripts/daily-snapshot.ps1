@@ -91,7 +91,7 @@ function Update-DailySnapshot {
     Assert-PrivatePath $DailyRoot
     if (Test-Path -LiteralPath $DailyRoot) {
       Assert-DailySnapshot
-      $allowed = @('dist', 'node_modules', 'package.json', 'package-lock.json', 'snapshot.json', 'skills')
+      $allowed = @('dist', 'node_modules', 'package.json', 'package-lock.json', 'snapshot.json', 'skills', 'LICENSE', 'THIRD_PARTY_NOTICES.txt')
       $unexpected = @(Get-ChildItem -LiteralPath $DailyRoot -Force | Where-Object { $_.Name -notin $allowed })
       if ($unexpected.Count -gt 0) { throw '日用快照包含预期以外的文件，不会移动或清理。' }
     }
@@ -112,7 +112,7 @@ function Update-DailySnapshot {
     $ready = Join-Path $stage 'ready'
     $previous = Join-Path $stage 'previous'
     [void](New-Item -ItemType Directory -Path $ready -Force)
-    foreach ($relative in @('dist', 'package.json', 'package-lock.json')) {
+    foreach ($relative in @('dist', 'package.json', 'package-lock.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt')) {
       Copy-Item -LiteralPath (Join-Path $ProjectRoot $relative) -Destination $ready -Recurse
     }
     [void](New-Item -ItemType Directory -Path (Join-Path $ready 'skills'))

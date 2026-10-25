@@ -1,0 +1,44 @@
+.license-notices {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(54rem, calc(100vw - 2rem));
+  height: min(48rem, 80vh);
+  height: min(48rem, 80dvh);
+  max-height: calc(100dvh - 2rem);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-bg);
+  color: var(--text);
+  font-size: var(--text-base);
+  white-space: normal;
+  box-shadow: var(--shadow-2);
+}
+.license-notices[open] { display: flex; flex-direction: column; }
+.license-notices::backdrop { background: rgb(0 0 0 / 40%); }
+.license-notices__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.license-notices__head h2 { font-size: var(--text-lg); }
+.license-notices__body {
+  overflow: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+  padding: var(--space-4);
+  white-space: normal;
+}
+.license-notices__body h3 { margin-top: var(--space-5); font-size: var(--text-md); }
+.license-notices__body pre {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
