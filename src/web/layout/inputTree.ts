@@ -5,7 +5,6 @@ import {
   DEFAULT_HORIZONTAL_GAP,
   DEFAULT_VERTICAL_GAP,
   type LayoutFlow,
-  type LayoutSide,
 } from './types.js';
 import {
   compareIds,
@@ -99,15 +98,6 @@ export function normalizeNodes(rawNodes: unknown, diagnostics: DiagnosticSink, c
       parentId = parentCandidate;
     }
 
-    let declaredSide: LayoutSide | null = null;
-    if (flow === 'branch') {
-      if (raw.side === 'left' || raw.side === 'right') {
-        declaredSide = raw.side;
-      } else if (raw.side !== undefined && raw.side !== null) {
-        diagnostics.add('invalid-node', 'branch.side 无效，按未声明（自动择侧）处理', id);
-      }
-    }
-
     let order: number | null = null;
     if (flow === 'branch') {
       if (typeof raw.order === 'number' && Number.isFinite(raw.order)) order = raw.order;
@@ -127,7 +117,6 @@ export function normalizeNodes(rawNodes: unknown, diagnostics: DiagnosticSink, c
       inputIndex: index,
       flow,
       parentId,
-      declaredSide,
       order,
       height,
       label: typeof raw.label === 'string' ? raw.label : null,

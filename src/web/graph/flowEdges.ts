@@ -1,43 +1,23 @@
 import type { Edge } from '@xyflow/react';
 import type { GraphResponse } from '../../shared/protocol.js';
 import type { LayoutResult } from '../layout/types.js';
-import { placeRouteLabels, type LabelCardRect } from '../components/routeLabels.js';
 import { connectionText, type GraphView } from './viewModel.js';
 
 /**
  * Display edges for one layout result.
  *
- * One relationship is still exactly one edge (and one label), but the shared
- * geometry of sibling branches is now a separate, relationship-free edge: the
- * trunk is drawn once and every branch only paints its own exclusive stub from
- * the join down to its target. Counting stays checkable — relationship edges
- * equal the visible parent links, display paths equal that plus the trunks.
+ * One relationship is still exactly one edge, and the shared vertical trunk of
+ * a branch group is a separate, relationship-free edge drawn once. Counting
+ * stays checkable — relationship edges equal the visible parent links, display
+ * paths equal that plus the trunks.
  *
- * Kept outside the React component so tests and non-canvas callers do not pull
- * in @xyflow/react at runtime.
+ * Label geometry comes from layout (`route.label`); this module never places a
+ * label. Kept outside the React component so tests and non-canvas callers do not
+ * pull in @xyflow/react at runtime.
  */
 export function buildFlowEdges(layout: LayoutResult, view: GraphView): Edge[] {
   const routes = new Map(layout.edgeRoutes.map((route) => [route.id, route]));
   const edges: Edge[] = [];
-
-  // Relationship text is display-only, but every label box is placed here in
-  // one deterministic pass: cards, shared trunks, the other routes and the
-  // labels placed before it are all subtracted from the candidate slots. The
-  // renderer only draws the precomputed box, so live and offline geometry are
-  // identical.
-  const cards: LabelCardRect[] = Object.entries(layout.positions).map(([id, position]) => ({
-    x: position.x,
-    y: position.y,
-    width: layout.cardWidth,
-    height: layout.heights[id] ?? layout.cardHeight,
-  }));
-  const labelTexts = new Map<string, string>();
-  for (const node of view.nodes) {
-    if (node.from === null) continue;
-    const text = connectionText(node);
-    if (text !== '') labelTexts.set(node.from + '->' + node.id, text);
-  }
-  const labelBoxes = placeRouteLabels(layout.edgeRoutes, layout.branchTrunks ?? [], cards, labelTexts);
 
   // Trunks first, so the branch stubs are painted over the shared run.
   for (const trunk of layout.branchTrunks ?? []) {
@@ -56,6 +36,9 @@ export function buildFlowEdges(layout: LayoutResult, view: GraphView): Edge[] {
       selectable: false,
       focusable: false,
       deletable: false,
+      // The shared run belongs to no relationship and must not steal pointer
+      // gestures from the canvas.
+      interactionWidth: 0,
     });
   }
 
@@ -70,10 +53,11 @@ export function buildFlowEdges(layout: LayoutResult, view: GraphView): Edge[] {
       target: node.id,
       type: 'route',
       className: 'rf-edge--' + node.flow,
-      // The relationship sentence is description; the connector is the only
-      // place it is drawn.
+      // Current relationship wording, kept on the edge for callers/tooltips.
+      // The painted text is `route.label.lines`, because layout owns the box.
       label: connectionText(node) || undefined,
-      data: { flow: node.flow, route, labelBox: route === null ? null : labelBoxes.get(route.id) ?? null },
+      // The route carries its own points and label box; no UI-side placement.
+      data: { route },
       selectable: false,
       focusable: false,
       deletable: false,

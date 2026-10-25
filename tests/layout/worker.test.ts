@@ -5,7 +5,7 @@ import { createLayoutWorkerState, handleLayoutMessage } from '../../src/web/layo
 const nodes: LayoutNodeInput[] = [
   { id: '06', from: null, flow: 'root' },
   { id: '07', from: '06', flow: 'next' },
-  { id: '06-03', from: '06', flow: 'branch', side: 'right', order: 10 },
+  { id: '06-03', from: '06', flow: 'branch', order: 10 },
   { id: '06-04', from: '06-03', flow: 'next' },
 ];
 
@@ -22,6 +22,7 @@ describe('layout worker protocol', () => {
     expect(response.requestId).toBe('r1');
     expect(response.sequence).toBe(1);
     expect(response.structureVersion).toBe('v1');
+    expect(response.result.layoutVersion).toBe(5);
     expect(Object.keys(response.result.positions).sort()).toEqual(['06', '06-03', '06-04', '07']);
   });
 

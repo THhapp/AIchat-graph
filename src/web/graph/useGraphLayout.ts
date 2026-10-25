@@ -17,8 +17,9 @@ const EMPTY: LayoutState = { result: null, status: 'idle', error: null, appliedV
 /**
  * Recomputes geometry only when the structure key changes. Overlapping requests
  * resolve in favour of the newest key; late answers for old keys are discarded,
- * never drawn over the current graph. Text edits keep the key, so they never
- * trigger a relayout or a viewport reset.
+ * never drawn over the current graph. Only text edits that leave label wrapping
+ * and title height unchanged keep the key; a relationship wording change
+ * recomputes the layout, and anchor compensation preserves the reading position.
  */
 export function useGraphLayout(view: GraphView | null, slot: LayoutEngineSlot): LayoutState {
   const [state, setState] = useState<LayoutState>(EMPTY);

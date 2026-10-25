@@ -23,9 +23,10 @@ export interface GraphView {
   /** Descendants hidden behind each collapsed node, for the "+N" badge. */
   hiddenDescendantCounts: Map<string, number>;
   /**
-   * Changes with structure, filter, collapse and title height. Relationship text
-   * presence is included; the sentence itself is not, so editing wording never
-   * moves the cards. Summary text never affects geometry.
+   * Changes with structure, filter, collapse, title height and relationship
+   * wording: label wrapping and label height are layout geometry. When wording
+   * changes, the layout recomputes but the reading-anchor compensation keeps the
+   * current card in place. Summary text never affects geometry.
    */
   structureKey: string;
   layoutNodes: LayoutNodeWithHeight[];
@@ -135,10 +136,10 @@ export function buildGraphView(
       id: node.id,
       from: localRoot ? null : node.from,
       flow: localRoot ? 'root' : node.flow,
-      side: !localRoot && node.flow === 'branch' ? node.side ?? null : null,
       order: !localRoot && node.flow === 'branch' ? node.order ?? null : null,
-      // Layout only uses this to decide whether an edge carries a label and where
-      // its anchor sits; the text itself never changes coordinates.
+      // Layout measures this sentence's label box; the full text is passed, so
+      // wrapping and height are part of the geometry. The source `side` is not
+      // interpreted: v5 always unfolds branches to the right.
       label: connectionText(node) || null,
       topicId: node.topicId,
       height: cardHeightForTitle(node.title),
@@ -155,17 +156,17 @@ export function buildGraphView(
 
   const keyParts = nodes
     .map((node) =>
-      [
+      JSON.stringify([
         node.id,
         node.from ?? '',
         node.flow,
-        node.side ?? '',
         String(node.order ?? ''),
-        // Presence only: a rewording must not relayout, adding/removing must.
-        connectionText(node) === '' ? '' : 'L',
+        // Full wording, not just presence: the label box wraps and reserves
+        // vertical space, so a rewording changes the layout geometry.
+        connectionText(node),
         String(cardHeightForTitle(node.title)),
         node.topicId,
-      ].join('~'),
+      ]),
     )
     .sort();
   const structureKey = [topicFilter ?? '*', [...collapsed].sort().join(','), keyParts.join('|')].join('#');

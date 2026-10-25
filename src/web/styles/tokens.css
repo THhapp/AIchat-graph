@@ -67,7 +67,12 @@
   --selected: hsl(210 14% 28%);
   --danger: var(--red-700);
   --danger-soft: var(--red-100);
-  --edge: hsl(40 6% 69%);
+  /* Connectors are reading aids, not the primary content: one warm grey for
+     the exclusive branch/next line, one step stronger for the shared trunk. */
+  --edge: hsl(40 6% 56%);
+  --edge-strong: hsl(40 7% 50%);
+  --edge-label-bg: var(--bg);
+  --canvas-dot: hsl(40 6% 86%);
 
   --state-agreed-fg: var(--green-700);
   --state-agreed-bg: var(--green-100);
@@ -81,6 +86,9 @@
   /* component */
   --card-bg: var(--bg-raised);
   --card-border: var(--border);
+  --card-shadow-rest: 0 1px 2px hsl(40 10% 10% / 0.04), 0 2px 8px hsl(40 10% 10% / 0.035);
+  --card-shadow-hover: 0 4px 14px hsl(40 10% 10% / 0.08), 0 1px 3px hsl(40 10% 10% / 0.05);
+  --radius-card: 10px;
   --panel-bg: var(--bg-raised);
   --header-h: 3.25rem;
   --status-h: 1.875rem;
@@ -106,7 +114,9 @@
   --selected: hsl(40 12% 86%);
   --danger: hsl(0 70% 72%);
   --danger-soft: hsl(0 40% 20%);
-  --edge: hsl(220 7% 42%);
+  --edge: hsl(220 8% 46%);
+  --edge-strong: hsl(220 8% 52%);
+  --canvas-dot: hsl(220 8% 22%);
 
   --state-agreed-fg: hsl(146 48% 68%);
   --state-agreed-bg: hsl(146 30% 18%);
@@ -117,8 +127,10 @@
   --state-reference-fg: hsl(220 10% 76%);
   --state-reference-bg: hsl(220 8% 22%);
 
-  --card-bg: var(--bg-raised);
-  --card-border: var(--border);
+  --card-bg: hsl(220 12% 14%);
+  --card-border: hsl(220 8% 27%);
+  --card-shadow-rest: 0 1px 2px hsl(220 20% 2% / 0.45);
+  --card-shadow-hover: 0 6px 18px hsl(220 20% 2% / 0.5), 0 1px 3px hsl(220 20% 2% / 0.4);
   --panel-bg: var(--bg-raised);
   --shadow-1: 0 1px 2px hsl(0 0% 0% / 0.4);
   --shadow-2: 0 12px 32px hsl(0 0% 0% / 0.5);

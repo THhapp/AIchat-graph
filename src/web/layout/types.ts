@@ -2,11 +2,19 @@
  * Layout 模块的纯结构契约。
  *
  * 只消费已校验的最小结构，不复制 core 的主题/正文 schema，也不依赖
- * React、React Flow、Node 或文件系统。文本字段不参与几何计算。
+ * React、React Flow、Node 或文件系统。文本字段只通过 label 参与几何：
+ * 关系文字需要预留标签框，不读取标题或正文。
  */
+import {
+  CARD_WIDTH,
+  LAYOUT_HORIZONTAL_GAP,
+  LAYOUT_VERTICAL_GAP,
+  LAYOUT_VERSION,
+} from '../graph/cardMetrics.js';
+
+export { LAYOUT_VERSION };
 
 export type LayoutFlow = 'root' | 'next' | 'branch';
-export type LayoutSide = 'left' | 'right';
 
 /** layout 接收的最小节点结构；其他业务字段会被忽略。 */
 export interface LayoutNodeInput {
@@ -14,16 +22,14 @@ export interface LayoutNodeInput {
   /** 有效输入中 root 为 null，其余节点为工作区内的父节点 ID。 */
   from?: string | null | undefined;
   flow: LayoutFlow;
-  /** 仅 branch：源记录明确声明的方向；null/undefined 表示由布局自动择侧。 */
-  side?: LayoutSide | null | undefined;
-  /** 仅 branch 使用；整数升序，缺失时按 ID 排在后面。 */
+  /** 仅 branch：同源兄弟的稳定顺序；缺失时按 ID 排在后面。 */
   order?: number | null | undefined;
   /**
    * 卡片高度提示（px）。布局只把它当作几何量，绝不从标题/正文推导。
    * 非法值回退 cardHeight。
    */
   height?: number | null | undefined;
-  /** 仅用于生成 labelAnchor，不参与坐标和碰撞计算。 */
+  /** 该节点入边的关系文字；参与标签框与纵向间距，不截断。 */
   label?: string | null | undefined;
   /** 保留字段；当前不输出主题框，不参与坐标。 */
   topicId?: string | null | undefined;
@@ -42,26 +48,22 @@ export interface LayoutRect extends LayoutPoint {
   height: number;
 }
 
-/**
- * 同一来源同一侧的并列分支共用干线；纯显示几何，不是思想节点或关系。
- * 干线自源卡出口横出、竖直上升到 trunkY，再水平延伸到最远接出点。
- */
-export interface LayoutBranchTrunk {
-  /** 稳定 id：`${from}~${side}`。 */
-  id: string;
-  from: string;
-  side: LayoutSide;
-  /** 最远成员节点 id：仅用于界面把它挂成一条边，不表示关系。 */
-  to: string;
-  /** 出口横段 → 上升竖段 → 横向干线（止于最远接出点）。 */
-  points: LayoutPoint[];
-  /** 干线所在 y。 */
-  trunkY: number;
+export interface LayoutLabelBox extends LayoutRect {
+  /** Same value as `x`; provided for the label contract used by the reader. */
+  left: number;
+  /** Same value as `y`; provided for the label contract used by the reader. */
+  top: number;
+  /** 完整折行结果；不截断、不加省略号。 */
+  lines: string[];
+  /** 文字锚点中心（标签框内文字居中）。 */
+  centerX: number;
+  /** 第一行基线。 */
+  baseline: number;
 }
 
 /**
  * 正交折线。首尾点落在卡片边缘，中间点只做水平/垂直移动。
- * branch 边可能只画干线之外的独占段，共享段见 LayoutBranchTrunk。
+ * branch 加入共享竖向干线时，points 从干线接出点开始；单支从源卡边缘开始。
  */
 export interface LayoutEdgeRoute {
   /** 稳定边 ID：`${from}->${to}`。 */
@@ -69,16 +71,24 @@ export interface LayoutEdgeRoute {
   from: string;
   to: string;
   flow: 'next' | 'branch';
-  /** branch：最终实际落位的一侧（显式或自动），供界面显示方向；next 省略。 */
-  side?: LayoutSide;
-  /** branch 边：干线上的接出点；单条直连（无干线）时省略。 */
-  join?: LayoutPoint;
-  /** branch 边：独占支线。有 join 时 points[0] 等于 join。 */
   points: LayoutPoint[];
-  /** 关系文字的放置中心；没有 label 时省略。 */
-  labelAnchor?: LayoutPoint;
-  /** 关系文字的可用宽度（px）；没有 label 时省略。 */
-  labelWidth?: number;
+  /** branch 加入共享竖向干线时存在；单支没有。 */
+  trunkId?: string;
+  /** 关系文字框；没有文字时省略。 */
+  label?: LayoutLabelBox;
+}
+
+/**
+ * 同源多个 branch 共用的一条竖向干线；纯显示几何，不是思想节点或关系。
+ * 干线只画一次，起点在源卡右边缘。
+ */
+export interface LayoutBranchTrunk {
+  /** 稳定 id：`${from}~branches`。 */
+  id: string;
+  from: string;
+  /** 最下方（最后一个）成员节点 id：仅用于界面挂载，不表示关系。 */
+  to: string;
+  points: LayoutPoint[];
 }
 
 export type LayoutDiagnosticCode =
@@ -97,8 +107,6 @@ export type LayoutDiagnosticCode =
   | 'visibility-root-hidden'
   | 'cycle'
   | 'unreachable-node'
-  | 'branch-band-shifted'
-  | 'route-fallback'
   | 'previous-positions-ignored'
   | 'diagnostics-truncated';
 
@@ -122,8 +130,9 @@ export interface LayoutInput {
   horizontalGap?: number | undefined;
   /**
    * 上次布局的节点左上角坐标。用于保持阅读锚点：若其中包含主根的有效坐标，
-   * 本次结果整体平移使主根回到该坐标；其余几何仍按当前结构确定，避免旧坐标
-   * 造成卡片重叠或错误连线。不会修改传入对象。
+   * 本次全部输出几何（positions、routes、trunks、label boxes）整体平移，使主根
+   * 回到该坐标；其余几何仍按当前结构确定，避免旧坐标造成卡片重叠或错误连线。
+   * 不会修改传入对象。
    */
   previousPositions?: Readonly<Record<string, LayoutPosition>> | null | undefined;
   /** 调用方持有的结构快照版本；原样回传，供 Worker/页面层丢弃旧结果。 */
@@ -139,9 +148,9 @@ export interface LayoutResult {
   /** 折叠节点 -> 被隐藏的后代数；省略 0。 */
   hiddenCounts: Record<string, number>;
   diagnostics: LayoutDiagnostic[];
-  /** 按每张卡的实际高度计算的包围盒。 */
+  /** 所有可见卡片与标签框的并集。 */
   bounds: LayoutRect;
-  /** 默认卡片宽度；单卡可能是其他宽度提示，此处仍是默认值。 */
+  /** 默认卡片宽度；单卡高度见 heights。 */
   cardWidth: number;
   /** 默认卡片高度；单卡实际高度见 heights。 */
   cardHeight: number;
@@ -153,9 +162,8 @@ export interface LayoutResult {
   structureVersion: number | string | null;
 }
 
-export const DEFAULT_CARD_WIDTH = 360;
+export const DEFAULT_CARD_WIDTH = CARD_WIDTH;
 export const DEFAULT_CARD_HEIGHT = 152;
-export const DEFAULT_VERTICAL_GAP = 64;
-export const DEFAULT_HORIZONTAL_GAP = 88;
-export const LAYOUT_VERSION = 4;
+export const DEFAULT_VERTICAL_GAP = LAYOUT_VERTICAL_GAP;
+export const DEFAULT_HORIZONTAL_GAP = LAYOUT_HORIZONTAL_GAP;
 export const MAX_LAYOUT_DIAGNOSTICS = 32;

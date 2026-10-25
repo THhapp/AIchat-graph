@@ -29,15 +29,11 @@ export function StateChip({ node, active = false }: { node: Pick<GraphNode, 'sta
 }
 
 /**
- * `resolvedSide` is the side layout actually used for this branch. Without an
- * explicit or resolved direction the label stays neutral instead of claiming a
- * right-hand branch the drawing may contradict.
+ * Branch geometry is single-sided in v5: every branch unfolds to the right of
+ * its source, so the source `side` value must not be echoed as a reading fact.
  */
-export function flowLabel(node: Pick<GraphNode, 'flow' | 'side'>, resolvedSide?: 'left' | 'right' | null): string {
+export function flowLabel(node: Pick<GraphNode, 'flow'>): string {
   if (node.flow === 'root') return '根节点';
   if (node.flow === 'next') return '纵向续接';
-  const side = resolvedSide ?? node.side ?? null;
-  if (side === 'left') return '左侧分支';
-  if (side === 'right') return '右侧分支';
-  return '分支';
+  return '右侧分支';
 }

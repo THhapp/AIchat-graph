@@ -1,4 +1,5 @@
-import { LAYOUT_VERSION, type LayoutInput, type LayoutPosition, type LayoutResult, type LayoutSide } from './types.js';
+import { LAYOUT_ROOT_GAP } from '../graph/cardMetrics.js';
+import { LAYOUT_VERSION, type LayoutInput, type LayoutPosition, type LayoutResult } from './types.js';
 import { compareIds, createDiagnosticSink, emptyResult } from './internal.js';
 import { isRecord } from '../../shared/guards.js';
 import {
@@ -14,8 +15,8 @@ import {
   computeVisibility,
   buildVisibleTree,
 } from './inputTree.js';
-import { measureBlock, type MeasureContext } from './measure.js';
-import { applyPreviousAnchor, buildEdgeRoutes, reportRoutePenetrations, computeBounds } from './routing.js';
+import { measureChain, type MeasureContext } from './measure.js';
+import { applyPreviousAnchor, buildEdgeRoutes, computeBounds } from './routing.js';
 
 export * from './types.js';
 
@@ -23,13 +24,12 @@ export * from './types.js';
  * 确定性纯布局。
  *
  * 结构解释：
- * - 每个节点最多一个 next 后继；next 共享当前局部纵轴，主线继续纵向推进。
- * - 同一父节点的 branch 横向各占一列，枝内 next 沿本列继续；列从主脊向外编号。
- * - branch 显式声明的 side 优先；未声明时按分支计数自动择侧。
- * - 卡片矩形不重叠；next 与 branch 折线路由都走卡片之间的通道。
+ * - 全局主线与每条 branch 目标链都沿 next 从上到下推进。
+ * - branch 统一从来源卡片向右展开；同源兄弟在右侧上下堆叠，共用一条竖向干线。
+ * - 一个节点与它的直接分支组成完整纵向区域，本链 next 后继从区域底部继续。
+ * - 折叠节点不占位；位置、路由、干线和标签框统一按 previousPositions 平移。
  *
- * previousPositions 只把主根平移到上次坐标；其余几何由当前结构决定。
- * 同输入同输出，不读取正文、标题或编号。
+ * 同输入同输出，不读取正文、标题或编号；side 不再参与布局。
  */
 export function computeLayout(input: LayoutInput): LayoutResult {
   const diagnostics = createDiagnosticSink();
@@ -56,10 +56,6 @@ export function computeLayout(input: LayoutInput): LayoutResult {
   const visibility = computeVisibility(nodes, byId, fullChildren, raw, diagnostics);
   const tree = buildVisibleTree(nodes, visibility.visible, byId, diagnostics);
 
-  const sides = new Map<string, LayoutSide>();
-  const groupDepths = new Map<string, number>();
-  const columns = new Map<string, number>();
-  const entrySides = new Map<string, LayoutSide>();
   const measureContext: MeasureContext = {
     nextByParent: tree.nextByParent,
     branchesByParent: tree.branchesByParent,
@@ -67,42 +63,41 @@ export function computeLayout(input: LayoutInput): LayoutResult {
     diagnostics,
     memo: new Map(),
     visiting: new Set(),
-    sides,
-    groupDepths,
-    columns,
-    entrySides,
   };
 
-  const forest = tree.roots.map((root) => ({ root, block: measureBlock(root, null, 0, measureContext) }));
   const placed = new Map<string, LayoutPosition>();
-  let forestCursor = 0;
-  for (const entry of forest) {
-    // 行 0 的走廊落在 head 上方，整块下移自己的 topExtent，避免负坐标与负起点包围盒。
-    for (const node of entry.block.nodes) {
-      placed.set(node.node.id, { x: forestCursor + node.x, y: entry.block.topExtent + node.y });
+  let cursorY = 0;
+  for (const root of tree.roots) {
+    const block = measureChain(root, measureContext);
+    for (const node of block.nodes) {
+      if (placed.has(node.node.id)) continue;
+      placed.set(node.node.id, { x: node.x, y: cursorY + node.y });
     }
-    forestCursor += entry.block.width + config.horizontalGap;
+    cursorY += block.height + LAYOUT_ROOT_GAP;
   }
 
   // Safety net: a visible node must always receive a coordinate. Valid inputs
-  // never reach this branch; a malformed cycle/filter combination may.
-  for (const node of nodes) {
-    if (!visibility.visible.has(node.id) || placed.has(node.id)) continue;
-    placed.set(node.id, { x: forestCursor, y: 0 });
-    forestCursor += config.cardWidth + config.horizontalGap;
-    diagnostics.add('unreachable-node', '节点未接入可见树，已单独放置在右侧', node.id);
-  }
-
-  const primaryRoot = tree.roots.find((root) => root.flow === 'root') ?? tree.roots[0];
-  applyPreviousAnchor(raw.previousPositions, primaryRoot, placed);
-
-  // 输出按稳定 ID 排序，使输入数组顺序不同的等价结构也得到相同序列化结果。
-  const positions: Record<string, LayoutPosition> = {};
-  const heights: Record<string, number> = {};
+  // never reach this branch; keep the fallback in the left-hand forest.
   const visibleSorted = nodes
     .filter((node) => visibility.visible.has(node.id))
     .map((node) => node.id)
     .sort(compareIds);
+  for (const id of visibleSorted) {
+    if (placed.has(id)) continue;
+    const node = byId.get(id);
+    if (node === undefined) continue;
+    placed.set(id, { x: 0, y: cursorY });
+    cursorY += node.height + LAYOUT_ROOT_GAP;
+    diagnostics.add('unreachable-node', '节点未接入可见树，已单独放置在左侧森林下方', id);
+  }
+
+  const primaryRoot = tree.roots[0];
+  applyPreviousAnchor(raw.previousPositions, primaryRoot, placed);
+
+  // Output records are sorted by stable id, so input array order cannot change
+  // the serialized result.
+  const positions: Record<string, LayoutPosition> = {};
+  const heights: Record<string, number> = {};
   for (const id of visibleSorted) {
     const position = placed.get(id);
     if (position !== undefined) positions[id] = { x: position.x, y: position.y };
@@ -110,24 +105,15 @@ export function computeLayout(input: LayoutInput): LayoutResult {
     if (node !== undefined) heights[id] = node.height;
   }
 
-  const routed = buildEdgeRoutes(
-    nodes,
-    visibility.visible,
-    tree.parentOf,
-    placed,
-    config,
-    sides,
-    groupDepths,
-    columns,
-    entrySides,
-  );
-  const edgeRoutes = routed.routes;
-  reportRoutePenetrations(edgeRoutes, routed.trunks, nodes, visibility.visible, positions, config, diagnostics);
-  const bounds = computeBounds(nodes, visibility.visible, positions, config);
+  const routed = buildEdgeRoutes(byId, tree, placed, config);
+  const labels = routed.routes
+    .map((route) => route.label)
+    .filter((label): label is NonNullable<typeof label> => label !== undefined);
+  const bounds = computeBounds(positions, heights, config.cardWidth, labels);
 
   return {
     positions,
-    edgeRoutes,
+    edgeRoutes: routed.routes,
     branchTrunks: routed.trunks,
     hiddenCounts: visibility.hiddenCounts,
     diagnostics: diagnostics.finish(),

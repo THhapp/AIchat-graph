@@ -1,34 +1,11 @@
 import { BaseEdge, getSmoothStepPath } from '@xyflow/react';
 import type { EdgeProps } from '@xyflow/react';
-import type { LayoutEdgeRoute } from '../layout/types.js';
-import {
-  EDGE_LABEL_FONT,
-  EDGE_LABEL_LINE_HEIGHT,
-  EDGE_LABEL_RADIUS,
-} from '../graph/cardMetrics.js';
-import { layoutEdgeLabel, type EdgeLabelBox } from './routeLabels.js';
+import type { LayoutEdgeRoute, LayoutLabelBox } from '../layout/types.js';
+import { EDGE_LABEL_LINE_HEIGHT, EDGE_LABEL_RADIUS } from '../graph/cardMetrics.js';
 import { EDGE_ORIGIN_RADIUS, buildOrthogonalPath } from './edgePath.js';
 
-/** Tolerance for "the first point already is the join". */
-const SAME_POINT = 0.01;
-
-/**
- * Branch geometry as drawn: a branch that leaves a shared trunk starts at its
- * join point, so the trunk itself is never painted twice.
- */
-function routePoints(route: LayoutEdgeRoute): readonly { x: number; y: number }[] {
-  const join = route.join;
-  const first = route.points[0];
-  if (join === undefined) return route.points;
-  if (first === undefined) return [join];
-  if (Math.abs(first.x - join.x) < SAME_POINT && Math.abs(first.y - join.y) < SAME_POINT) {
-    return route.points;
-  }
-  return [join, ...route.points];
-}
-
 function RouteLabel(
-  { text, box }: { text: string; box: EdgeLabelBox },
+  { text, box }: { text: string; box: LayoutLabelBox },
 ): React.JSX.Element {
   return (
     <g className="rf-edge__label-group">
@@ -54,28 +31,28 @@ function RouteLabel(
 }
 
 /**
- * Draws the layout owner's orthogonal route when present. Falls back to a smooth
- * step only if the route is missing, and never draws through cards silently:
- * a missing route is surfaced as a dashed fallback.
+ * Draws the layout owner's orthogonal route and label box exactly as emitted.
+ * Falls back to a smooth step only if the route is missing, and never draws
+ * through cards silently: a missing route is surfaced as a dashed fallback.
  */
 export function RouteEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, label, data }: EdgeProps): React.JSX.Element {
-  const payload = data as { route?: LayoutEdgeRoute | null; labelBox?: EdgeLabelBox | null } | undefined;
-  const route = payload?.route ?? null;
+  const route = (data as { route?: LayoutEdgeRoute | null } | undefined)?.route ?? null;
   const text = typeof label === 'string' ? label.trim() : '';
   if (route !== null) {
-    const path = buildOrthogonalPath(routePoints(route));
-    // Only a branch that leaves the card directly gets the origin dot: a
-    // trunked branch starts on the shared run, where a dot would only mark a
-    // T junction, and a continuing edge is a straight continuation rather than
-    // a new departure.
-    const origin = route.join === undefined && route.flow === 'branch' ? route.points[0] : undefined;
-    // Placement is computed once for all routes in `buildFlowEdges`; the local
-    // fallback only covers callers that assemble an edge without that pass.
-    const box = text === '' ? null : payload?.labelBox ?? layoutEdgeLabel(route, text);
+    // The renderer paints `route.points`; there is no join/side reconstruction.
+    const path = buildOrthogonalPath(route.points);
+    // Only a branch that leaves the source card directly gets the origin dot.
+    // A trunked branch starts at a T junction on the shared run, and a
+    // continuing next edge is a straight continuation rather than a departure.
+    const origin = route.flow === 'branch' && route.trunkId === undefined ? route.points[0] : undefined;
+    const box = route.label ?? null;
+    // The tooltip keeps the current relationship sentence; the visible text is
+    // always the complete wrapped lines measured by layout.
+    const title = text !== '' ? text : box?.lines.join(' ') ?? '';
     return (
       <>
         <BaseEdge id={id} path={path} className="rf-edge" />
-        {box !== null ? <RouteLabel text={text} box={box} /> : null}
+        {box !== null ? <RouteLabel text={title} box={box} /> : null}
         {origin !== undefined ? (
           <circle className="rf-edge__origin" cx={origin.x} cy={origin.y} r={EDGE_ORIGIN_RADIUS} />
         ) : null}
@@ -95,8 +72,8 @@ export function RouteEdge({ id, sourceX, sourceY, targetX, targetY, sourcePositi
   return (
     <>
       <BaseEdge id={id} path={path} className="rf-edge rf-edge--fallback" />
-      {label !== undefined && label !== '' ? (
-        <text className="rf-edge__label" x={labelX} y={labelY} textAnchor="middle">{label}</text>
+      {text !== '' ? (
+        <text className="rf-edge__label" x={labelX} y={labelY} textAnchor="middle">{text}</text>
       ) : null}
     </>
   );

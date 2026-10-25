@@ -2,7 +2,7 @@ import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import type { GraphNode } from '../../shared/protocol.js';
-import { StateChip } from './display.js';
+import { StateChip, stateLabel } from './display.js';
 
 export interface TopicCardData extends Record<string, unknown> {
   node: GraphNode;
@@ -42,7 +42,7 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
       data-selected={selected === true ? 'true' : 'false'}
       data-recent={recent ? 'true' : 'false'}
       data-important={important ? 'true' : 'false'}
-      aria-label={node.number + ' ' + node.title + '，' + node.state + (important ? '，重要' : '') + (recent ? '，最近更新' : '')}
+      aria-label={node.number + ' ' + node.title + '，' + stateLabel(node.state) + (important ? '，重要' : '') + (recent ? '，最近更新' : '')}
     >
       <Handle type="target" position={Position.Top} className="rf-handle" isConnectable={false} />
       <header className="topic-card__head">
@@ -78,7 +78,7 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
             className="topic-card__toggle nodrag nopan"
             aria-expanded={!collapsed}
             aria-label={collapsed ? '展开 ' + String(hiddenCount) + ' 个隐藏节点' : '折叠 ' + String(childCount) + ' 个后继节点'}
-            title={collapsed ? '展开隐藏的后继' : '折叠后继链'}
+            title={collapsed ? '展开 ' + String(hiddenCount) + ' 个隐藏的后继节点' : '折叠 ' + String(childCount) + ' 个后继节点'}
             onClick={(event) => {
               event.stopPropagation();
               onToggleCollapse(node.id);

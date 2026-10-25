@@ -36,9 +36,24 @@ export const EDGE_LABEL_PAD_X = 4;
 export const EDGE_LABEL_PAD_Y = 2;
 export const EDGE_LABEL_RADIUS = 4;
 
-/** Layout gaps; exported so the live and offline callers do not each spell them out. */
+/**
+ * Layout gaps; exported so the live reader, the offline reader and the layout
+ * core do not each spell them out.
+ */
 export const LAYOUT_VERTICAL_GAP = 64;
-export const LAYOUT_HORIZONTAL_GAP = 120;
+export const LAYOUT_HORIZONTAL_GAP = 200;
+/** Tight vertical distance between siblings of one branch group. */
+export const LAYOUT_BRANCH_SIBLING_GAP = 40;
+/** Shared branch riser inset from the source card's right edge. */
+export const LAYOUT_TRUNK_INSET = 20;
+/** Minimum clear space between an edge label and cards/trunk lines. */
+export const LAYOUT_LABEL_GUTTER = 8;
+/** Gap above a next-relation label and below it before the target card. */
+export const LAYOUT_LABEL_GAP = 8;
+/** Vertical gap between top-level forest blocks. */
+export const LAYOUT_ROOT_GAP = 120;
+/** Layout output contract version; `layout/types` re-exports this value. */
+export const LAYOUT_VERSION = 5;
 
 /** Text box between the accent border, the right border and the horizontal padding. */
 export const CARD_CONTENT_WIDTH =
@@ -271,6 +286,34 @@ export function wrapByWidth(
   const lastIndex = kept.length - 1;
   kept[lastIndex] = withEllipsis(kept[lastIndex] ?? '', maxWidth, fontPx);
   return kept;
+}
+
+export interface EdgeLabelBoxSize {
+  /** Painted box width, including horizontal padding. */
+  width: number;
+  /** Painted box height, including vertical padding. */
+  height: number;
+  /** Complete wrapped lines; never truncated. */
+  lines: string[];
+}
+
+/**
+ * Size of an edge-label box for `text` at `maxWidth`. Layout reserves this
+ * height next to cards and the reader paints exactly these lines, so both sides
+ * share one metric instead of estimating separately.
+ */
+export function edgeLabelBoxSize(text: string, maxWidth: number): EdgeLabelBoxSize {
+  if (text.trim() === '') return { width: 0, height: 0, lines: [] };
+  const limit = maxWidth > 0 ? maxWidth : 1;
+  const lines = wrapByWidth(text, limit, EDGE_LABEL_FONT);
+  if (lines.length === 0) return { width: 0, height: 0, lines: [] };
+  let widest = 0;
+  for (const line of lines) widest = Math.max(widest, textWidth(line, EDGE_LABEL_FONT));
+  return {
+    width: Math.min(widest, limit) + EDGE_LABEL_PAD_X * 2,
+    height: lines.length * EDGE_LABEL_LINE_HEIGHT + EDGE_LABEL_PAD_Y * 2,
+    lines,
+  };
 }
 
 /** Number of rows the title needs at the card's fixed font and content width. */

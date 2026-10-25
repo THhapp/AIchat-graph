@@ -6,7 +6,6 @@ import {
   type LayoutDiagnosticCode,
   type LayoutFlow,
   type LayoutResult,
-  type LayoutSide,
 } from './types.js';
 
 export interface LayoutConfig {
@@ -16,36 +15,11 @@ export interface LayoutConfig {
   horizontalGap: number;
 }
 
-/**
- * 测量与路由共用的带几何常量。
- * 测量侧用它预留走廊高度，路由侧用它还原干线 y；两处必须取同一值。
- */
-
-/** 干线离目标带上沿的距离；带内每嵌套一层再抬高一个 TRUNK_STEP。 */
-export const TRUNK_OFFSET = 18;
-/**
- * 带内每层的抬升。间距 = 本常量：嵌套带的 NESTED_BAND_OFFSET 位移在算干线 y 时被减回去了，两者不叠加。
- * 14px 低于复核给的 20px 双线阈值，但该拓扑（同带多来源 / 深度≥1 的子干线）在现有数据中为 0 例，
- * 故不为此放大全局行距（本常量同时是走廊高度与 topExtent，一动全局卡片起点位移）。
- * 若将来真出现这类形态，应在嵌套那一处按 parentTrunkY - 20 夹取，而不是抬高这个常量。
- */
-export const TRUNK_STEP = 14;
-/** 分支块自己的子分支带整体下移的距离，只用于层级提示，不改变带内规则。 */
-export const NESTED_BAND_OFFSET = 24;
-/**
- * 入口侧子分支的出口端口：同侧边中心下方的固定偏移。
- * 父节点连进来的横线落在中心行，两个方向共用一个点会读成同一条线；
- * 第二个端口让入口与出口在同一侧边上仍然可分辨，也不必退到卡片底角。
- */
-export const ENTRY_PORT_OFFSET = 18;
-
 export interface WorkingNode {
   id: string;
   inputIndex: number;
   flow: LayoutFlow;
   parentId: string | null;
-  /** 源记录明确声明的方向；null 表示由布局自动择侧。 */
-  declaredSide: LayoutSide | null;
   order: number | null;
   /** 实际卡片高度；已按 height 提示或 cardHeight 归一。 */
   height: number;

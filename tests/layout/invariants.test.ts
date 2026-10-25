@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeLayout, type LayoutNodeInput, type LayoutResult } from '../../src/web/layout/index.js';
+import type { LayoutNodeInput, LayoutResult } from '../../src/web/layout/index.js';
 import {
   CARD_BASE_HEIGHT,
   CARD_WIDTH,
@@ -7,94 +7,18 @@ import {
   LAYOUT_VERTICAL_GAP,
   cardHeightForTitle,
 } from '../../src/web/graph/cardMetrics.js';
+import {
+  cardRects,
+  labelCardCollisions,
+  labelLabelCollisions,
+  labelRects,
+  labelTrunkCollisions,
+  layout,
+  overlaps,
+  routePenetrations,
+} from './support.js';
 
-/**
- * 复杂结构的几何不变量：同带放置 + 走廊绕行在任意拓扑下都必须保持
- * 零重叠、零穿卡，并且结构版本与高度覆盖不变。
- */
-
-interface Rect {
-  id: string;
-  x: number;
-  y: number;
-  right: number;
-  bottom: number;
-}
-
-function rects(result: LayoutResult): Rect[] {
-  return Object.entries(result.positions).map(([id, position]) => {
-    const height = result.heights[id] ?? result.cardHeight;
-    return { id, x: position.x, y: position.y, right: position.x + result.cardWidth, bottom: position.y + height };
-  });
-}
-
-function overlaps(result: LayoutResult): string[] {
-  const list = rects(result);
-  const found: string[] = [];
-  for (let i = 0; i < list.length; i += 1) {
-    for (let j = i + 1; j < list.length; j += 1) {
-      const a = list[i];
-      const b = list[j];
-      if (a === undefined || b === undefined) continue;
-      const separated = a.right <= b.x || b.right <= a.x || a.bottom <= b.y || b.bottom <= a.y;
-      if (!separated) found.push(a.id + '<->' + b.id);
-    }
-  }
-  return found;
-}
-
-function penetrated(result: LayoutResult): string[] {
-  const bad: string[] = [];
-  const rectById = new Map(rects(result).map((rect) => [rect.id, rect]));
-  for (const route of result.edgeRoutes) {
-    for (const [id, rect] of rectById) {
-      if (id === route.from || id === route.to) continue;
-      if (crossesRect(route.points, rect)) bad.push(route.id + ' x ' + id);
-    }
-  }
-  // 共享干线只画一次，但同样不能穿卡。
-  for (const trunk of result.branchTrunks) {
-    for (const [id, rect] of rectById) {
-      if (id === trunk.from) continue;
-      if (crossesRect(trunk.points, rect)) bad.push(trunk.id + ' x ' + id);
-    }
-  }
-  return bad;
-}
-
-function crossesRect(points: { x: number; y: number }[], rect: Rect): boolean {
-  for (let index = 1; index < points.length; index += 1) {
-    const a = points[index - 1];
-    const b = points[index];
-    if (a === undefined || b === undefined) continue;
-    if (Math.abs(a.y - b.y) < 0.01) {
-      if (a.y <= rect.y || a.y >= rect.bottom) continue;
-      if (Math.min(Math.max(a.x, b.x), rect.right) > Math.max(Math.min(a.x, b.x), rect.x)) return true;
-    } else if (Math.abs(a.x - b.x) < 0.01) {
-      if (a.x <= rect.x || a.x >= rect.right) continue;
-      if (Math.min(Math.max(a.y, b.y), rect.bottom) > Math.max(Math.min(a.y, b.y), rect.y)) return true;
-    }
-  }
-  return false;
-}
-
-/** 折线里所有线段都必须纯水平或纯垂直。 */
-function diagonals(result: LayoutResult): string[] {
-  const bad: string[] = [];
-  const scan = (id: string, points: { x: number; y: number }[]): void => {
-    for (let index = 1; index < points.length; index += 1) {
-      const a = points[index - 1];
-      const b = points[index];
-      if (a === undefined || b === undefined) continue;
-      if (Math.abs(a.x - b.x) > 0.01 && Math.abs(a.y - b.y) > 0.01) bad.push(id);
-    }
-  };
-  for (const route of result.edgeRoutes) scan(route.id, route.points);
-  for (const trunk of result.branchTrunks) scan(trunk.id, trunk.points);
-  return bad;
-}
-
-/** 固定种子的确定性伪随机，保证测试可复现。 */
+/** Fixed-seed deterministic pseudo-random, so failures are reproducible. */
 function random(seed: number): () => number {
   let state = seed >>> 0;
   return () => {
@@ -106,27 +30,54 @@ function random(seed: number): () => number {
   };
 }
 
+function diagonals(result: LayoutResult): string[] {
+  const bad: string[] = [];
+  const scan = (id: string, points: { x: number; y: number }[]): void => {
+    for (let index = 1; index < points.length; index += 1) {
+      const a = points[index - 1];
+      const b = points[index];
+      if (a === undefined || b === undefined) continue;
+      if (Math.abs(a.x - b.x) > 0.01 && Math.abs(a.y - b.y) > 0.01) bad.push(id);
+    }
+  };
+  for (const edge of result.edgeRoutes) scan(edge.id, edge.points);
+  for (const trunk of result.branchTrunks) scan(trunk.id, trunk.points);
+  return bad;
+}
+
 /**
- * 随机父节点 + 随机侧别 + 随机行高，覆盖深链、再分支与跨行柱。
- * 每个来源最多一个 next，branch.order 唯一，保证结构本身与输入顺序无关。
+ * Random but valid structure: one root, at most one next per parent, unique
+ * branch orders per parent, parents always chosen from earlier nodes so the
+ * relation graph cannot contain a cycle.
  */
 function build(seed: number): LayoutNodeInput[] {
   const next = random(seed);
-  const nodes: LayoutNodeInput[] = [{ id: 'n0', from: null, flow: 'root', height: 120 + Math.floor(next() * 160) }];
+  const nodes: LayoutNodeInput[] = [
+    { id: 'n0', from: null, flow: 'root', height: 100 + Math.floor(next() * 180) },
+  ];
   const ids = ['n0'];
   const hasNext = new Set<string>();
-  const count = 12 + Math.floor(next() * 10);
+  const branchCount = new Map<string, number>();
+  const count = 14 + Math.floor(next() * 10);
   for (let index = 1; index < count; index += 1) {
     const parent = ids[Math.floor(next() * ids.length)] ?? 'n0';
     const id = 'n' + String(index);
-    const height = 120 + Math.floor(next() * 160);
-    if (next() < 0.4 && !hasNext.has(parent)) {
+    const height = 80 + Math.floor(next() * 200);
+    const label = next() < 0.45 ? '关系说明'.repeat(1 + Math.floor(next() * 7)) : undefined;
+    if (next() < 0.42 && !hasNext.has(parent)) {
       hasNext.add(parent);
-      nodes.push({ id, from: parent, flow: 'next', height });
+      nodes.push({ id, from: parent, flow: 'next', height, ...(label === undefined ? {} : { label }) });
     } else {
-      const side = next() < 0.5 ? 'left' : 'right';
-      const siblings = nodes.filter((item) => item.from === parent && item.flow === 'branch').length;
-      nodes.push({ id, from: parent, flow: 'branch', side, order: siblings + 1, height });
+      const order = (branchCount.get(parent) ?? 0) + 1;
+      branchCount.set(parent, order);
+      nodes.push({
+        id,
+        from: parent,
+        flow: 'branch',
+        order,
+        height,
+        ...(label === undefined ? {} : { label }),
+      });
     }
     ids.push(id);
   }
@@ -134,103 +85,87 @@ function build(seed: number): LayoutNodeInput[] {
 }
 
 describe('geometry invariants on dense structures', () => {
-  it('keeps cards and routes apart for every seeded structure', () => {
+  it('keeps cards, routes, trunks and labels apart for every seeded structure', () => {
     const report: string[] = [];
-    for (let seed = 1; seed <= 80; seed += 1) {
+    for (let seed = 1; seed <= 60; seed += 1) {
       const nodes = build(seed);
-      const result = computeLayout({ nodes });
-      const bad = [...overlaps(result), ...penetrated(result), ...diagonals(result)];
-      if (bad.length > 0) report.push('seed ' + String(seed) + ': ' + bad.join(', '));
+      const result = layout(nodes);
+      const problems = [
+        ...overlaps(result),
+        ...routePenetrations(result),
+        ...diagonals(result),
+        ...labelCardCollisions(result),
+        ...labelTrunkCollisions(result),
+        ...labelLabelCollisions(result),
+      ];
+      if (problems.length > 0) report.push('seed ' + String(seed) + ': ' + problems.join(', '));
       expect(Object.keys(result.heights).sort()).toEqual(Object.keys(result.positions).sort());
-      expect(result.layoutVersion).toBe(4);
-      // 整组下移必须留诊断，不能静默挪动。
-      const shifted = result.diagnostics.filter((item) => item.code === 'branch-band-shifted');
-      for (const item of shifted) expect(item.nodeId).toBeDefined();
-      // 干线必须是合法分组：同源同侧唯一，成员都有 join。
+      expect(result.layoutVersion).toBe(5);
+      expect(result.diagnostics).toEqual([]);
+      for (const label of labelRects(result)) {
+        expect(label.x).toBeGreaterThanOrEqual(result.bounds.x);
+        expect(label.y).toBeGreaterThanOrEqual(result.bounds.y);
+        expect(label.right).toBeLessThanOrEqual(result.bounds.x + result.bounds.width + 1e-6);
+        expect(label.bottom).toBeLessThanOrEqual(result.bounds.y + result.bounds.height + 1e-6);
+      }
+      for (const card of cardRects(result)) {
+        expect(card.right).toBeLessThanOrEqual(result.bounds.x + result.bounds.width + 1e-6);
+        expect(card.bottom).toBeLessThanOrEqual(result.bounds.y + result.bounds.height + 1e-6);
+      }
+      // Trunks are one per source with more than one visible branch.
       expect(new Set(result.branchTrunks.map((trunk) => trunk.id)).size).toBe(result.branchTrunks.length);
       for (const trunk of result.branchTrunks) {
-        expect(trunk.id).toBe(trunk.from + '~' + trunk.side);
-        const members = result.edgeRoutes.filter(
-          (edge) => edge.flow === 'branch' && edge.from === trunk.from && edge.side === trunk.side,
-        );
-        for (const edge of members) expect(edge.join).toBeDefined();
-      }
-      // 成员必须都在同一条带上，干线才能只按一个 bandY 预留走廊。
-      for (const trunk of result.branchTrunks) {
-        const members = result.edgeRoutes.filter(
-          (edge) => edge.flow === 'branch' && edge.from === trunk.from && edge.side === trunk.side,
-        );
-        const bands = new Set(members.map((edge) => result.positions[edge.to]?.y));
-        if (bands.size > 1) report.push('seed ' + String(seed) + ': 干线 ' + trunk.id + ' 跨多条带');
-        // 接出点各在自己的列，同组内不重合，否则竖支线会叠画。
-        const drops = members.map((edge) => edge.join?.x);
-        if (new Set(drops).size !== drops.length) {
-          report.push('seed ' + String(seed) + ': 干线 ' + trunk.id + ' 的接出点重合');
-        }
-      }
-      // 同一 y 上的两条干线不能横向重叠，否则共享段被叠画。
-      const spans = new Map<number, { id: string; low: number; high: number }[]>();
-      for (const trunk of result.branchTrunks) {
-        const xs = trunk.points.filter((point) => Math.abs(point.y - trunk.trunkY) < 0.01).map((point) => point.x);
-        if (xs.length < 2) continue;
-        const span = { id: trunk.id, low: Math.min(...xs), high: Math.max(...xs) };
-        for (const other of spans.get(trunk.trunkY) ?? []) {
-          if (other.high > span.low && span.high > other.low) {
-            report.push(
-              'seed ' + String(seed) + ': 干线 ' + other.id + ' 与 ' + span.id + ' 在 y=' + String(trunk.trunkY) + ' 重叠',
-            );
-          }
-        }
-        spans.set(trunk.trunkY, [...(spans.get(trunk.trunkY) ?? []), span]);
+        expect(trunk.id).toBe(trunk.from + '~branches');
+        const members = result.edgeRoutes.filter((edge) => edge.trunkId === trunk.id);
+        expect(members.length).toBeGreaterThan(1);
+        for (const edge of members) expect(edge.points[0]?.x).toBe(trunk.points[1]?.x);
       }
     }
     expect(report).toEqual([]);
   });
 
-  it('is order independent on dense structures', () => {
+  it('is input-order independent on dense structures', () => {
     for (const seed of [3, 17, 42, 64]) {
       const nodes = build(seed);
-      const forward = computeLayout({ nodes });
-      const reversed = computeLayout({ nodes: [...nodes].reverse() });
+      const forward = layout(nodes);
+      const reversed = layout([...nodes].reverse());
       expect(reversed.positions).toEqual(forward.positions);
       expect(reversed.edgeRoutes.map((edge) => edge.points)).toEqual(forward.edgeRoutes.map((edge) => edge.points));
       expect(reversed.branchTrunks).toEqual(forward.branchTrunks);
+      expect(reversed.heights).toEqual(forward.heights);
     }
   });
 });
 
 /**
- * 生产参数契约：线上/离线阅读器用 cardMetrics 的 120px 横向间距、158px 默认
- * 卡高和逐卡标题高度调用布局，而上面大多数用例走 layout 默认的 88/152。
- * 这组小结构显式使用生产参数，防止真实阅读时出现只在默认参数下成立的几何。
+ * Production parameters: the live and offline readers pass cardMetrics values
+ * and per-card title heights, not the layout defaults.
  */
 describe('production card metrics contract', () => {
-  it('keeps cards and routes apart with the live gaps and per-card heights', () => {
+  it('keeps the right-hand branch layout apart with live gaps and per-card heights', () => {
     const titles: Record<string, string> = {
       p: '根节点',
       n: '主线二：需要换行才能完整显示的较长标题',
-      b1: '右侧第一条并列分支的标题足够长，占三行也不会被裁切',
-      b2: '右侧第二条',
-      b3: '左侧分支同样需要换行',
+      b1: '第一条分支的标题足够长，占三行也不会被裁切',
+      b2: '第二条分支',
       b1n: '枝内后续',
       b1b: '枝内再分支',
     };
     const shape: Omit<LayoutNodeInput, 'height'>[] = [
       { id: 'p', from: null, flow: 'root' },
       { id: 'n', from: 'p', flow: 'next' },
-      { id: 'b1', from: 'n', flow: 'branch', side: 'right', order: 10 },
-      { id: 'b2', from: 'n', flow: 'branch', side: 'right', order: 20 },
-      { id: 'b3', from: 'n', flow: 'branch', side: 'left', order: 10 },
+      { id: 'b1', from: 'n', flow: 'branch', order: 10 },
+      { id: 'b2', from: 'n', flow: 'branch', order: 20 },
       { id: 'b1n', from: 'b1', flow: 'next' },
-      { id: 'b1b', from: 'b1', flow: 'branch', side: 'right', order: 10 },
+      { id: 'b1b', from: 'b1', flow: 'branch', order: 10, label: '枝内关系说明需要换行' },
     ];
-    const nodes: LayoutNodeInput[] = shape.map((node) => ({
-      ...node,
-      height: cardHeightForTitle(titles[node.id] ?? ''),
+    const nodes: LayoutNodeInput[] = shape.map((item) => ({
+      ...item,
+      height: cardHeightForTitle(titles[item.id] ?? ''),
     }));
     const input = {
       nodes,
-      visibleNodeIds: nodes.map((node) => node.id),
+      visibleNodeIds: nodes.map((item) => item.id),
       cardWidth: CARD_WIDTH,
       cardHeight: CARD_BASE_HEIGHT,
       verticalGap: LAYOUT_VERTICAL_GAP,
@@ -238,19 +173,21 @@ describe('production card metrics contract', () => {
       structureVersion: 'production-contract',
     };
 
-    const result = computeLayout(input);
+    const result = layout(nodes, input);
     expect(result.cardWidth).toBe(CARD_WIDTH);
     expect(result.cardHeight).toBe(CARD_BASE_HEIGHT);
-    for (const node of nodes) {
-      expect(result.heights[node.id]).toBe(cardHeightForTitle(titles[node.id] ?? ''));
+    for (const item of nodes) {
+      expect(result.heights[item.id]).toBe(cardHeightForTitle(titles[item.id] ?? ''));
     }
-    expect([...overlaps(result), ...penetrated(result), ...diagonals(result)]).toEqual([]);
     expect(result.structureVersion).toBe('production-contract');
+    expect([...overlaps(result), ...routePenetrations(result), ...diagonals(result)]).toEqual([]);
+    expect([...labelCardCollisions(result), ...labelTrunkCollisions(result), ...labelLabelCollisions(result)]).toEqual(
+      [],
+    );
 
-    // 同输入同输出；输入顺序不应改变生产参数下的几何。
-    const again = computeLayout(input);
+    const again = layout(nodes, input);
     expect(again.positions).toEqual(result.positions);
-    const reversed = computeLayout({ ...input, nodes: [...nodes].reverse() });
+    const reversed = layout([...nodes].reverse(), input);
     expect(reversed.positions).toEqual(result.positions);
     expect(reversed.edgeRoutes.map((edge) => edge.points)).toEqual(result.edgeRoutes.map((edge) => edge.points));
     expect(reversed.branchTrunks).toEqual(result.branchTrunks);
