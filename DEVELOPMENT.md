@@ -87,7 +87,7 @@ Node.js／TypeScript ESM 服务通过 HTTP／SSE 连接 React／React Flow 阅�
 | --- | --- |
 | src/core/ | 纯解析、结构校验、Markdown AST 与章节读取；统一 parseWorkspaceDocuments 入口，不读写磁盘 |
 | src/storage/ | 扫描、初始化、纯候选变更、可恢复事务；changes/common.ts 放候选公共壳逻辑 |
-| src/index/ | 从解析结果派生索引与唯一搜索实现，不成为正文来源 |
+| src/index/ | 从解析结果派生索引、唯一搜索与读取视图投影，不成为正文来源 |
 | src/service/ | 锁与队列、有效快照、读取凭据、HTTP API、导出调度；agent/ 下按 schema／read／compile 分工 |
 | src/shared/ | 跨层类型（protocol.ts，type-only）与 browser/node 中立的结构判定 guards.ts |
 | src/cli/ | 适配产品能力：transport 统一 HTTP，options 统一选项，命令按 read／search／workspace／agent／changes 分文件；不复制解析、业务或事务实现 |
@@ -163,7 +163,11 @@ Agent 根据用户主题名、目录或复制上下文核对稳定 topicId，在
 - updateConnection 改接须有目标 editRef、来源 fromRef 与描述，不隐式创建第二根。
 - rearrange 一次表达多条最终入边，编译为同一批 updateConnection：先在内存腾空需要让出 next 的节点，再按最终关系落位，中间状态不写盘、不产生临时说明或临时旁支。目标位置的后继须由调用方纳入同批 edits，工具不隐式覆盖；最终唯一 next 与无环由整图校验拒绝。成功后返回受影响节点的刷新 editRefs。
 - setImportance 只改节点头 important，不进入最近内容更新；CLI important 的 --ref 使用读取时哈希，--node 先做一次真实在线 meta 读取取得凭据，离线不伪造。
-- 有界读取在线与离线返回同一核心节点结构（node 加 body／range／editRef）；--meta 只取元数据与写前凭据，不返回正文。多卡默认受整次总量预算约束，显式 --length／--full 覆盖，不把总量截断留给宿主。
+- 阅读提供 overview／structure／content 三种可选粒度：主题默认 overview；structure 返回指定范围的真实连接与必要边界，不默认带正文、长路径或凭据；content 复用节点正文、章节和真实 editRef。三者不是必须逐层经过的流程，已知节点可直读。
+- 范围按稳定 topicId／nodeId 与真实连接计算：整主题、从起点沿 next／branch 可达的子树，或明确节点集合；子树起点在主线中段时包含其后主线延续，边界节点只用于说明归属。
+- 读取预算覆盖整次序列化响应（含 envelope、items、page.next、budget、fingerprint），默认 12000 UTF-16，可由 --budget 调整；分页和正文续读由程序组织，cursor 是不透明标记，绑定 mode／workspace／topic／view／scope／相关指纹，不建立服务端分页会话。相关节点或结构变化返回 STALE_READ 并给重新读取入口；无关主题变化不使范围失效。
+- page.hasMore 只表示当前视图还有下一页；正文 item.truncated 表示该卡还有正文未返回；overview 的分支内部未展开由 scope.note 说明，三者不能混成一个 complete 字段。显式 --full／--length／--start／--section 是精确读取，超过 budget 明确拒绝，不静默截断。
+- 在线 content 的 editRef 来自真实读取；离线读取不伪造。cursor 只承接读取，不替代 editRef，也不用于刷新旧哈希强行提交。
 - createTopic 在 isolated 模式原子创建主题与根，目录冲突不覆盖；createRoot 仅用于空库。
 - 同一 requestId 重放不能生成不同 ID；高层动作进入统一 prepareChanges/commitFiles 链路。
 
@@ -309,6 +313,7 @@ CLI 核对运行描述、工作区/实例身份与真实根，不自行启动第
 | 文档、注释、Skill 文字 | diff、引用目标及文字含义、隐私边界；不为此构建或跑全量测试 |
 | 界面 | 相关类型/现有测试，实际浏览器核对受影响操作与阅读位置 |
 | 主题与存储 | 隔离样例的身份、关系、旧凭据冲突、无效源与恢复保护 |
+| 渐进读取 | overview 主线/分支入口与范围说明；structure 边界；小预算/多卡/长文续读覆盖；cursor 相关变化失效、无关主题不失效；离线无凭据；显式 full 超预算拒绝 |
 | 导出 | 完整隐藏分支、同路径更新、失败保留旧文件、重启补齐；移走单文件停服离线阅读 |
 | 运行版本 | 独立资料配置、同版本入口、固定快照更新失败保护 |
 

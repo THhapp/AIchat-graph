@@ -7,6 +7,11 @@ import { main } from "../../src/cli/index.js";
 import { initWorkspace } from "../../src/storage/index.js";
 import { startService } from "../../src/service/index.js";
 import type { ServiceHandle } from "../../src/service/index.js";
+import type {
+  ReadContentItem,
+  ReadOverviewItem,
+  ReadViewResponse,
+} from "../../src/shared/protocol.js";
 
 /**
  * read --node 的统一输出：在线与离线同形状；meta／section／多卡预算。
@@ -144,37 +149,51 @@ async function start(root: string): Promise<ServiceHandle> {
   return handle;
 }
 
-interface ReadNodeItem {
-  source: "online" | "disk";
-  node: Record<string, unknown>;
-  body: string;
-  bodyOmitted?: true;
-  range: { start: number; end: number; total: number; unit: "utf16" };
-  truncated: boolean;
-  path: string;
-  fileHash: string;
-  editRef: Record<string, unknown> | null;
+function contentItems(payload: ReadViewResponse): ReadContentItem[] {
+  return payload.items as ReadContentItem[];
 }
 
-interface ReadPayload {
-  ok: boolean;
-  command: string;
-  root: string;
-  online:
-    | { available: true; instanceId: string; revision: number; workspaceId: string }
-    | { available: false; code: string; reason: string };
-  budget?: { total: number; perNode: number; nodes: number };
-  nodes: ReadNodeItem[];
+function jsonOf(stdout: string): ReadViewResponse {
+  return JSON.parse(stdout) as ReadViewResponse;
 }
 
-function jsonOf(stdout: string): ReadPayload {
-  return JSON.parse(stdout) as ReadPayload;
+function cli(args: readonly string[], root: string) {
+  return main(["read", ...args, "--workspace", root]);
 }
 
-async function read(args: string[], root: string): Promise<ReadPayload> {
-  const result = await main(["read", ...args, "--workspace", root]);
+async function read(args: string[], root: string): Promise<ReadViewResponse> {
+  const result = await cli(args, root);
   expect(result.exitCode, result.stderr).toBe(0);
   return jsonOf(result.stdout);
+}
+
+/** 跟随 page.next 直到结束；每页预算必须被遵守，且 used 与序列化长度一致。 */
+async function collectPages(
+  args: readonly string[],
+  root: string,
+  options: { budget?: number; offline?: boolean } = {},
+): Promise<ReadViewResponse[]> {
+  const budgetArgs =
+    options.budget === undefined ? [] : ["--budget", String(options.budget)];
+  const offlineArgs = options.offline === true ? ["--offline"] : [];
+  const pages: ReadViewResponse[] = [];
+  let result = await cli([...args, ...budgetArgs, ...offlineArgs], root);
+  for (let index = 0; index < 100; index += 1) {
+    expect(result.exitCode, result.stderr).toBe(0);
+    const page = jsonOf(result.stdout);
+    expect(JSON.stringify(page).length).toBe(page.budget.used);
+    if (options.budget !== undefined) {
+      expect(page.budget.used).toBeLessThanOrEqual(options.budget);
+    }
+    pages.push(page);
+    if (!page.page.hasMore) return pages;
+    expect(page.page.next).toBeTruthy();
+    result = await cli(
+      ["--cursor", page.page.next as string, ...budgetArgs, ...offlineArgs],
+      root,
+    );
+  }
+  throw new Error("分页次数超出预期");
 }
 
 afterEach(async () => {
@@ -185,28 +204,34 @@ afterEach(async () => {
 });
 
 describe("read --node 统一输出", () => {
-  it("同一节点在线与离线的 node 与顶层字段一致，editRef 只在在线可用", async () => {
+  it("同一节点在线与离线的 content 形状一致，editRef 只在在线可用", async () => {
     const root = await newWorkspace();
     await start(root);
 
     const online = await read(["--node", NODE_B], root);
     const offline = await read(["--node", NODE_B, "--offline"], root);
 
+    expect(online.view).toBe("content");
+    expect(online.source).toBe("online");
     expect(online.online.available).toBe(true);
     if (!online.online.available) throw new Error("expected online");
     expect(online.online.instanceId).toBeTruthy();
     expect(online.online.workspaceId).toBeTruthy();
     expect(typeof online.online.revision).toBe("number");
 
+    expect(offline.view).toBe("content");
+    expect(offline.source).toBe("disk");
     expect(offline.online.available).toBe(false);
     if (offline.online.available) throw new Error("expected offline");
     expect(offline.online.code).toBe("OFFLINE_REQUESTED");
 
-    const onlineItem = online.nodes[0];
-    const offlineItem = offline.nodes[0];
+    expect(contentItems(online)).toHaveLength(1);
+    expect(contentItems(offline)).toHaveLength(1);
+    const onlineItem = contentItems(online)[0];
+    const offlineItem = contentItems(offline)[0];
     expect(onlineItem).toBeDefined();
     expect(offlineItem).toBeDefined();
-    if (!onlineItem || !offlineItem) throw new Error("missing node item");
+    if (!onlineItem || !offlineItem) throw new Error("missing content item");
 
     // 在线与离线的节点视图完全同一形状与内容。
     expect(onlineItem.node).toEqual(offlineItem.node);
@@ -225,10 +250,8 @@ describe("read --node 统一输出", () => {
     });
 
     // 在线凭据可用且指向该节点；离线必须显式 null，不伪造。
-    expect(onlineItem.source).toBe("online");
     expect(onlineItem.editRef?.ref).toMatch(/^er_/);
     expect(onlineItem.editRef?.nodeId).toBe(NODE_B);
-    expect(offlineItem.source).toBe("disk");
     expect(offlineItem.editRef).toBeNull();
     expect(offlineItem.path).toBe(onlineItem.path);
     expect(offlineItem.fileHash).toBe(onlineItem.fileHash);
@@ -236,8 +259,15 @@ describe("read --node 统一输出", () => {
     expect(offlineItem.truncated).toBe(onlineItem.truncated);
     expect(offlineItem.body).toBe(onlineItem.body);
 
-    // 旧摊平字段不再出现。
+    // 预算与分页在顶层；items 只保留内容阅读所需的字段。
+    expect(online.budget).toMatchObject({ unit: "utf16", limit: 12000, mode: "auto" });
+    expect(online.budget.used).toBe(JSON.stringify(online).length);
+    expect(online.page.hasMore).toBe(true);
+    expect(online.page.next).toBeTruthy();
+
+    // 旧摊平字段与来源字段不再出现在 item 上。
     for (const key of [
+      "source",
       "topicPath",
       "summaryExplicit",
       "byteLength",
@@ -256,6 +286,11 @@ describe("read --node 统一输出", () => {
       expect(onlineItem).not.toHaveProperty(key);
       expect(offlineItem).not.toHaveProperty(key);
     }
+    // 顶层的旧扁平结构不再出现。
+    for (const key of ["nodes", "topic", "text", "textOmitted"]) {
+      expect(online).not.toHaveProperty(key);
+      expect(offline).not.toHaveProperty(key);
+    }
   });
 
   it("--meta 在线只返回元数据与 editRef；离线同样无正文且 editRef 为 null", async () => {
@@ -265,9 +300,9 @@ describe("read --node 统一输出", () => {
     const online = await read(["--node", NODE_B, "--meta"], root);
     const offline = await read(["--node", NODE_B, "--meta", "--offline"], root);
 
-    const onlineItem = online.nodes[0];
-    const offlineItem = offline.nodes[0];
-    if (!onlineItem || !offlineItem) throw new Error("missing node item");
+    const onlineItem = contentItems(online)[0];
+    const offlineItem = contentItems(offline)[0];
+    if (!onlineItem || !offlineItem) throw new Error("missing content item");
 
     for (const item of [onlineItem, offlineItem]) {
       expect(item.body).toBe("");
@@ -284,51 +319,115 @@ describe("read --node 统一输出", () => {
     expect(onlineItem.editRef?.nodeId).toBe(NODE_B);
     expect(onlineItem.editRef?.path).toBe(onlineItem.path);
     expect(offlineItem.editRef).toBeNull();
+    expect(online.budget.mode).toBe("auto");
+    expect(offline.source).toBe("disk");
   });
 
-  it("4 张长卡默认应用整次预算 12000，每卡 3000", async () => {
+  it("4 张长卡默认共用 12000 总预算：自动分页，--cursor 续读能取回完整正文", async () => {
     const root = await newWorkspace();
     await start(root);
 
-    const payload = await read(
-      ["--node", NODE_A, "--node", NODE_B, "--node", NODE_C, "--node", NODE_D],
+    const args = ["--node", NODE_A, "--node", NODE_B, "--node", NODE_C, "--node", NODE_D];
+    const pages = await collectPages(args, root, { budget: 12000 });
+    // 四张长卡共享一个预算，必须分多页取回。
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages[0]?.budget).toMatchObject({ unit: "utf16", limit: 12000, mode: "auto" });
+    for (const page of pages) expect(page.view).toBe("content");
+
+    const collected = new Map<string, string>();
+    for (const page of pages) {
+      for (const item of contentItems(page)) {
+        const before = collected.get(item.node.id) ?? "";
+        expect(item.range.start).toBe(before.length);
+        expect(item.range.end).toBe(item.range.start + item.body.length);
+        expect(item.body.length).toBeLessThanOrEqual(4000);
+        collected.set(item.node.id, before + item.body);
+      }
+    }
+    expect([...collected.keys()]).toEqual([NODE_A, NODE_B, NODE_C, NODE_D]);
+    expect(collected.get(NODE_A)).toBe(BODY_A);
+    expect(collected.get(NODE_B)).toBe(BODY_B);
+    expect(collected.get(NODE_C)).toBe(BODY_C);
+    expect(collected.get(NODE_D)).toBe(BODY_D);
+
+    // 离线走同一预算分页路径，正文一致且没有凭据。
+    const offlinePages = await collectPages(args, root, { budget: 12000, offline: true });
+    expect(offlinePages.length).toBeGreaterThan(1);
+    const offlineCollected = new Map<string, string>();
+    for (const page of offlinePages) {
+      expect(page.source).toBe("disk");
+      for (const item of contentItems(page)) {
+        expect(item.editRef).toBeNull();
+        const before = offlineCollected.get(item.node.id) ?? "";
+        offlineCollected.set(item.node.id, before + item.body);
+      }
+    }
+    expect(offlineCollected.get(NODE_A)).toBe(BODY_A);
+    expect(offlineCollected.get(NODE_D)).toBe(BODY_D);
+  });
+
+  it("显式 --length 或 --full 超出 budget 返回 BUDGET_EXCEEDED；足够预算时完整返回", async () => {
+    const root = await newWorkspace();
+    await start(root);
+
+    for (const extra of [
+      ["--length", "5000"],
+      ["--full"],
+    ]) {
+      // 两张 5000 字的卡无法放进最小预算：明确拒绝，不返回半份数据。
+      const result = await cli(
+        ["--node", NODE_A, "--node", NODE_B, ...extra, "--budget", "300"],
+        root,
+      );
+      expect(result.exitCode, result.stderr).toBe(2);
+      expect(result.stdout).toBe("");
+      const error = JSON.parse(result.stderr) as { error: { code: string; message: string } };
+      expect(error.error.code).toBe("BUDGET_EXCEEDED");
+      expect(error.error.message).toContain("budget");
+      expect(result.stderr).not.toContain('"items"');
+
+      // 离线引擎走同一退出码与错误码，不回退成半份正文。
+      const offline = await cli(
+        ["--node", NODE_A, "--node", NODE_B, ...extra, "--budget", "300", "--offline"],
+        root,
+      );
+      expect(offline.exitCode, offline.stderr).toBe(2);
+      expect(
+        (JSON.parse(offline.stderr) as { error: { code: string } }).error.code,
+      ).toBe("BUDGET_EXCEEDED");
+    }
+
+    const paged = await read(
+      ["--node", NODE_A, "--node", NODE_B, "--length", "5000", "--budget", "60000"],
       root,
     );
-
-    expect(payload.budget).toEqual({ total: 12000, perNode: 3000, nodes: 4 });
-    expect(payload.nodes).toHaveLength(4);
-    let totalBody = 0;
-    for (const item of payload.nodes) {
-      expect(item.range.end - item.range.start).toBeLessThanOrEqual(3000);
-      expect(item.range.end - item.range.start).toBe(3000);
-      expect(item.body.length).toBe(3000);
-      expect(item.truncated).toBe(true);
-      totalBody += item.body.length;
-    }
-    expect(totalBody).toBeLessThanOrEqual(12000);
-  });
-
-  it("显式 --length 或 --full 覆盖预算且不输出 budget", async () => {
-    const root = await newWorkspace();
-    await start(root);
-
-    const paged = await read(["--node", NODE_A, "--node", NODE_B, "--length", "5000"], root);
-    expect(paged).not.toHaveProperty("budget");
-    for (const item of paged.nodes) {
+    expect(paged.budget).toMatchObject({
+      unit: "utf16",
+      limit: 60000,
+      mode: "explicit",
+    });
+    expect(paged.budget.used).toBe(JSON.stringify(paged).length);
+    expect(paged.page).toEqual({ hasMore: false });
+    expect(contentItems(paged)).toHaveLength(2);
+    for (const item of contentItems(paged)) {
       expect(item.body.length).toBe(5000);
       expect(item.range).toEqual({ start: 0, end: 5000, total: 5000, unit: "utf16" });
       expect(item.truncated).toBe(false);
     }
 
-    const full = await read(["--node", NODE_A, "--node", NODE_B, "--full"], root);
-    expect(full).not.toHaveProperty("budget");
-    for (const item of full.nodes) {
+    const full = await read(
+      ["--node", NODE_A, "--node", NODE_B, "--full", "--budget", "60000"],
+      root,
+    );
+    expect(full.budget.mode).toBe("explicit");
+    for (const item of contentItems(full)) {
       expect(item.body.length).toBe(LONG);
+      expect(item.range.end - item.range.start).toBe(LONG);
       expect(item.truncated).toBe(false);
     }
   });
 
-  it("--start 可与多卡预算共存，每卡从该偏移读 perNode 个单元", async () => {
+  it("--start 是显式读取：多卡从该偏移切片，整个响应仍须满足 budget", async () => {
     const root = await newWorkspace();
     await start(root);
 
@@ -336,8 +435,15 @@ describe("read --node 统一输出", () => {
       ["--node", NODE_A, "--node", NODE_B, "--start", "100"],
       root,
     );
-    expect(payload.budget).toEqual({ total: 12000, perNode: 4000, nodes: 2 });
-    for (const item of payload.nodes) {
+    expect(payload.budget).toMatchObject({
+      unit: "utf16",
+      limit: 12000,
+      mode: "explicit",
+    });
+    expect(payload.budget.used).toBe(JSON.stringify(payload).length);
+    expect(payload.page).toEqual({ hasMore: false });
+    expect(contentItems(payload)).toHaveLength(2);
+    for (const item of contentItems(payload)) {
       expect(item.range.start).toBe(100);
       expect(item.range.end - item.range.start).toBe(4000);
       expect(item.truncated).toBe(true);
@@ -353,9 +459,9 @@ describe("read --node 统一输出", () => {
       ["--node", NODE_E, "--section", "第二节", "--length", "20", "--offline"],
       root,
     );
-    const onlineItem = online.nodes[0];
-    const offlineItem = offline.nodes[0];
-    if (!onlineItem || !offlineItem) throw new Error("missing node item");
+    const onlineItem = contentItems(online)[0];
+    const offlineItem = contentItems(offline)[0];
+    if (!onlineItem || !offlineItem) throw new Error("missing content item");
 
     const sectionStart = SECTION_BODY.indexOf("## 第二节");
     expect(sectionStart).toBeGreaterThan(0);
@@ -365,13 +471,15 @@ describe("read --node 统一输出", () => {
     expect(onlineItem.body.startsWith("## 第二节")).toBe(true);
     expect(onlineItem.body).toContain("第二节第一句");
     expect(onlineItem.range.end - onlineItem.range.start).toBe(20);
+    expect(online.budget.mode).toBe("explicit");
+    expect(offline.budget.mode).toBe("explicit");
 
     // --full 从章节起点取到底；--start 被忽略。
     const full = await read(
       ["--node", NODE_E, "--section", "第二节", "--start", "0", "--full"],
       root,
     );
-    const fullItem = full.nodes[0];
+    const fullItem = contentItems(full)[0];
     if (!fullItem) throw new Error("missing full item");
     expect(fullItem.range.start).toBe(sectionStart);
     expect(fullItem.range.end).toBe(SECTION_BODY.length);
@@ -391,47 +499,61 @@ describe("read --node 统一输出", () => {
       [TOPIC_ID, "--meta"],
     ];
     for (const args of cases) {
-      const result = await main(["read", ...args, "--workspace", root]);
+      const result = await cli(args, root);
       expect(result.exitCode, args.join(" ")).toBe(2);
     }
   });
 
-  it("主题概览清单带派生编号，且不重复主题字段", async () => {
+  it("主题默认 overview：带派生编号，只给入口记录，不重复主题字段", async () => {
     const root = await newWorkspace();
 
-    const result = await main(["read", TOPIC_ID, "--workspace", root]);
+    const result = await cli([TOPIC_ID], root);
     expect(result.exitCode, result.stderr).toBe(0);
-    const payload = JSON.parse(result.stdout) as {
-      nodes: Array<Record<string, unknown>>;
-    };
-    expect(payload.nodes.map((node) => node["number"])).toEqual([
+    const payload = jsonOf(result.stdout);
+    expect(payload.view).toBe("overview");
+    expect(payload.source).toBe("disk");
+    expect(payload.topicId).toBe(TOPIC_ID);
+    expect(payload.topicTitle).toBe(TOPIC_DIR);
+    expect(payload.scope).toMatchObject({ kind: "topic", nodeCount: 5 });
+
+    const items = payload.items as ReadOverviewItem[];
+    expect(items.every((item) => item.role === "mainline")).toBe(true);
+    expect(items.map((item) => item.number)).toEqual([
       "01",
       "02",
       "03",
       "04",
       "05",
     ]);
-    expect(payload.nodes.map((node) => node["id"])).toEqual([
+    expect(items.map((item) => item.id)).toEqual([
       NODE_A,
       NODE_B,
       NODE_C,
       NODE_D,
       NODE_E,
     ]);
-    for (const node of payload.nodes) {
-      expect(node).not.toHaveProperty("topicId");
-      expect(node).not.toHaveProperty("topicPath");
-      expect(node).not.toHaveProperty("summaryExplicit");
-      expect(node).not.toHaveProperty("schemaVersion");
-      expect(node).not.toHaveProperty("byteLength");
-      expect(typeof node["fileHash"]).toBe("string");
-      expect(typeof node["path"]).toBe("string");
+    for (const item of items) {
+      expect(item).not.toHaveProperty("topicId");
+      expect(item).not.toHaveProperty("topicPath");
+      expect(item).not.toHaveProperty("summaryExplicit");
+      expect(item).not.toHaveProperty("schemaVersion");
+      expect(item).not.toHaveProperty("byteLength");
+      // overview 不返回正文、真实路径、哈希或凭据。
+      expect(item).not.toHaveProperty("body");
+      expect(item).not.toHaveProperty("path");
+      expect(item).not.toHaveProperty("fileHash");
+      expect(item).not.toHaveProperty("editRef");
+    }
+    for (const key of ["nodes", "topic", "text", "textOmitted"]) {
+      expect(payload).not.toHaveProperty(key);
     }
 
-    const text = await main(["read", TOPIC_ID, "--text", "--workspace", root]);
+    const text = await cli([TOPIC_ID, "--text"], root);
     expect(text.exitCode, text.stderr).toBe(0);
-    expect(text.stdout).toContain("01  " + NODE_A);
-    expect(text.stdout).toContain("05  " + NODE_E);
+    expect(text.stdout).toContain("read overview");
+    expect(text.stdout).toContain("mainline 01 " + NODE_A);
+    expect(text.stdout).toContain("mainline 05 " + NODE_E);
+    expect(text.stdout).not.toContain("## 第一节");
   });
 
   it("--section-index 单独出现时统一拒绝（节点与主题、离线同样生效）", async () => {
@@ -443,7 +565,7 @@ describe("read --node 统一输出", () => {
       [TOPIC_ID, "--section-index", "0"],
     ];
     for (const args of cases) {
-      const result = await main(["read", ...args, "--workspace", root]);
+      const result = await cli(args, root);
       expect(result.exitCode, args.join(" ")).toBe(2);
       const error = JSON.parse(result.stderr) as { error: { message: string } };
       expect(error.error.message).toContain("--section");
@@ -453,20 +575,30 @@ describe("read --node 统一输出", () => {
   it("服务不可达时全部磁盘读取，顶层给出原因且 editRef 为 null", async () => {
     const root = await newWorkspace();
 
-    const result = await main(["read", "--node", NODE_A, "--node", NODE_B, "--workspace", root]);
-    expect(result.exitCode, result.stderr).toBe(0);
-    const payload = jsonOf(result.stdout);
-    expect(payload.online.available).toBe(false);
-    if (payload.online.available) throw new Error("expected offline");
-    expect(payload.online.code).toBe("SERVICE_NOT_RUNNING");
-    expect(payload.online.reason).toBeTruthy();
-    expect(payload.nodes).toHaveLength(2);
-    for (const item of payload.nodes) {
-      expect(item.source).toBe("disk");
-      expect(item.editRef).toBeNull();
-      // 多卡预算在离线回退时同样生效。
-      expect(item.body.length).toBeLessThanOrEqual(4000);
+    const pages = await collectPages(["--node", NODE_A, "--node", NODE_B], root, {
+      budget: 12000,
+    });
+    // 多卡预算在离线回退时同样生效；可能跨页续读。
+    const collected = new Map<string, string>();
+    for (const payload of pages) {
+      expect(payload.view).toBe("content");
+      expect(payload.source).toBe("disk");
+      expect(payload.online.available).toBe(false);
+      if (payload.online.available) throw new Error("expected offline");
+      expect(payload.online.code).toBe("SERVICE_NOT_RUNNING");
+      expect(payload.online.reason).toBeTruthy();
+      expect(payload.budget).toMatchObject({ unit: "utf16", limit: 12000, mode: "auto" });
+      for (const item of contentItems(payload)) {
+        const before = collected.get(item.node.id) ?? "";
+        expect(item.editRef).toBeNull();
+        expect(item.range.start).toBe(before.length);
+        expect(item.body.length).toBeLessThanOrEqual(4000);
+        expect(item.range.end - item.range.start).toBe(item.body.length);
+        collected.set(item.node.id, before + item.body);
+      }
     }
-    expect(payload.budget).toEqual({ total: 12000, perNode: 4000, nodes: 2 });
+    expect([...collected.keys()]).toEqual([NODE_A, NODE_B]);
+    expect(collected.get(NODE_A)).toBe(BODY_A);
+    expect(collected.get(NODE_B)).toBe(BODY_B);
   });
 });

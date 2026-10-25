@@ -28,6 +28,7 @@ import type {
 } from "../shared/protocol.js";
 import { applyChanges, applyAgentChange, checkChanges } from "./changes.js";
 import { parseAgentReadQuery, readAgentNode } from "./agent/read.js";
+import { readAgentView } from "./agent/read-view.js";
 import { setNodeImportance } from "./importance.js";
 import type { ExportCoordinator as ExportCoordinatorType } from "./export.js";
 import { ServiceError, serviceErrorFromUnknown } from "./errors.js";
@@ -200,6 +201,11 @@ export function createApp(options: AppOptions): Hono {
       readAgentNode({ runtime, editRefs: runtime.editRefs, nodeId, query }),
     );
   });
+
+  // 渐进读取：overview / structure / content；cursor 续读只另带 budget。
+  api.get("/agent/read", (c) =>
+    jsonResponse(c, readAgentView({ runtime, editRefs: runtime.editRefs, query: c.req.queries() })),
+  );
 
   api.get("/search", (c) => {
     const query = c.req.query("q") ?? "";

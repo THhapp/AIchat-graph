@@ -15,6 +15,8 @@ import type {
   AgentChangeResponse,
   AgentNodeReadResponse,
   AgentReadRange,
+  ReadViewKind,
+  ReadViewResponse,
 } from "../shared/protocol.js";
 import { CliError, EXIT_CODES } from "./errors.js";
 import { isRecord } from "../shared/guards.js";
@@ -141,6 +143,76 @@ export async function readAgentNode(
       ? (body["section"] as unknown as AgentNodeReadResponse["section"])
       : null,
   };
+}
+
+/**
+ * GET /api/agent/read 的查询。cursor 已包含 view／scope／topic／meta，
+ * 续读时只发送 cursor 与 budget；其他参数不重复注入。
+ */
+export interface AgentReadViewQuery {
+  readonly budget: number;
+  readonly cursor?: string | undefined;
+  readonly view?: ReadViewKind | undefined;
+  readonly topicId?: string | undefined;
+  readonly from?: string | undefined;
+  readonly nodeIds?: readonly string[] | undefined;
+  readonly content?: AgentReadOptions | undefined;
+}
+
+function buildReadViewUrl(baseUrl: string, query: AgentReadViewQuery): string {
+  const url = new URL("api/agent/read", baseUrl);
+  url.searchParams.set("budget", String(query.budget));
+  if (query.cursor !== undefined) {
+    // 续读标记是完整的范围描述；调用方只可另带 budget。
+    url.searchParams.set("cursor", query.cursor);
+    return url.toString();
+  }
+  if (query.view !== undefined) url.searchParams.set("view", query.view);
+  if (query.topicId !== undefined) url.searchParams.set("topic", query.topicId);
+  if (query.from !== undefined) url.searchParams.set("from", query.from);
+  for (const nodeId of query.nodeIds ?? []) url.searchParams.append("node", nodeId);
+  const content = query.content;
+  if (content !== undefined) {
+    if (content.start !== undefined) url.searchParams.set("start", String(content.start));
+    if (content.length !== undefined) url.searchParams.set("length", String(content.length));
+    if (content.full === true) url.searchParams.set("full", "true");
+    if (content.meta === true) url.searchParams.set("meta", "true");
+    if (content.section !== undefined) url.searchParams.set("section", content.section);
+    if (content.sectionIndex !== undefined) {
+      url.searchParams.set("section-index", String(content.sectionIndex));
+    }
+  }
+  return url.toString();
+}
+
+/**
+ * GET /api/agent/read：返回完整 ReadViewResponse（overview／structure／content）。
+ * 分页、预算与 scope 全部由服务端决定，CLI 不自行截断或拼接。
+ */
+export async function readAgentView(
+  service: ResolvedService,
+  query: AgentReadViewQuery,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ReadViewResponse> {
+  const url = buildReadViewUrl(service.baseUrl, query);
+  const outcome = await requestJson(
+    url,
+    { method: "GET", headers: { Accept: "application/json" } },
+    { fetchImpl },
+  );
+  if (outcome.status < 200 || outcome.status >= 300) {
+    // 读取端点的 404 + 标准 NOT_FOUND 才是“主题／节点不存在”（退出码 11）。
+    throw serviceErrorFromResponse(outcome, {
+      endpoint: url,
+      method: "GET",
+      notFoundIsResource: true,
+    });
+  }
+  const body = outcome.body;
+  if (!isRecord(body)) throw invalidResponse(url, "响应必须是 JSON 对象");
+  if (body["ok"] !== true) throw invalidResponse(url, "缺少 ok:true");
+  if (!Array.isArray(body["items"])) throw invalidResponse(url, "items 必须是数组");
+  return body as unknown as ReadViewResponse;
 }
 
 /**

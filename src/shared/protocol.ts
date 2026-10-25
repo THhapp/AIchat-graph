@@ -567,3 +567,116 @@ export interface ExportEvent extends SnapshotVersion {
   event: 'export';
   status: TopicExportStatus;
 }
+
+/* ------------------------------------------------------------------ *
+ * Progressive agent read views (overview / structure / content)
+ * ------------------------------------------------------------------ */
+
+export type ReadViewKind = 'overview' | 'structure' | 'content';
+
+/** Which part of a topic an agent read view covers. */
+export type ReadScope =
+  | { kind: 'topic' }
+  | { kind: 'subtree'; from: string }
+  | { kind: 'nodes'; nodeIds: string[] };
+
+export interface ReadViewPage {
+  hasMore: boolean;
+  /** Opaque continuation token; only meaningful with the same scope and fingerprint. */
+  next?: string;
+}
+
+export interface ReadViewBudget {
+  unit: 'utf16';
+  /** Caller-supplied limit for this response. */
+  limit: number;
+  /** Final JSON.stringify(response).length. */
+  used: number;
+  mode: 'auto' | 'explicit';
+}
+
+export interface ReadScopeInfo {
+  kind: 'topic' | 'subtree' | 'nodes';
+  /** Present only for subtree scope. */
+  from?: string;
+  /** Nodes in the scope, not the number of items on this page. */
+  nodeCount: number;
+  note?: string;
+}
+
+export interface ReadOverviewItem {
+  role: 'mainline' | 'branch';
+  id: string;
+  title: string;
+  summary: string;
+  number: string;
+  state: NodeState;
+  flow: NodeFlow;
+  from: string | null;
+  description?: string;
+  important: boolean;
+  /** branch entry: visible subtree nodes inside the scope, including itself. */
+  subtreeNodeCount?: number;
+  /** branch entry: where to continue reading its internal structure. */
+  read?: { view: 'structure'; from: string };
+}
+
+export interface ReadStructureItem {
+  id: string;
+  title: string;
+  summary: string;
+  number: string;
+  state: NodeState;
+  flow: NodeFlow;
+  from: string | null;
+  description?: string;
+  side?: BranchSide;
+  order?: number;
+  important: boolean;
+}
+
+export interface ReadContentItem {
+  node: GraphNode;
+  body: string;
+  bodyOmitted?: boolean;
+  range: AgentReadRange;
+  /** True only when more body follows this segment; a tail read is false. */
+  truncated: boolean;
+  path: string;
+  fileHash: string;
+  /** Real editRef when online; always null offline. */
+  editRef: AgentEditRef | null;
+}
+
+/** A real connection crossing the selected subtree boundary. */
+export interface ReadBoundary {
+  from: string;
+  to: string;
+  flow: 'next' | 'branch';
+  description?: string;
+  external: { id: string; title: string; topicId?: string };
+}
+
+export type ReadViewItem = ReadOverviewItem | ReadStructureItem | ReadContentItem;
+
+export type ReadOnlineInfo =
+  | { available: true; instanceId: string; revision: number; workspaceId: string }
+  | { available: false; code: string; reason: string };
+
+export interface ReadViewResponse {
+  ok: true;
+  command: 'read';
+  source: 'online' | 'disk';
+  root: string;
+  online: ReadOnlineInfo;
+  workspaceId: string;
+  view: ReadViewKind;
+  topicId: string | null;
+  topicTitle: string | null;
+  scope: ReadScopeInfo;
+  items: ReadViewItem[];
+  boundaries?: ReadBoundary[];
+  page: ReadViewPage;
+  budget: ReadViewBudget;
+  fingerprint: string;
+}

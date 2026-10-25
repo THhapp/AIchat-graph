@@ -1,39 +1,49 @@
-/** read：磁盘为默认来源，有服务时按节点复用同一服务实例读取在线片段。 */
+/**
+ * read：渐进读取入口（overview / structure / content）。
+ *
+ * - 默认 read <topic> 是 overview；read --node 默认 content；--from 默认 structure。
+ * - 在线优先：服务可用时原样返回服务响应（含真实 editRef）；只有退出码 7 的
+ *   不可达才回退磁盘，其余服务错误（409／400 等）直接抛出。
+ * - 离线使用同一引擎，但 editRef 一律为 null，并明确 online.available=false 的原因。
+ * - cursor 已包含范围与 mode，续读只允许另带 budget／--offline／--workspace／输出选项。
+ */
 import type { ParsedArgs } from "./args.js";
 import { parseOptions } from "./args.js";
-import { readAgentNode, type AgentReadOptions } from "./agent-client.js";
+import {
+  readAgentView,
+  type AgentReadViewQuery,
+} from "./agent-client.js";
 import type { CliContext } from "./context.js";
 import { CliError, EXIT_CODES, UsageError } from "./errors.js";
 import { OUTPUT_OPTIONS, WORKSPACE_OPTION, parseIntegerOption } from "./options.js";
-import { emit, parseOutputMode } from "./output.js";
+import { parseOutputMode } from "./output.js";
+import {
+  DEFAULT_READ_BUDGET,
+  MAX_READ_BUDGET,
+  type ReadContentOptions,
+} from "../index/read-view.js";
+import { MAX_READ_SEGMENT, normalizeLength } from "../core/index.js";
 import { resolveServiceForWorkspace } from "./service-client.js";
 import type { ResolvedService } from "./service-client.js";
+import { buildOfflineReadView, emitReadViewText } from "./read-view.js";
+import type { OfflineReadViewOptions } from "./read-view.js";
+import type { ReadViewKind } from "../shared/protocol.js";
 import {
-  DEFAULT_READ_LENGTH,
-  MAX_READ_SEGMENT,
-  locateSection,
-  normalizeLength,
-  sliceBody,
-} from "../core/index.js";
-import { briefUsage } from "./usage.js";
-import {
-  describeNode,
-  describeTopic,
-  findNode,
-  findTopicById,
-  findTopicByPath,
   loadWorkspace,
-  topicEntryFile,
+  requireTopicEntry,
   workspaceRoot,
-  type NodeEntry,
   type WorkspaceSnapshot,
 } from "./workspace.js";
-import type { AgentEditRef, AgentNodeReadResponse } from "../shared/protocol.js";
+import { briefUsage } from "./usage.js";
 
-const TOPIC_OPTION = [
+const READ_OPTIONS = [
   WORKSPACE_OPTION,
   { name: "topic" },
   { name: "node", repeatable: true },
+  { name: "view" },
+  { name: "from" },
+  { name: "budget" },
+  { name: "cursor" },
   { name: "start" },
   { name: "length" },
   { name: "full", boolean: true },
@@ -47,73 +57,65 @@ const TOPIC_OPTION = [
 /** 与 service 的 agent bounded read 保持一致的上限。 */
 const MAX_READ_START = 100_000_000;
 
-function parseOffset(raw: string | undefined, label: string): number | undefined {
-  return parseIntegerOption(raw, label);
+const VIEW_VALUES: readonly ReadViewKind[] = ["overview", "structure", "content"];
+const CURSOR_CONFLICT_OPTIONS = [
+  "topic",
+  "view",
+  "from",
+  "start",
+  "length",
+  "full",
+  "section",
+  "section-index",
+  "meta",
+] as const;
+
+interface ReadRequest {
+  readonly budget: number;
+  readonly cursor?: string;
+  readonly view?: ReadViewKind;
+  /** 稳定 topicId 或相对入口路径；仅 overview／structure。 */
+  readonly topic?: string;
+  readonly from?: string;
+  readonly nodeIds: readonly string[];
+  readonly content?: ReadContentOptions;
 }
 
 function parseStart(raw: string | undefined): number | undefined {
   return parseIntegerOption(raw, "--start", { min: 0, max: MAX_READ_START });
 }
 
-/**
- * 读取片段长度：0 与超上限都是参数错误，并在错误里给出有效范围。
- * 在线与离线共用这一处，避免 normalizeLength 的 RangeError 漏成 INTERNAL。
- */
+/** 显式 length：与旧读取一致，超上限截到 MAX_READ_SEGMENT，非法值是用例错误。 */
 function parseReadLength(raw: string | undefined): number | undefined {
   const value = parseIntegerOption(raw, "--length", { min: 1, max: MAX_READ_SEGMENT });
   return value === undefined ? undefined : normalizeLength(value);
 }
 
-interface ReadWindow {
-  readonly text: string;
-  readonly range: { start: number; end: number; total: number; unit: "utf16" };
-  readonly truncated: boolean;
+function parseSectionIndex(raw: string | undefined): number | undefined {
+  return parseIntegerOption(raw, "--section-index");
 }
 
-/** 多卡默认预算：整次正文总量与单卡默认上限（UTF-16）。 */
-const READ_TOTAL_BUDGET = 12_000;
+function parseBudget(raw: string | undefined): number {
+  return (
+    parseIntegerOption(raw, "--budget", { min: 1, max: MAX_READ_BUDGET }) ??
+    DEFAULT_READ_BUDGET
+  );
+}
 
-function windowForBody(
-  body: string,
-  parsed: ParsedArgs,
-  defaultLength?: number,
-): ReadWindow {
-  try {
-    const sectionTitle = parsed.values.get("section");
-    let start = parseStart(parsed.values.get("start"));
-    if (sectionTitle !== undefined) {
-      const sectionIndex = parseOffset(parsed.values.get("section-index"), "--section-index");
-      const section = locateSection(body, sectionTitle, sectionIndex);
-      start = section.start;
-    }
-    // 多卡预算时把每卡默认长度作为 --length 的缺省值；显式 --length 优先。
-    const length = parseReadLength(parsed.values.get("length")) ?? defaultLength;
-    return sliceBody(body, {
-      ...(start !== undefined ? { start } : {}),
-      ...(length !== undefined ? { length } : {}),
-      full: parsed.values.has("full"),
-    });
-  } catch (error) {
-    if (error instanceof RangeError) {
-      throw new CliError("INVALID_RANGE", error.message, EXIT_CODES.usage);
-    }
-    throw error;
+function parseView(raw: string | undefined): ReadViewKind | undefined {
+  if (raw === undefined) return undefined;
+  if (!VIEW_VALUES.includes(raw as ReadViewKind)) {
+    throw new UsageError("--view 必须是 overview、structure 或 content: " + raw);
   }
+  return raw as ReadViewKind;
 }
 
-/**
- * 把一次 read 的切片参数整理成在线请求参数，只解析一次。
- * meta 与切片／章节参数的冲突已在 runRead 层拒绝。
- */
-function nodeReadOptions(parsed: ParsedArgs, defaultLength?: number): AgentReadOptions {
+function contentOptions(parsed: ParsedArgs): ReadContentOptions {
   const start = parseStart(parsed.values.get("start"));
-  const explicitLength = parseReadLength(parsed.values.get("length"));
-  const length = explicitLength ?? defaultLength;
+  const length = parseReadLength(parsed.values.get("length"));
   const section = parsed.values.get("section");
   const sectionIndex =
-    section === undefined
-      ? undefined
-      : parseOffset(parsed.values.get("section-index"), "--section-index");
+    section === undefined ? undefined : parseSectionIndex(parsed.values.get("section-index"));
   return {
     ...(start !== undefined ? { start } : {}),
     ...(length !== undefined ? { length } : {}),
@@ -124,108 +126,78 @@ function nodeReadOptions(parsed: ParsedArgs, defaultLength?: number): AgentReadO
   };
 }
 
-/** 每个节点项：在线与离线完全同一形状，不再摊平节点字段。 */
-interface ReadItem {
-  readonly source: "online" | "disk";
-  readonly node: Record<string, unknown>;
-  readonly body: string;
-  readonly bodyOmitted?: true;
-  readonly range: ReadWindow["range"];
-  readonly truncated: boolean;
-  readonly path: string;
-  readonly fileHash: string;
-  readonly editRef: AgentEditRef | null;
-}
-
-function onlineReadItem(response: AgentNodeReadResponse): ReadItem {
-  return {
-    source: "online",
-    node: response.node as unknown as Record<string, unknown>,
-    body: response.body,
-    ...(response.bodyOmitted === true ? { bodyOmitted: true as const } : {}),
-    range: response.range,
-    truncated: response.truncated,
-    path: response.path,
-    fileHash: response.fileHash,
-    editRef: response.editRef,
-  };
-}
-
-/** 离线节点：number 来自有效图的 id→编号映射；图无效时为 null。 */
-export function offlineNodeView(
-  entry: NodeEntry,
-  numberById: ReadonlyMap<string, string>,
-): Record<string, unknown> {
-  const { node } = entry;
-  return {
-    id: node.id,
-    topicId: node.topicId,
-    title: node.title,
-    summary: node.summary,
-    number: numberById.get(node.id) ?? null,
-    from: node.from,
-    flow: node.flow,
-    state: node.state,
-    important: node.important,
-    // 与服务端 toGraphNode 一致：连接文字只读 description。
-    ...(node.description !== undefined ? { description: node.description } : {}),
-    ...(node.side !== undefined ? { side: node.side } : {}),
-    ...(node.order !== undefined ? { order: node.order } : {}),
-    sourcePath: entry.path,
-  };
-}
-
-function offlineReadItem(
-  entry: NodeEntry,
-  parsed: ParsedArgs,
-  numberById: ReadonlyMap<string, string>,
-  defaultLength: number | undefined,
-): ReadItem {
-  const node = offlineNodeView(entry, numberById);
-  const body = entry.node.body;
-  if (parsed.values.has("meta")) {
-    return {
-      source: "disk",
-      node,
-      body: "",
-      bodyOmitted: true,
-      range: { start: 0, end: 0, total: body.length, unit: "utf16" },
-      truncated: false,
-      path: entry.path,
-      fileHash: entry.file.sha256,
-      editRef: null,
-    };
-  }
-  const window = windowForBody(body, parsed, defaultLength);
-  return {
-    source: "disk",
-    node,
-    body: window.text,
-    range: window.range,
-    truncated: window.truncated,
-    path: entry.path,
-    fileHash: entry.file.sha256,
-    editRef: null,
-  };
-}
-
-export async function runRead(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(args, TOPIC_OPTION, 1);
-  const mode = parseOutputMode(parsed);
-  const root = await workspaceRoot(parsed, ctx);
+/**
+ * 解析并交叉校验一次 read 调用。所有范围／参数冲突都在联网或读盘前拒绝，
+ * 保证在线与离线得到相同的用法错误（退出码 2）。
+ */
+function parseReadRequest(parsed: ParsedArgs): ReadRequest {
+  const budget = parseBudget(parsed.values.get("budget"));
+  const cursor = parsed.values.get("cursor");
   const positional = parsed.positional[0];
   const topicOption = parsed.values.get("topic");
   const nodeIds = parsed.lists.get("node") ?? [];
+  const from = parsed.values.get("from");
+
+  if (cursor !== undefined) {
+    const conflicts: string[] = [];
+    if (positional !== undefined) conflicts.push("<topicId>");
+    if (nodeIds.length > 0) conflicts.push("--node");
+    for (const name of CURSOR_CONFLICT_OPTIONS) {
+      if (parsed.values.has(name)) conflicts.push("--" + name);
+    }
+    if (conflicts.length > 0) {
+      throw new UsageError(
+        "--cursor 不能与 " + conflicts.join("／") +
+          " 同时使用；续读标记已包含 view／范围／主题，只可另带 --budget／--offline／--workspace／输出选项",
+      );
+    }
+    return { budget, cursor, nodeIds: [] };
+  }
+
   if (positional !== undefined && topicOption !== undefined) {
     throw new UsageError("read 的主题只能给出一次（位置参数或 --topic）");
   }
   if (nodeIds.length > 0 && (positional !== undefined || topicOption !== undefined)) {
     throw new UsageError("read 不能同时指定主题与 --node");
   }
-  if (nodeIds.length === 0 && positional === undefined && topicOption === undefined) {
+
+  const locator = positional ?? topicOption;
+  if (nodeIds.length === 0 && locator === undefined) {
     throw new UsageError("缺少要读取的主题或节点\n\n" + briefUsage("read"));
   }
+  if (locator !== undefined && /^n_[0-9a-f]{32}$/.test(locator)) {
+    throw new UsageError(`${locator} 是节点 ID，请使用 --node ${locator}`);
+  }
+
+  const section = parsed.values.get("section");
+  if (parsed.values.has("section-index") && section === undefined) {
+    throw new UsageError("--section-index 必须与 --section 一起使用");
+  }
+
+  const explicitView = parseView(parsed.values.get("view"));
+  const view: ReadViewKind =
+    explicitView ??
+    (nodeIds.length > 0 ? "content" : from !== undefined ? "structure" : "overview");
+
+  if (view !== "content" && nodeIds.length > 0) {
+    throw new UsageError(
+      "--view " + view + " 不接受 --node；读取卡片正文请用默认 content（read --node ...）",
+    );
+  }
+
+  if (view === "content") {
+    if (nodeIds.length === 0) {
+      throw new UsageError("--view content（以及 read --node）至少需要一个 --node");
+    }
+    if (from !== undefined) {
+      throw new UsageError("content 读取不接受 --from；content 的范围由 --node 给出");
+    }
+  }
+
   if (parsed.values.has("meta")) {
+    if (view !== "content") {
+      throw new UsageError("--meta 只能用于 content 读取（需要 --node）");
+    }
     const conflicts = ["start", "length", "full", "section", "section-index"].filter((name) =>
       parsed.values.has(name),
     );
@@ -235,118 +207,109 @@ export async function runRead(args: readonly string[], ctx: CliContext): Promise
           " 同时使用；meta 读取不含正文",
       );
     }
-    if (nodeIds.length === 0) {
-      throw new UsageError("--meta 只能与 --node 一起使用");
-    }
-  }
-  // 在线服务会拒绝单独出现的 section-index；CLI 在发请求前统一拒绝，
-  // 保证 --node 与主题读取、在线与离线的行为一致。
-  if (parsed.values.has("section-index") && parsed.values.get("section") === undefined) {
-    throw new UsageError("--section-index 必须与 --section 一起使用");
   }
 
-  const snapshot = await loadWorkspace(root);
-
-  if (nodeIds.length > 0) {
-    return readNodes(snapshot, nodeIds, parsed, ctx, mode);
-  }
-
-  const locator = (positional ?? topicOption) as string;
-  const isTopicId = /^t_[0-9a-f]{32}$/.test(locator);
-  if (/^n_[0-9a-f]{32}$/.test(locator)) {
-    throw new UsageError(`${locator} 是节点 ID，请使用 --node ${locator}`);
-  }
-  const topic = isTopicId
-    ? (findTopicById(snapshot, locator)[0] ?? undefined)
-    : (findTopicByPath(snapshot, locator) ?? findTopicByPath(snapshot, `topics/${locator}`));
-  if (!topic) {
-    throw new CliError(
-      isTopicId ? "TOPIC_NOT_FOUND" : "NOT_FOUND",
-      `找不到主题: ${locator}`,
-      EXIT_CODES.notFound,
-      {
-        details: {
-          locator,
-          schemaVersion: snapshot.schemaVersion,
-          diagnostics: snapshot.diagnostics.slice(0, 20),
-        },
-      },
+  if (view === "overview" || view === "structure") {
+    const forbidden = ["start", "length", "full", "section", "section-index"].filter((name) =>
+      parsed.values.has(name),
     );
+    if (forbidden.length > 0) {
+      throw new UsageError(
+        "--view " + view + " 不接受正文参数：" + forbidden.map((name) => "--" + name).join("／") +
+          "；这些参数只用于 content",
+      );
+    }
+    return {
+      budget,
+      view,
+      topic: locator as string,
+      ...(from !== undefined ? { from } : {}),
+      nodeIds: [],
+    };
   }
-  const entryFile = topicEntryFile(snapshot, topic);
-  // 默认只给提纲：节点清单（describeNode 不含正文）。主题入口文件是
-  // topic.md，若默认原样返回就绕过了有界读取；只有显式 --full
-  // 或 --start/--length 才返回入口文件文本，并同样带 range 与 truncated。
-  const wantsText =
-    parsed.values.has("full") ||
-    parsed.values.get("start") !== undefined ||
-    parsed.values.get("length") !== undefined ||
-    parsed.values.get("section") !== undefined;
-  let textSegment: { text: string; range: unknown; truncated: boolean } | undefined;
-  if (wantsText && entryFile) {
-    const window = windowForBody(entryFile.text, parsed);
-    textSegment = { text: window.text, range: window.range, truncated: window.truncated };
-  }
-  const payload = {
-    ok: snapshot.ok,
-    command: "read",
-    source: "disk",
-    root: snapshot.root,
-    schemaVersion: snapshot.schemaVersion,
-    topic: describeTopic(topic),
-    // 节点清单：标题、摘要、状态、连接与真实源文件，不含正文。
-    nodes: topic.nodes.map((entry) => describeNode(entry, snapshot.nodeNumbers)),
-    ...(textSegment
-      ? { text: textSegment.text, range: textSegment.range, truncated: textSegment.truncated }
-      : { textOmitted: "默认不返回主题文件正文；用 read --node 取卡片正文，或加 --full／--start／--length" }),
+
+  const content = contentOptions(parsed);
+  return {
+    budget,
+    view,
+    nodeIds,
+    ...(Object.keys(content).length > 0 ? { content } : {}),
   };
-  const lines = [
-    `topic ${topic.topic.topicId} ${topic.topic.title} (schemaVersion ${topic.topic.schemaVersion})`,
-    `entry ${topic.path}`,
-    `${topic.nodes.length} node(s):`,
-    ...topic.nodes.map((entry) => {
-      const view = describeNode(entry, snapshot.nodeNumbers);
-      return `  ${view.number ?? "-"}  ${view.id}  ${view.path}  ${view.title}`;
-    }),
-  ];
-  if (textSegment) lines.push("", textSegment.text);
-  emit(ctx, mode, payload, lines);
-  return snapshot.ok ? EXIT_CODES.ok : EXIT_CODES.validation;
 }
 
-async function readNodes(
-  snapshot: WorkspaceSnapshot,
-  nodeIds: readonly string[],
-  parsed: ParsedArgs,
-  ctx: CliContext,
-  mode: "json" | "text",
-): Promise<number> {
-  // 多卡预算只在“未显式选择切片方式”时生效；单卡仍用默认 4000。
-  const budgetApplies =
-    nodeIds.length > 1 &&
-    !parsed.values.has("length") &&
-    !parsed.values.has("full") &&
-    !parsed.values.has("meta") &&
-    !parsed.values.has("section");
-  const perNodeLength = budgetApplies
-    ? Math.max(1, Math.min(DEFAULT_READ_LENGTH, Math.floor(READ_TOTAL_BUDGET / nodeIds.length)))
-    : undefined;
-  const readOptions = nodeReadOptions(parsed, perNodeLength);
+/** 在线查询：cursor 只发 cursor+budget；content 不重复发送主题。 */
+function onlineQuery(snapshot: WorkspaceSnapshot, request: ReadRequest): AgentReadViewQuery {
+  if (request.cursor !== undefined) {
+    return { budget: request.budget, cursor: request.cursor };
+  }
+  if (request.view === "content") {
+    return {
+      budget: request.budget,
+      view: "content",
+      nodeIds: request.nodeIds,
+      ...(request.content !== undefined ? { content: request.content } : {}),
+    };
+  }
+  if (request.topic === undefined) {
+    throw new CliError("INTERNAL", "missing topic for online read", EXIT_CODES.internal);
+  }
+  const topic = requireTopicEntry(snapshot, request.topic);
+  return {
+    budget: request.budget,
+    view: request.view ?? "overview",
+    topicId: topic.topic.topicId,
+    ...(request.from !== undefined ? { from: request.from } : {}),
+  };
+}
+
+function offlineOptions(
+  request: ReadRequest,
+  unavailable: { code: string; reason: string } | null,
+): OfflineReadViewOptions {
+  const online = unavailable ?? {
+    code: "SERVICE_UNAVAILABLE",
+    reason: "服务不可用，已读取磁盘",
+  };
+  if (request.cursor !== undefined) {
+    return { budget: request.budget, cursor: request.cursor, online };
+  }
+  if (request.view === "content") {
+    return {
+      budget: request.budget,
+      view: "content",
+      nodeIds: request.nodeIds,
+      ...(request.content !== undefined ? { content: request.content } : {}),
+      online,
+    };
+  }
+  return {
+    budget: request.budget,
+    view: request.view ?? "overview",
+    ...(request.topic !== undefined ? { topic: request.topic } : {}),
+    ...(request.from !== undefined ? { from: request.from } : {}),
+    online,
+  };
+}
+
+export async function runRead(args: readonly string[], ctx: CliContext): Promise<number> {
+  const parsed = parseOptions(args, READ_OPTIONS, 1);
+  const mode = parseOutputMode(parsed);
+  const request = parseReadRequest(parsed);
+  const root = await workspaceRoot(parsed, ctx);
+  const snapshot = await loadWorkspace(root);
   const fetchImpl = ctx.fetchImpl ?? fetch;
-  const numberById = snapshot.nodeNumbers;
 
   const forceOffline = parsed.values.has("offline");
   let service: ResolvedService | null = null;
   let unavailable: { code: string; reason: string } | null = forceOffline
     ? { code: "OFFLINE_REQUESTED", reason: "--offline 指定只读磁盘" }
     : null;
+
   if (!forceOffline) {
     try {
-      // 服务只解析并核对一次身份，后续节点复用同一实例。
       service = await resolveServiceForWorkspace(snapshot.root, fetchImpl);
     } catch (error) {
-      // 不可达／未运行／身份不适用（退出码 7）才整次回退磁盘；
-      // 其他错误照常抛出，不静默改写为离线结果。
+      // 只有服务不可用（退出码 7）回退磁盘；其他错误照常抛出。
       if (error instanceof CliError && error.exitCode === EXIT_CODES.service) {
         unavailable = { code: error.code, reason: error.message };
       } else {
@@ -355,79 +318,24 @@ async function readNodes(
     }
   }
 
-  const results: ReadItem[] = [];
-  const missing: string[] = [];
-  let revision: number | undefined;
-  for (const nodeId of nodeIds) {
-    let online: AgentNodeReadResponse | undefined;
-    if (service !== null && unavailable === null) {
-      try {
-        online = await readAgentNode(service, nodeId, readOptions, fetchImpl);
-      } catch (error) {
-        // 循环中途服务变得不可达：剩余节点读磁盘，已读到的在线项保持原样。
-        if (error instanceof CliError && error.code === "SERVICE_UNREACHABLE") {
-          unavailable = { code: error.code, reason: error.message };
-        } else {
-          throw error;
-        }
+  if (service !== null && unavailable === null) {
+    // 先解析主题（11 类错误不进入磁盘回退），再请求服务。
+    const query = onlineQuery(snapshot, request);
+    try {
+      const response = await readAgentView(service, query, fetchImpl);
+      emitReadViewText(response, ctx, mode);
+      return EXIT_CODES.ok;
+    } catch (error) {
+      // 请求中途服务变得不可达才回退；409／400 等业务错误直接抛出，不混用。
+      if (error instanceof CliError && error.exitCode === EXIT_CODES.service) {
+        unavailable = { code: error.code, reason: error.message };
+      } else {
+        throw error;
       }
     }
-    if (online !== undefined) {
-      revision ??= online.revision;
-      results.push(onlineReadItem(online));
-      continue;
-    }
-    const found = findNode(snapshot, nodeId);
-    if (!found) {
-      missing.push(nodeId);
-      continue;
-    }
-    results.push(offlineReadItem(found.entry, parsed, numberById, perNodeLength));
   }
-  if (missing.length > 0) {
-    throw new CliError("NODE_NOT_FOUND", `找不到节点: ${missing.join(", ")}`, EXIT_CODES.notFound, {
-      details: { nodeIds: missing, diagnostics: snapshot.diagnostics.slice(0, 20) },
-    });
-  }
-  const online =
-    service !== null && unavailable === null && revision !== undefined
-      ? {
-          available: true as const,
-          instanceId: service.identity.instanceId,
-          revision,
-          workspaceId: service.identity.workspaceId,
-        }
-      : {
-          available: false as const,
-          code: unavailable?.code ?? "SERVICE_UNAVAILABLE",
-          reason: unavailable?.reason ?? "服务不可用，已全部读取磁盘",
-        };
-  const payload = {
-    ok: true,
-    command: "read",
-    root: snapshot.root,
-    online,
-    ...(budgetApplies
-      ? { budget: { total: READ_TOTAL_BUDGET, perNode: perNodeLength, nodes: nodeIds.length } }
-      : {}),
-    nodes: results,
-  };
-  const lines: string[] = [];
-  if (budgetApplies) {
-    lines.push(
-      `budget ${READ_TOTAL_BUDGET} chars / ${nodeIds.length} nodes, ${perNodeLength} per node`,
-    );
-  }
-  for (const item of results) {
-    const node = item.node;
-    const range = item.range;
-    lines.push(
-      `# ${String(node["title"] ?? "")} (${String(node["id"] ?? "")}) ${item.source} [${range.start},${range.end})/${range.total}`,
-    );
-    if (item.bodyOmitted) lines.push(`（仅元数据，总长 ${range.total}）`);
-    else lines.push(item.body);
-    lines.push("");
-  }
-  emit(ctx, mode, payload, lines);
+
+  const response = buildOfflineReadView(snapshot, offlineOptions(request, unavailable), ctx);
+  emitReadViewText(response, ctx, mode);
   return EXIT_CODES.ok;
 }

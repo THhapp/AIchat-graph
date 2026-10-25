@@ -135,6 +135,112 @@ function fakeService(options: FakeOptions): { fetchImpl: typeof fetch; requests:
         diagnostics: [],
       });
     }
+    if (url.startsWith(`${origin}/api/agent/read`)) {
+      const parsed = new URL(url);
+      const nodeIds = parsed.searchParams.getAll("node");
+      const nodeId = nodeIds[0] ?? CHILD_NODE;
+      const fullText = options.readBody ?? "记录既包括讨论过什么，也包括想法怎样走到这里。";
+      const budget = Number(parsed.searchParams.get("budget") ?? "12000");
+      const meta = parsed.searchParams.get("meta") === "true";
+      const full = parsed.searchParams.get("full") === "true";
+      const start = Number(parsed.searchParams.get("start") ?? "0");
+      const lengthRaw = parsed.searchParams.get("length");
+      const length = lengthRaw === null ? undefined : Number(lengthRaw);
+      const explicit =
+        meta ||
+        full ||
+        length !== undefined ||
+        parsed.searchParams.get("start") !== null ||
+        parsed.searchParams.get("section") !== null;
+
+      let returned = fullText;
+      let rangeStart = 0;
+      let rangeEnd = fullText.length;
+      let truncated = false;
+      if (meta) {
+        returned = "";
+        rangeEnd = 0;
+      } else if (full || length === undefined) {
+        if (start > 0) {
+          returned = fullText.slice(start, start + (full ? fullText.length : 4000));
+          rangeStart = start;
+          rangeEnd = start + returned.length;
+          truncated = start > 0 || rangeEnd < fullText.length;
+        }
+      } else {
+        returned = fullText.slice(start, start + length);
+        rangeStart = start;
+        rangeEnd = start + returned.length;
+        truncated = rangeEnd < fullText.length;
+      }
+
+      const response = {
+        ok: true,
+        command: "read",
+        source: "online",
+        root: options.rootPath,
+        online: {
+          available: true,
+          instanceId: options.instanceId ?? "inst-1",
+          revision: 3,
+          workspaceId: options.workspaceId,
+        },
+        workspaceId: options.workspaceId,
+        view: "content",
+        topicId: TOPIC_ID,
+        topicTitle: "条目整理",
+        scope: { kind: "nodes", nodeCount: nodeIds.length || 1 },
+        items: [
+          {
+            node: {
+              id: nodeId,
+              topicId: TOPIC_ID,
+              title: "可以回查的现场",
+              summary: fullText.slice(0, 20),
+              number: "02",
+              from: ROOT_NODE,
+              flow: "next",
+              state: "proposed",
+              description: "承接记录分寸的讨论",
+              important: false,
+              sourcePath: options.nodePath,
+            },
+            body: returned,
+            ...(meta ? { bodyOmitted: true } : {}),
+            range: {
+              start: rangeStart,
+              end: rangeEnd,
+              total: fullText.length,
+              unit: "utf16",
+            },
+            truncated,
+            path: options.nodePath,
+            fileHash: options.fileHash,
+            editRef: {
+              ref: "ref-abc123",
+              workspaceId: options.workspaceId,
+              topicId: TOPIC_ID,
+              nodeId,
+              path: options.nodePath,
+              fileHash: options.fileHash,
+              instanceId: options.instanceId ?? "inst-1",
+              revision: 3,
+              issuedAt: "2026-10-22T05:00:00.000Z",
+            },
+          },
+        ],
+        page: { hasMore: false },
+        budget: {
+          unit: "utf16",
+          limit: budget,
+          used: 0,
+          mode: explicit ? "explicit" : "auto",
+        },
+        fingerprint: "fake-read-fingerprint",
+      };
+      response.budget.used = JSON.stringify(response).length;
+      return json(200, response);
+    }
     if (url.startsWith(`${origin}/api/agent/nodes/`)) {
       const body = options.readBody ?? "记录既包括讨论过什么，也包括想法怎样走到这里。";
       return json(200, {
@@ -243,21 +349,29 @@ describe("read --node 在线获取 editRef", () => {
     );
     expect(result.exitCode).toBe(0);
     const body = JSON.parse(result.stdout) as Record<string, unknown>;
-    const node = (body["nodes"] as Array<Record<string, unknown>>)[0];
-    expect(node?.["source"]).toBe("online");
+    expect(body["view"]).toBe("content");
+    expect(body["source"]).toBe("online");
+    const item = (body["items"] as Array<Record<string, unknown>>)[0];
     // 版本与身份只在顶层 online 出现，不再逐项重复。
-    expect(node?.["revision"]).toBeUndefined();
-    expect(node?.["online"]).toBeUndefined();
+    expect(item?.["revision"]).toBeUndefined();
+    expect(item?.["online"]).toBeUndefined();
+    expect(item?.["source"]).toBeUndefined();
     expect(body["online"]).toMatchObject({
       available: true,
       instanceId: "inst-1",
       revision: 3,
       workspaceId,
     });
-    expect(node?.["truncated"]).toBe(false);
-    expect((node?.["editRef"] as Record<string, unknown>)["ref"]).toBe("ref-abc123");
-    const call = fake.requests.find((request) => request.url.includes("/api/agent/nodes/"));
+    expect(item?.["range"]).toMatchObject({ start: 0, end: 10, unit: "utf16" });
+    expect((item?.["body"] as string).length).toBe(10);
+    expect(item?.["truncated"]).toBe(true);
+    expect((item?.["editRef"] as Record<string, unknown>)["ref"]).toBe("ref-abc123");
+    const call = fake.requests.find((request) => request.url.includes("/api/agent/read"));
+    expect(call?.url).toContain("/api/agent/read");
     expect(call?.url).toContain("length=10");
+    expect(
+      fake.requests.filter((request) => request.url.includes("/api/agent/nodes/")),
+    ).toHaveLength(0);
   });
 
   it("无服务时回退磁盘并明确标注不提供可写凭据", async () => {
@@ -265,9 +379,10 @@ describe("read --node 在线获取 editRef", () => {
     const result = await main(["read", "--node", CHILD_NODE, "--workspace", root]);
     expect(result.exitCode).toBe(0);
     const body = JSON.parse(result.stdout) as Record<string, unknown>;
-    const node = (body["nodes"] as Array<Record<string, unknown>>)[0];
-    expect(node?.["source"]).toBe("disk");
-    expect(node?.["editRef"]).toBeNull();
+    expect(body["source"]).toBe("disk");
+    const item = (body["items"] as Array<Record<string, unknown>>)[0];
+    expect(item?.["source"]).toBeUndefined();
+    expect(item?.["editRef"]).toBeNull();
     expect(body["online"]).toMatchObject({
       available: false,
       code: "SERVICE_NOT_RUNNING",
@@ -289,8 +404,11 @@ describe("read --node 在线获取 editRef", () => {
     );
     expect(result.exitCode).toBe(0);
     expect(fake.requests).toHaveLength(0);
-    const node = (JSON.parse(result.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
-    expect(node?.["source"]).toBe("disk");
+    const body = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(body["source"]).toBe("disk");
+    const item = (body["items"] as Array<Record<string, unknown>>)[0];
+    expect(item?.["source"]).toBeUndefined();
+    expect(item?.["editRef"]).toBeNull();
   });
 });
 
@@ -788,8 +906,10 @@ describe("磁盘哈希在写入前后保持一致的真实性", () => {
   it("离线读取的 fileHash 等于实际节点文件哈希", async () => {
     const { root, childText } = await newV2Workspace();
     const result = await main(["read", "--node", CHILD_NODE, "--workspace", root]);
-    const node = (JSON.parse(result.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
-    expect(node?.["fileHash"]).toBe(sha256Bytes(childText));
-    expect(node?.["file"]).toBeUndefined();
+    const body = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(body["source"]).toBe("disk");
+    const item = (body["items"] as Array<Record<string, unknown>>)[0];
+    expect(item?.["fileHash"]).toBe(sha256Bytes(childText));
+    expect(item?.["file"]).toBeUndefined();
   });
 });

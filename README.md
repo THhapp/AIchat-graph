@@ -46,6 +46,8 @@ node ./dist/cli/index.js serve --workspace "../my-graph-workspace"
 
 实际命令、读取凭据及冲突处理见 [CLI 说明](skills/aichat-graph/references/commands.md)。Agent 应使用与服务相同版本的 CLI 和 Skill。
 
+读取已有主题时，Agent 先取得主题概览（主线与直接分支入口），再按需读取局部结构或正文；多卡正文由程序按整次响应预算分页，续读标记原样交回即可，不要求 Agent 自行维护各卡偏移。
+
 ### 最小启动任务书
 
 填好占位内容后粘贴给 Agent。程序运行目录须对应实际服务：源码运行填仓库根目录，固定版本填其 `.local/daily` 的绝对路径。

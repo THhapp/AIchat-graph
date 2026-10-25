@@ -155,6 +155,37 @@ export function findTopicById(snapshot: WorkspaceSnapshot, topicId: string): Top
   return snapshot.topics.filter((entry) => entry.topic.topicId === topicId);
 }
 
+/** 主题定位符：稳定 topicId 或相对入口路径（也接受省略 topics/ 前缀）。 */
+export function resolveTopicEntry(
+  snapshot: WorkspaceSnapshot,
+  locator: string,
+): TopicEntry | undefined {
+  if (/^t_[0-9a-f]{32}$/.test(locator)) return findTopicById(snapshot, locator)[0];
+  return findTopicByPath(snapshot, locator) ?? findTopicByPath(snapshot, `topics/${locator}`);
+}
+
+/** 找不到主题时沿用 CLI 既有退出码 11，并带磁盘诊断。 */
+export function requireTopicEntry(
+  snapshot: WorkspaceSnapshot,
+  locator: string,
+): TopicEntry {
+  const topic = resolveTopicEntry(snapshot, locator);
+  if (topic !== undefined) return topic;
+  const isTopicId = /^t_[0-9a-f]{32}$/.test(locator);
+  throw new CliError(
+    isTopicId ? "TOPIC_NOT_FOUND" : "NOT_FOUND",
+    `找不到主题: ${locator}`,
+    EXIT_CODES.notFound,
+    {
+      details: {
+        locator,
+        schemaVersion: snapshot.schemaVersion,
+        diagnostics: snapshot.diagnostics.slice(0, 20),
+      },
+    },
+  );
+}
+
 export function findNode(
   snapshot: WorkspaceSnapshot,
   nodeId: string,

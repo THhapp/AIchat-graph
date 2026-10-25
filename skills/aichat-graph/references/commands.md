@@ -10,37 +10,39 @@
 | --- | --- |
 | `topics` | 主题列表：topicId、title、真实入口文件、节点数 |
 | `search <词> [--topic <topicId>] [--limit 1-100] [--page n]` | 标题→摘要→正文优先级排序；默认 10 项；主题过滤后分页；给出节点真实路径与文件哈希 |
-| `read <topicId\|相对路径>` | 主题元数据与节点清单（显示编号、概述、状态、连接、真实文件与哈希）；不含节点正文 |
-| `read --node <id> [--node <id> ...] [--meta] [--start n] [--length n] [--full] [--section 标题] [--section-index n] [--offline]` | 节点元数据／正文片段；默认 4000 UTF-16，单段上限 16000；`--meta` 不取正文；多卡有整次总量预算 |
+| `read <topicId\|相对路径> [--budget n] [--cursor token]` | 默认 overview：主题范围、主线与直接分支入口；不含正文 |
+| `read <topicId> --view structure [--from <nodeId>] [--budget n] [--cursor token]` | 指定范围的结构记录与必要边界；不含正文、路径和写凭据 |
+| `read --node <id> [--node <id> ...] [--budget n] [--cursor token] [--meta] [--start n] [--length n] [--full] [--section 标题] [--section-index n] [--offline]` | content：节点正文／元数据；默认每卡 4000 UTF-16，程序负责整次预算与续读 |
 | `validate` | 校验磁盘结构与全图；失败时不给 graph |
 
-`read --node` 输出要点（在线与离线同一形状）：
+## 渐进读取
 
-- `nodes[]` 每项：`node` 是核心节点字段（`id`／`title`／`summary`／`number`／`from`／`flow`／`state`／`important`／`description` 等），`body`／`range`／`truncated`／`path`／`fileHash`／`editRef` 在同一项顶层。不要再按 `item.node ?? item` 猜来源。
-- `source` 标明 `online`／`disk`；服务信息在同一次输出的顶层 `online`，不在每张卡上重复。在线项 `editRef` 可用；离线项为 `null`，不伪造凭据。
-- `bodyOmitted: true` 表示本次只取元数据（`--meta`），没有正文；`range.total` 仍是正文总量。
-- `range: { start, end, total, unit: "utf16" }`，左闭右开，不切断代理对；`truncated` 表示后面还有内容。
-- `important` 是节点重要性，在 `node.important`。`lastChange` 不在节点读取里，见[重要标记与最近更新](#重要标记与最近更新)。
+`read` 是唯一的读取入口，`--view` 是可选择的粒度，不是每次必须依次经过的流程：
 
-先定位、读相关范围，再写入。同一轮可维护多个节点，但每次提交使用相应真实读取凭据。需要理解节点完整论证时用 `--full`，不因默认片段短就误以为正文已读完。
+- **overview**（`read <topicId>` 的默认）：主题身份、范围、主线节点和主线节点下的直接分支入口。分支入口带自身子树节点数和可继续读取的结构范围；分支内部默认不展开，这是设计上的范围说明，不是输出截断。
+- **structure**：`--view structure [--from <nodeId>]`。返回指定主题／子树内的稳定节点记录（id、标题、摘要、状态、from、flow、description、顺序字段）和必要边界连接；不默认返回正文、长路径、文件哈希或 editRef。
+- **content**：`--node <id>`（可重复）。复用节点正文、章节和真实写凭据；默认每卡最多 4000 UTF-16，`--meta` 只取元数据，`--start`／`--length`／`--section` 取精确片段；离线项 `editRef` 为 `null`。
 
-## 读取规模与分段
+范围由稳定 ID 和真实连接确定：
 
-宿主输出有上限，一次取太多会被截断，看起来像正文缺失或源文件损坏。按需要分层取：
+- 主题范围是当前 topicId 的全部节点；`--from <nodeId>` 表示从该节点沿 next／branch 可达的子树。起点在主线中段时，范围包含其后的主线延续，`scope.note` 会说明。
+- 边界连接只解释范围节点从哪里接入，不把外部节点自动并入正文读取或修改范围。
+- 主题隔离仍有效；不在读取时按显示编号或浏览器选中项猜范围。
 
-| 需要 | 用法 |
-| --- | --- |
-| 只确认主题与节点清单 | `read <topicId>`：元数据加清单，不含正文 |
-| 只要身份、元数据或写前凭据 | `read --node <id> --meta`：无正文，在线仍给 `editRef` |
-| 看某张卡的开头 | `read --node <id>`：默认 4000 UTF-16，返回 `range` 与 `truncated` |
-| 接着往后读 | `read --node <id> --start <上次 range.end>`，单次 `--length` 取 1—16000 |
-| 只读某一节 | `read --node <id> --section "<标题>" [--section-index <n>]`，在线与离线一致 |
-| 一次取多张卡 | 重复 `--node`；未显式给 `--length`／`--full` 时，整次约 12000 UTF-16 按节点均分（单卡最多 4000），每项各自给 `range`／`truncated`；顶层 `budget` 说明本次分配 |
-| 确认整篇 | 只有需要完整论证时才 `--full`，不默认全取 |
+整次响应预算与续读：
 
-`--start`／`--length` 以 UTF-16 为单位、左闭右开；续读用返回的 `range.end`，不按字数估。`--length` 只接受 1—16000，传 `0` 是参数错误（`INVALID_ARGUMENT`，退出码 2 并给出范围）；只取元数据用 `--meta`，不要用零长度试探。搜索结果先看默认 10 项（`--limit` 最多 100，`--page` 翻页），确认 nodeId 再读正文，不把整页摘要当成正文依据。
+- `--budget` 默认 12000 UTF-16，覆盖最终 JSON 中的结构、元数据、凭据、page 和续读标记，而不是只限制正文。可显式调大；UTF-16 不是模型 token 数，也不保证所有宿主一定不截断超大输出。
+- `page.hasMore` 表示当前视图还有下一页；`page.next` 是程序生成的续读标记。把 `--cursor "<next>"` 原样交回即可，不要在续读时重发 view／topic／--from／--node 或切片参数；可另带 `--budget`，离线来源加 `--offline`。
+- 正文项的 `truncated: true` 只表示这张卡还有正文没返回；overview 中“分支内部未展开”由 `scope.note` 说明。三者不是同一个 `complete` 字段。
+- 相关节点或结构变化后，续读标记会返回 `STALE_READ`（退出码 5）；此时按提示从原范围重新读取，不要混用两批状态。无关主题变化不会单独使当前范围失效。
+- 显式 `--full`／`--length`／`--start`／`--section` 是精确读取：结果超过当前 `--budget` 会明确失败，不静默截断。需要大输出时先提高 `--budget` 或缩小节点范围；`--meta` 也按预算分页。
+- 连一条最小记录都放不下时返回 `BUDGET_TOO_SMALL`；诊断里的 `minimum` 是能让该页成立的最小预算，直接按它调高，不要用空页或极小预算反复重试。
 
-日常使用已绑定主题的稳定 ID：`search "<关键词>" --topic "<topicId>" --workspace "<工作区>"`。`topics` 用于解析用户给出的名称、目录和真实 ID，`read <topicId>` 用于核对节点归属；不要用全局 activeNode 或浏览器选中项决定写入主题。
+`read --node` 的每个 item 形状：`node` 是核心节点字段（`id`／`title`／`summary`／`number`／`from`／`flow`／`state`／`important`／`description` 等），`body`／`range`／`truncated`／`path`／`fileHash`／`editRef` 在同一项顶层。顶层 `online` 只在整次响应出现一次；`source` 标明 `online`／`disk`。`range: { start, end, total, unit: "utf16" }` 左闭右开，不切断代理对。`important` 在 `node.important`；`lastChange` 不在读取视野里，见[重要标记与最近更新](#重要标记与最近更新)。
+
+`--start`／`--length` 以 UTF-16 为单位、左闭右开；显式续读片段用返回的 `range.end`，不按字数估。`--length` 只接受 1—16000，传 `0` 是参数错误（`INVALID_ARGUMENT`，退出码 2 并给出范围）；只取元数据用 `--meta`，不要用零长度试探。搜索结果先看默认 10 项（`--limit` 最多 100，`--page` 翻页），确认 nodeId 再读正文，不把整页摘要当成正文依据。
+
+日常使用已绑定主题的稳定 ID：`search "<关键词>" --topic "<topicId>" --workspace "<工作区>"`。`topics` 用于解析用户给出的名称、目录和真实 ID，`read <topicId>` 的 overview 用于定位主线与分支，`read --node` 用于正文与写前凭据；不要用全局 activeNode 或浏览器选中项决定写入主题。
 
 ## 在线写入
 

@@ -102,7 +102,7 @@ afterAll(async () => {
 });
 
 interface OnlineNode {
-  readonly id: string;
+  readonly id?: string;
   readonly source: string;
   readonly body: string;
   readonly truncated: boolean;
@@ -115,10 +115,14 @@ interface OnlineNode {
 async function readNodeJson(nodeId: string, extra: string[] = []): Promise<OnlineNode> {
   const result = await main(["read", "--node", nodeId, "--workspace", root, ...extra]);
   expect(result.exitCode).toBe(0);
-  const body = JSON.parse(result.stdout) as { nodes: OnlineNode[] };
-  const node = body.nodes[0];
+  const body = JSON.parse(result.stdout) as {
+    source: string;
+    items: OnlineNode[];
+  };
+  const node = body.items[0];
   expect(node).toBeDefined();
-  return node as OnlineNode;
+  // source 现在只出现在顶层；helper 把它带进返回值，保持旧用例的阅读方式。
+  return { ...(node as OnlineNode), source: body.source };
 }
 
 async function textOf(relativePath: string): Promise<string> {

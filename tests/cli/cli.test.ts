@@ -261,22 +261,28 @@ describe("格式 2 工作区", () => {
     expect(body["workspaceFile"]).toBeUndefined();
   });
 
-  it("read 默认返回有界片段并带真实节点文件哈希", async () => {
+  it("read 默认返回有界 content 片段并带真实节点文件哈希", async () => {
     const { root, hashes } = await newV2Workspace();
     const result = await main(["read", "--node", CHILD_NODE, "--workspace", root]);
     expect(result.exitCode).toBe(0);
     const body = jsonOf(result.stdout);
-    const node = (body["nodes"] as Array<Record<string, unknown>>)[0];
-    expect(node).toMatchObject({
-      source: "disk",
+    expect(body["view"]).toBe("content");
+    expect(body["source"]).toBe("disk");
+    expect(body["online"]).toMatchObject({ available: false, code: "SERVICE_NOT_RUNNING" });
+    const item = (
+      body["items"] as Array<Record<string, unknown>>
+    )[0];
+    expect(item).toMatchObject({
       path: `topics/条目整理/${CHILD_NODE}.md`,
       body: CHILD_BODY,
     });
-    expect(node?.["node"]).toMatchObject({ id: CHILD_NODE });
-    expect(node?.["schemaVersion"]).toBeUndefined();
-    expect((node?.["range"] as Record<string, unknown>).unit).toBe("utf16");
-    expect(node?.["fileHash"]).toBe(hashes[`topics/条目整理/${CHILD_NODE}.md`]);
-    expect(node?.["file"]).toBeUndefined();
+    expect(item?.["node"]).toMatchObject({ id: CHILD_NODE });
+    expect(item?.["schemaVersion"]).toBeUndefined();
+    expect((item?.["range"] as Record<string, unknown>).unit).toBe("utf16");
+    expect(item?.["fileHash"]).toBe(hashes[`topics/条目整理/${CHILD_NODE}.md`]);
+    expect(item?.["file"]).toBeUndefined();
+    expect(item?.["source"]).toBeUndefined();
+    expect(body["nodes"]).toBeUndefined();
   });
 
   it("长正文默认截断，--length 与 --full 按预期生效", async () => {
@@ -296,9 +302,11 @@ describe("格式 2 工作区", () => {
       }),
     );
     const defaultRead = await main(["read", "--node", CHILD_NODE, "--workspace", root]);
-    const defaultNode = (jsonOf(defaultRead.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
-    expect((defaultNode?.["body"] as string).length).toBe(DEFAULT_READ_LENGTH);
-    expect(defaultNode?.["truncated"]).toBe(true);
+    const defaultBody = jsonOf(defaultRead.stdout);
+    const defaultItem = (defaultBody["items"] as Array<Record<string, unknown>>)[0];
+    expect(defaultBody["budget"]).toMatchObject({ limit: 12000, mode: "auto", unit: "utf16" });
+    expect((defaultItem?.["body"] as string).length).toBe(DEFAULT_READ_LENGTH);
+    expect(defaultItem?.["truncated"]).toBe(true);
 
     const paged = await main([
       "read",
@@ -311,13 +319,17 @@ describe("格式 2 工作区", () => {
       "--workspace",
       root,
     ]);
-    const pagedNode = (jsonOf(paged.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
-    expect(pagedNode?.["range"]).toEqual({ start: 4000, end: 4100, total: longBody.length, unit: "utf16" });
+    const pagedBody = jsonOf(paged.stdout);
+    const pagedItem = (pagedBody["items"] as Array<Record<string, unknown>>)[0];
+    expect(pagedBody["budget"]).toMatchObject({ mode: "explicit" });
+    expect(pagedItem?.["range"]).toEqual({ start: 4000, end: 4100, total: longBody.length, unit: "utf16" });
 
     const full = await main(["read", "--node", CHILD_NODE, "--full", "--workspace", root]);
-    const fullNode = (jsonOf(full.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
-    expect((fullNode?.["body"] as string).length).toBe(longBody.length);
-    expect(fullNode?.["truncated"]).toBe(false);
+    const fullBody = jsonOf(full.stdout);
+    const fullItem = (fullBody["items"] as Array<Record<string, unknown>>)[0];
+    expect(fullBody["budget"]).toMatchObject({ mode: "explicit" });
+    expect((fullItem?.["body"] as string).length).toBe(longBody.length);
+    expect(fullItem?.["truncated"]).toBe(false);
   });
 
   it("--start 超过 service 的可接受上限时是参数错误", async () => {
@@ -337,43 +349,52 @@ describe("格式 2 工作区", () => {
     expect(error.message).toContain("0-100000000");
   });
 
-  it("read 主题返回主题元数据与节点清单，不把节点正文当主题全文", async () => {
+  it("read 主题默认 overview 入口清单，structure 给节点清单，都不返回正文", async () => {
     const { root } = await newV2Workspace();
     const byId = await main(["read", TOPIC_ID, "--workspace", root]);
     expect(byId.exitCode).toBe(0);
     const body = jsonOf(byId.stdout);
-    const topic = body["topic"] as Record<string, unknown>;
-    expect(topic).toMatchObject({
-      topicId: TOPIC_ID,
-      title: "条目整理",
-      schemaVersion: 2,
-      path: "topics/条目整理/topic.md",
-      dir: "条目整理",
-      nodeCount: 2,
-    });
-    for (const key of ["sourcePaths", "files", "sha256", "absolutePath", "byteLength"]) {
-      expect(topic).not.toHaveProperty(key);
+    expect(body["view"]).toBe("overview");
+    expect(body["topicId"]).toBe(TOPIC_ID);
+    expect(body["topicTitle"]).toBe("条目整理");
+    expect(body["scope"]).toMatchObject({ kind: "topic", nodeCount: 2 });
+    // 主题文件的事实仍以 topicId/topicTitle 呈现，旧扁平字段不再出现。
+    for (const key of ["topic", "file", "text", "textOmitted", "nodes"]) {
+      expect(body[key]).toBeUndefined();
     }
-    // 入口文件路径已在 topic.path，顶层不再重复 file。
-    expect(body["file"]).toBeUndefined();
-    const nodes = body["nodes"] as Array<Record<string, unknown>>;
-    expect(nodes.map((node) => node["path"])).toEqual([
-      `topics/条目整理/${ROOT_NODE}.md`,
-      `topics/条目整理/${CHILD_NODE}.md`,
-    ]);
-    // 默认不返回入口文件正文，节点也不带 body（有界读取不被 outline 绕过）。
-    expect(body["text"]).toBeUndefined();
-    expect(typeof body["textOmitted"]).toBe("string");
-    for (const node of nodes) {
-      expect(node["body"]).toBeUndefined();
+    const items = body["items"] as Array<Record<string, unknown>>;
+    expect(items.map((item) => item["id"])).toEqual([ROOT_NODE, CHILD_NODE]);
+    expect(items.map((item) => item["role"])).toEqual(["mainline", "mainline"]);
+    for (const item of items) {
+      expect(item["body"]).toBeUndefined();
+      expect(item["path"]).toBeUndefined();
+      expect(item["fileHash"]).toBeUndefined();
+      expect(item["editRef"]).toBeUndefined();
     }
 
-    // 显式 --full 时才返回入口文本，并说明它是入口文件本身。
+    // 结构清单必须显式 --view structure；它给出节点顺序，但仍不绕过有界正文。
+    const structure = await main([
+      "read",
+      TOPIC_ID,
+      "--view",
+      "structure",
+      "--workspace",
+      root,
+    ]);
+    expect(structure.exitCode).toBe(0);
+    const structureBody = jsonOf(structure.stdout);
+    expect(structureBody["view"]).toBe("structure");
+    const structureItems = structureBody["items"] as Array<Record<string, unknown>>;
+    expect(structureItems.map((item) => item["id"])).toEqual([ROOT_NODE, CHILD_NODE]);
+    for (const item of structureItems) {
+      expect(item["body"]).toBeUndefined();
+      expect(item["path"]).toBeUndefined();
+    }
+
+    // 主题读取不接受正文参数：正文只能通过 read --node 获取。
     const full = await main(["read", TOPIC_ID, "--full", "--workspace", root]);
-    const fullBody = jsonOf(full.stdout);
-    expect(fullBody["text"]).toContain("topicId: " + TOPIC_ID);
-    expect(fullBody["text"]).not.toContain(ROOT_BODY);
-    expect(fullBody["truncated"]).toBe(false);
+    expect(full.exitCode).toBe(2);
+    expect(errorOf(full.stderr).code).toBe("USAGE");
   });
 
   it("search 指向节点真实文件、默认 10 项并支持分页", async () => {
