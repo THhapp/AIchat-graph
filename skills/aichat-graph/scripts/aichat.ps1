@@ -19,7 +19,8 @@
   ./scripts/aichat.ps1 topics --workspace "D:/my-workspace"
 
 .EXAMPLE
-  ./scripts/aichat.ps1 -Cli "D:/repo/.local/daily/dist/cli/index.js" topics --workspace "D:/my-workspace"
+  $runCli = 'D:/repo/.local/daily/dist/cli/index.js'
+  ./scripts/aichat.ps1 -Cli $runCli topics --workspace 'D:/my-workspace'
 #>
 [CmdletBinding()]
 param(
@@ -57,7 +58,9 @@ if (-not $entry -and -not $Cli) {
     if ($config -and $config.PSObject.Properties['cli'] -and $config.cli) {
       $configured = [string]$config.cli
       $tried.Add($configPath + ' → ' + $configured)
-      if (Test-Path -LiteralPath $configured -PathType Leaf) { $entry = (Resolve-Path -LiteralPath $configured).Path }
+      if (Test-Path -LiteralPath $configured -PathType Leaf) {
+        $entry = (Resolve-Path -LiteralPath $configured).Path
+      }
       else { $notes.Add('local.env.json 已配置 cli，但入口不存在：' + $configured) }
     }
   }
@@ -66,10 +69,13 @@ if (-not $entry -and -not $Cli) {
 # 3. 仓库内相对推导；先确认上一级确实是本仓库，避免把宿主任意祖先目录当成工程根
 if (-not $entry -and -not $Cli) {
   $repoRoot = Resolve-Path (Join-Path $scriptDir '../../..') -ErrorAction SilentlyContinue
-  if ($repoRoot -and (Test-Path -LiteralPath (Join-Path $repoRoot 'skills/aichat-graph/SKILL.md') -PathType Leaf)) {
+  $skillMarker = if ($repoRoot) { Join-Path $repoRoot 'skills/aichat-graph/SKILL.md' }
+  if ($repoRoot -and (Test-Path -LiteralPath $skillMarker -PathType Leaf)) {
     $candidate = Join-Path $repoRoot 'dist/cli/index.js'
     $tried.Add($candidate)
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $entry = (Resolve-Path -LiteralPath $candidate).Path }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      $entry = (Resolve-Path -LiteralPath $candidate).Path
+    }
   }
 }
 
@@ -84,7 +90,10 @@ if (-not $entry) {
     [Console]::Error.WriteLine('修复办法：确认 -Cli 指向实际存在的 dist/cli/index.js；本次不会改用本机绑定的其他版本。')
   } else {
     [Console]::Error.WriteLine('修复办法（任选其一）：')
-    [Console]::Error.WriteLine('  1. 在 Skill 根（与 scripts 同级）写 local.env.json：{ "cli": "<CLI 绝对路径>" }，例如已安装副本指向 .local/daily/dist/cli/index.js；')
+    [Console]::Error.WriteLine(
+      '  1. 在 Skill 根（与 scripts 同级）写 local.env.json：' +
+      '{ "cli": "<CLI 绝对路径>" }，例如已安装副本指向 .local/daily/dist/cli/index.js；'
+    )
     [Console]::Error.WriteLine('  2. 本次调用传 -Cli "<CLI 绝对路径>"；')
     [Console]::Error.WriteLine('  3. 仓库内先在工程根执行 npm run build:node 生成 dist/cli/index.js。')
   }

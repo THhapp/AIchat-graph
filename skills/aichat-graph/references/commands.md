@@ -1,166 +1,307 @@
 # 命令速查
 
-首次操作或遇到命令问题时阅读，不必每轮重读。入口和目标绑定见[工作区与目录职责](workspace.md)。
+首次实际操作、命令不熟悉或遇到错误时按相关章节查阅，不必每轮通读。
+入口与主题绑定见[工作区与目录职责](workspace.md)，节点写法见[内容维护](maintenance.md)。
 
-入口：`node "<aichat-cli>"`（工程内通常是 `dist/cli/index.js`）。默认输出 JSON；`--text` 为简短人类摘要。始终显式传 `--workspace "<工作区>"`，不要依赖默认当前目录。当前 CLI 的 `--help`／`<命令> --help` 是参数权威；本页保留常用操作与重要边界，不替代完整协议。
+## 调用与结果
 
-## 离线只读
+下文 PowerShell 示例先绑定两个实际位置：
 
-| 命令 | 说明 |
+```powershell
+$cli = '<实际运行版本>/dist/cli/index.js'
+$ws = '<讨论工作区绝对路径>'
+node "$cli" topics --workspace "$ws"
+```
+
+始终显式传 `--workspace`。默认 JSON 供机器处理，`--text` 为简短人类摘要。
+参数以当前入口的 `<命令> --help` 为准；通用 Skill 不保存本机绑定。
+
+| 操作 | JSON 中取值的位置 |
 | --- | --- |
-| `topics` | 主题列表：topicId、title、真实入口文件、节点数 |
-| `search <词> [--topic <topicId>] [--limit 1-100] [--page n]` | 标题→摘要→正文优先级排序；默认 10 项；主题过滤后分页；给出节点真实路径与文件哈希 |
-| `read <topicId\|相对路径> [--budget n] [--cursor token]` | 默认 overview：主题范围、主线与直接分支入口；不含正文 |
-| `read <topicId> --view structure [--from <nodeId>] [--budget n] [--cursor token]` | 指定范围的结构记录与必要边界；不含正文、路径和写凭据 |
-| `read --node <id> [--node <id> ...] [--budget n] [--cursor token] [--meta] [--start n] [--length n] [--full] [--section 标题] [--section-index n] [--offline]` | content：节点正文／元数据；默认每卡 4000 UTF-16，程序负责整次预算与续读 |
-| `validate` | 校验磁盘结构与全图；失败时不给 graph |
+| `read --node` 的正文与元数据 | `items[i].node`、`items[i].body` |
+| 读取后的写入 token | `items[i].editRef.ref` |
+| 高层写命令的提交结果 | `result`，根级另有 `requestId` |
+| 单节点写入后的新 token | `result.editRef.ref`，存在时可继续使用 |
+| `rearrange` 后的新 token | `result.editRefs[nodeId].ref` |
 
-## 渐进读取
+`editRef` 是带身份、版本和路径的对象；命令参数 `--ref`、`--from-ref` 只接收其中的
+`ref` 字符串。不要把整份对象、显示编号或自行拼接的 ID 当作 token。
 
-`read` 是唯一的读取入口，`--view` 是可选择的粒度，不是每次必须依次经过的流程：
+写命令返回 `ok: true` 后仍看 `result.state`：
 
-- **overview**（`read <topicId>` 的默认）：主题身份、范围、主线节点和主线节点下的直接分支入口。分支入口带自身子树节点数和可继续读取的结构范围；分支内部默认不展开，这是设计上的范围说明，不是输出截断。
-- **structure**：`--view structure [--from <nodeId>]`。返回指定主题／子树内的稳定节点记录（id、标题、摘要、状态、from、flow、description、顺序字段）和必要边界连接；不默认返回正文、长路径、文件哈希或 editRef。
-- **content**：`--node <id>`（可重复）。复用节点正文、章节和真实写凭据；默认每卡最多 4000 UTF-16，`--meta` 只取元数据，`--start`／`--length`／`--section` 取精确片段；离线项 `editRef` 为 `null`。
+- `committed`：已提交。
+- `noop`：没有实际内容变化，不需要再提交一次。
+- `committed_refresh_pending`：文件已提交，快照刷新待完成。
+  按诊断核对服务和源内容，不把它当作没写入而重复创建。
+  此时可能没有可继续使用的新凭据。
 
-范围由稳定 ID 和真实连接确定：
+## 定位和读取
 
-- 主题范围是当前 topicId 的全部节点；`--from <nodeId>` 表示从该节点沿 next／branch 可达的子树。起点在主线中段时，范围包含其后的主线延续，`scope.note` 会说明。
-- 边界连接只解释范围节点从哪里接入，不把外部节点自动并入正文读取或修改范围。
-- 主题隔离仍有效；不在读取时按显示编号或浏览器选中项猜范围。
+| 命令 | 用途 |
+| --- | --- |
+| `topics` | 核对真实 topicId、标题、入口路径和节点数 |
+| `search <词> --topic <topicId>` | 在绑定主题内搜索标题、概述和正文 |
+| `read <topicId>` | 默认 overview，定位主线和直接分支入口 |
+| `read <topicId> --view structure` | 主题结构，不含正文和写凭据 |
+| `read --node <id>` | 默认 content，读取节点正文和写前凭据 |
+| `validate` | 校验磁盘结构；诊断异常时使用，不是每次保存后的固定动作 |
 
-整次响应预算与续读：
+搜索默认 10 项，`--limit` 为 1—100，`--page` 翻页。
+排序优先标题、其次概述、最后正文。确认稳定 nodeId 后再读取正文。
 
-- `--budget` 默认 12000 UTF-16，覆盖最终 JSON 中的结构、元数据、凭据、page 和续读标记，而不是只限制正文。read 的 JSON 使用紧凑格式并保留结尾换行，`budget.used` 就是这份实际输出的 UTF-16 长度，可直接核对。可显式调大；UTF-16 不是模型 token 数，也不保证所有宿主一定不截断超大输出。
-- `page.hasMore` 表示当前视图还有下一页；`page.next` 是程序生成的续读标记。把 `--cursor "<next>"` 原样交回即可，不要在续读时重发 view／topic／--from／--node 或切片参数；可另带 `--budget`，离线来源加 `--offline`。
-- 正文项的 `truncated: true` 只表示这张卡还有正文没返回；overview 中“分支内部未展开”由 `scope.note` 说明。三者不是同一个 `complete` 字段。
-- 相关节点或结构变化后，续读标记会返回 `STALE_READ`（退出码 5）；此时按提示从原范围重新读取，不要混用两批状态。无关主题变化不会单独使当前范围失效。
-- 显式 `--full`／`--length`／`--start`／`--section` 是精确读取：结果超过当前 `--budget` 会明确失败，不静默截断。需要大输出时先提高 `--budget` 或缩小节点范围；`--meta` 也按预算分页。
-- 连一条最小记录都放不下时返回 `BUDGET_TOO_SMALL`；诊断里的 `minimum` 是能让该页成立的最小预算，直接按它调高，不要用空页或极小预算反复重试。
+### 读取粒度和范围
 
-`read --node` 的每个 item 形状：`node` 是核心节点字段（`id`／`title`／`summary`／`number`／`from`／`flow`／`state`／`important`／`description` 等），`body`／`range`／`truncated`／`path`／`fileHash`／`editRef` 在同一项顶层。顶层 `online` 只在整次响应出现一次；`source` 标明 `online`／`disk`。`range: { start, end, total, unit: "utf16" }` 左闭右开，不切断代理对。`important` 在 `node.important`；`lastChange` 不在读取视野里，见[重要标记与最近更新](#重要标记与最近更新)。
+`read` 的三种粒度可以直接选择，不要求逐层访问：
 
-`--start`／`--length` 以 UTF-16 为单位、左闭右开；显式续读片段用返回的 `range.end`，不按字数估。`--length` 只接受 1—16000，传 `0` 是参数错误（`INVALID_ARGUMENT`，退出码 2 并给出范围）；只取元数据用 `--meta`，不要用零长度试探。搜索结果先看默认 10 项（`--limit` 最多 100，`--page` 翻页），确认 nodeId 再读正文，不把整页摘要当成正文依据。
+- **overview**：主题身份、主线和主线节点下的直接分支入口。
+  分支入口带子树节点数和继续读取的范围；分支内部默认未展开。
+- **structure**：所选范围的节点身份、派生编号、标题、概述、状态及连接。
+  不返回正文、长路径、哈希或写凭据。
+- **content**：由可重复的 `--node` 指定节点，读取正文或元数据。
+  主题位置参数与 `--node` 不能同时给出。
 
-日常使用已绑定主题的稳定 ID：`search "<关键词>" --topic "<topicId>" --workspace "<工作区>"`。`topics` 用于解析用户给出的名称、目录和真实 ID，`read <topicId>` 的 overview 用于定位主线与分支，`read --node` 用于正文与写前凭据；不要用全局 activeNode 或浏览器选中项决定写入主题。
+```powershell
+node "$cli" read '<topicId>' --workspace "$ws"
+node "$cli" read '<topicId>' --view structure --from '<nodeId>' --workspace "$ws"
+node "$cli" read --node '<nodeId>' --workspace "$ws"
+node "$cli" read --node '<A>' --node '<B>' --meta --workspace "$ws"
+```
+
+`--from` 用于 overview／structure 的可达子树；省略 view 时会选择 structure。
+起点在主线中段时，范围包含后续 next 及其分支，不只是该节点的旁支。
+边界连接解释范围从哪里接入，不自动扩大读取和修改范围。
+
+`read --node` 的 item 包含：
+
+- `node`：含 id、topicId、title、summary、number、from、flow、state、important 等。
+- `body`、`range`、`truncated`：本次正文片段及其范围。
+- `path`、`fileHash`、`editRef`：源位置、真实字节哈希与在线凭据。
+- `bodyOmitted: true`：明确只取元数据，不代表源正文为空。
+
+整次响应的 `source` 是 `online` 或 `disk`，`online.available` 表示在线能力。
+离线 item 的 `editRef` 为 null。读取优先连接同工作区服务，服务不可用时回退磁盘；
+`read --offline` 可以明确只读磁盘，写入不回退离线。
+
+### 预算与续读
+
+- `--budget` 默认 12000，范围 1—1000000，单位是 UTF-16，不是字节或模型 token。
+  它覆盖整次紧凑 JSON、凭据、分页信息和结尾换行；`budget.used` 是实际输出长度。
+- content 默认每卡最多 4000 UTF-16，多卡共享整次预算，可能需要多个页面。
+  `--meta` 也受分页约束。
+- `page.hasMore` 表示当前视图还有页面，`page.next` 是续读 token。
+  续读时只传 cursor、工作区和所需预算／输出选项；磁盘 token 另加 `--offline`。
+  不重发主题、view、node、from、meta 或正文切片选项。
+
+```powershell
+node "$cli" read --cursor '<原样的 page.next>' --budget 12000 --workspace "$ws"
+```
+
+- `truncated` 仅表示当前正文片段后面还有内容；末段为 false。
+  它不同于 `page.hasMore`，也不同于 overview 的 `scope.note` 所说明的未展开分支。
+- `BUDGET_TOO_SMALL`：连最小记录也放不下，按 `error.details.minimum` 调高预算。
+- `BUDGET_EXCEEDED`：显式精确片段超预算；调高预算或缩小范围，不依靠静默截断。
+- `STALE_READ`（退出码 5）：相关范围发生变化，丢弃旧 cursor，从原范围重新读。
+  不混合两批状态；无关主题或不影响本范围的变化不会单独使 token 失效。
+- 在线 token 不能离线续读。服务不可达时从磁盘重新开始相应范围，不硬接旧 token。
+  程序预算也不能保证宿主永远不截断大输出，按实际任务控制范围。
+
+### 精确片段和章节
+
+- `--start` 为 0—100000000；`--length` 为 1—16000。
+  `range: {start,end,total,unit:"utf16"}` 左闭右开，避免切断代理对。
+  手动指定下段时使用实际 `range.end`；日常分页优先用 cursor。
+- `--full` 从所选起点读到正文末尾，与 `--length` 互斥，仍受整次预算限制。
+- `--section '<标题>'` 从该标题开始取片段，默认仍最多 4000 UTF-16。
+  它不是只截取这一节，后续可能包含其他章节；结合 `--full` 会读取到正文末尾。
+- 标题重名时，`--section-index` 选择同名标题中的第几个，0 起。
+  它不是全文标题序号；只能和 `--section` 一起使用。
+- `--meta` 不返回正文，不能和 start、length、full、section、section-index 同用。
+  只取凭据用 meta，不要传零长度。主题概览／结构也不接受正文切片选项。
+
+```powershell
+node "$cli" read --node '<id>' --section '适用范围' --length 1200 --workspace "$ws"
+node "$cli" read --node '<id>' --full --budget 30000 --workspace "$ws"
+```
 
 ## 在线写入
 
-**当前格式**：一节点一份 Markdown、每个主题独立根（`schemaVersion: 2`, `topicMode: isolated`）。不再支持旧格式 1 或 shared 跨主题图。以下写入命令均需要该工作区的 `serve`：
+以下命令需要同工作区的运行服务。创建节点的正文来源三选一：
+`--body`、`--body-file` 或 `--body-stdin`。
 
-| 命令 | 必需 | 说明 |
-| --- | --- | --- |
-| `edit --ref <ref>` | 至少一项修改 | `--title`／`--state`／`--summary`／`--body*`／`--append-file`／`--replace-file` |
-| `branch --from-ref <ref> --title <t> --description <why>` | 正文来源之一 | 横向旁支；默认同主题、右侧、proposed、order 由服务取 max+10 |
-| `next --from-ref <ref> --title <t> --description <why>` | 正文来源之一 | 纵向后继；`flow: next`，不带 side／order；来源已有 next 时 409，不插队 |
-| `connect --ref <ref> --description <why>` | `--description` | 结构字段全可选：`--from-ref`／`--flow`／`--side`／`--order`；只改描述也合法 |
-| `rearrange --input <spec.json>` | 至少一条 edit | 一次表达多条最终入边；工具在同一事务里安全排序，见[整体整理与重连](#整体整理与重连) |
-| `important (--node <id> \| --ref <ref>) (--on \| --off)` | 二选一 | 设置／取消重要标记；`--node` 先做真实在线读取，`--ref` 保留读取时的冲突检查 |
-| `create-root --topic-title <t> --title <t>` | 正文来源之一 | 仅空工作区；主题与根卡一次创建 |
-| `create-topic --topic-title <t> [--directory <目录名>] [--title <首节点标题>]` | 正文来源之一 | 在当前主题库中创建新主题与独立 root；首节点标题默认主题名，目录为可选自命名单层目录 |
-| `check --input <json>` | — | 只验证当前变更集合，不写盘 |
-| `apply --input <json>` | — | 提交当前变更集合（需带真实旧哈希） |
-| `status <requestId>` | — | 查询状态；unknown 不证明成功或失败 |
+| 命令 | 关键参数与用途 |
+| --- | --- |
+| `edit` | `--ref`，至少修改 title、state、summary 或正文之一 |
+| `branch` | `--from-ref --title --description` 和正文，创建独立方向 |
+| `next` | `--from-ref --title --description` 和正文，创建纵向后继 |
+| `connect` | `--ref --description`，修改一条现有连接或仅修改其说明 |
+| `rearrange` | `--input <json>` 或 `--input-stdin`，批量重排最终入边 |
+| `important` | `--node` 或 `--ref`，配合 `--on` 或 `--off` |
+| `create-topic` | `--topic-title` 和正文，创建主题及独立根 |
+| `create-root` | `--topic-title --title` 和正文，仅用于空工作区 |
 
-正文来源写法：`--body "短文本"`、`--body-file <路径>`、`--body-stdin`；追加用 `--append-file`，局部替换用 `--replace-file`（`[{old,new}]` 或 `{replace:[{old,new}]}`，`old` 必须非空且唯一匹配）。
+### 修改和创建节点
 
-概述使用已有节点的 `edit --summary`。创建命令没有该参数时，先把概述写成正文首段供程序派生；需要独立的显式概述再读取新节点、用真实凭据补设。不要向创建命令传不存在的 `--summary`。
+`edit` 的正文模式互斥：整篇替换（body／body-file／body-stdin）、
+追加（append-file）、局部替换（replace-file），一次只给一种。
+title、state、summary 可以与所选正文模式同次更新。
+`--replace-file` 接受 `[{"old":"...","new":"..."}]` 或 `{ "replace": [...] }`；
+每个 old 必须非空且唯一匹配，不做含糊的全局替换。
 
 ```powershell
-node "<aichat-cli>" edit --ref "<实际读取凭据>" --append-file "<补充正文.md>" --workspace "<工作区>"
-node "<aichat-cli>" branch --from-ref "<实际读取凭据>" --title '输入分辨率改变后的处理' --description '从固定尺寸实例延伸到可变尺寸的网络设计' --body-file "<分支正文.md>" --workspace "<工作区>"
-node "<aichat-cli>" create-topic --topic-title 'LeNet 学习' --directory 'lenet' --body-file "<首节点正文.md>" --workspace "<工作区>"
+node "$cli" edit --ref '<token>' --append-file '<补充正文.md>' --workspace "$ws"
+node "$cli" edit --ref '<token>' --state agreed --summary '已明确的要点' --workspace "$ws"
+
+$branchArgs = @(
+  'branch', '--from-ref', '<来源 token>',
+  '--title', '输入尺寸改变后的设计',
+  '--description', '从固定尺寸延伸到可变输入',
+  '--body-file', '<分支正文.md>', '--workspace', $ws
+)
+node "$cli" @branchArgs
 ```
 
-不自行生成 nodeId、路径、顺序、哈希或 requestId。托管提交已包含候选结构校验；核对返回结果即可，不要求每次再运行全图 `validate`。直接编辑源文件后、出现结构诊断或怀疑损坏时再校验。同一批修改只选托管提交或直接编辑。
+创建与重连的实际边界：
 
-用户明确要求记录新主题时可用 `create-topic`，不必先把整个工作区清空，也不把现有主题的 root 接到新主题。`--directory` 是单层目录名，不是任意路径；不自行创建目录或写元数据来绕过命令。创建能力以实际 CLI 的帮助和诊断为准。
+- branch 与 next 的新提议默认 proposed，不因来源已确认而自动 agreed。
+  可显式传 `--state proposed|agreed|reference`，按实际内容判断。
+- branch 的 order 默认由服务取现有最大值加 10；日常无需手工分配。
+- 来源已有 next 时，`next` 返回 409，不自动插队或顶掉旧后继。
+  `next --topic-id` 不能用来绕过主题隔离，通常沿用来源主题即可。
+- `connect` 可选 `--from-ref`、`--flow root|next|branch`、`--side`、`--order`。
+  仅修改 description 也合法；从 branch 改为 next 时仍须满足唯一后继约束。
+- branch、connect、rearrange 仍接受 branch 的 side 元数据。
+  当前界面全部向右展开，`--side left` 不会让卡片显示在左侧；不用它微调外观。
+- 创建命令没有 `--summary`。先用正文首段提供派生概述；需要显式概述时，
+  用创建结果的新 token 或重新读取后执行 `edit --summary`。
+- `create-topic` 可带 `--directory '<单层目录名>'`、`--title` 和 `--state`。
+  首卡标题默认主题名，目录碰撞拒绝；不自行建元数据或清空工作区绕过创建检查。
+
+高层命令生成 requestId、节点 ID、真实路径与默认顺序。
+成功后核对 `result.created`、`result.changedNodeIds` 和新凭据，按需要继续操作。
 
 ## 整体整理与重连
 
-整理可以拆分、合并、移动和重连，不必只原位追加或一路向后生长。已有节点的整体重排用 `rearrange` 一次表达最终入边，不再靠多次临时旁支和重读拼顺序：
+`rearrange` 只表达现有节点的最终入边，不同时编辑正文或创建节点。
+所有 ref 和 fromRef 都取真实凭据对象的 ref 字符串；只需定位和凭据时可先用 meta。
+
+例如将 A→B→C→D 改为 A→C→B→D：
 
 ```json
 {
   "edits": [
-    { "ref": "<C 的 editRef>", "fromRef": "<A 的 editRef>", "flow": "next", "description": "先比较两者的适用范围" },
-    { "ref": "<B 的 editRef>", "fromRef": "<C 的 editRef>", "flow": "next", "description": "比较之后再回到原结论" },
-    { "ref": "<D 的 editRef>", "fromRef": "<B 的 editRef>", "flow": "next", "description": "结论仍接在 B 之后" }
+    {
+      "ref": "<C token>", "fromRef": "<A token>",
+      "flow": "next", "description": "先比较适用范围"
+    },
+    {
+      "ref": "<B token>", "fromRef": "<C token>",
+      "flow": "next", "description": "比较后回到原结论"
+    },
+    {
+      "ref": "<D token>", "fromRef": "<B token>",
+      "flow": "next", "description": "后续仍承接该结论"
+    }
   ]
 }
 ```
 
 ```powershell
-node "<aichat-cli>" rearrange --input "<rearrange.json>" --workspace "<工作区>"
+node "$cli" rearrange --input '<rearrange.json>' --workspace "$ws"
+# stdin 是替代入口，不能与 --input 同时给出
+Get-Content -Raw -Encoding utf8 '<rearrange.json>' |
+  node "$cli" rearrange --input-stdin --workspace "$ws"
 ```
 
-- `ref` 是要改接的节点，`fromRef` 是最终来源；`flow` 只取 `next`／`branch`，`branch` 可带 `side`／`order`。两个 ref 都必须来自真实读取；只需定位和凭据时用 `read --node <id> --meta`。
-- `description` 写**最终**连接的理由，不能沿用旧边的说明。旧说明会从源文件和连接文字中消失，不会作为临时状态残留。
-- 工具在同一批候选与事务里先腾空、再落位；中间状态不写盘，不产生临时说明、临时旁支或历史副本。失败时源文件不变：过期哈希 412、结构冲突 409、成环或重复 next 422。
-- 一个来源最多一个 `next`。目标位置被别的后继占用时，必须把那个后继也写进同一次 `edits` 并给出它的最终位置；工具不会隐式挤掉或覆盖未声明的后继。被移动节点**后面**的节点如果来源要跟着变（例如 A→B→C→D 改成 A→C→B→D 时的 D），也属于同一次最终关系，示例已把它列入。
-- 成功后响应带 `editRefs`（按 nodeId，覆盖本次实际变化的节点），可直接用于后续修改，不必立刻重读；未变化节点沿用原凭据。多节点整理不再签发单节点 `editRef`（为 `null`），以免同一节点出现两个凭据。需要核对最终编号与结构时再 `read <topicId>`。
-- 只调整单条连接、且目标来源没有 next 冲突时，仍可用 `connect`。新建节点仍用 `branch`／`next`；要把新节点插进已有 next 之前，先创建，再用 `rearrange` 一次落位。
-- 编号由程序按最终结构派生，不手工排序，也不写回源文件。改接的节点保留稳定 ID 和原有子树。
+- ref 是被改接节点，fromRef 是最终来源，flow 只取 next／branch。
+  branch 可另带 side／order；description 必须解释最终连接，不能残留旧边理由。
+- 一个来源最多一个 next。目标位置被占时，把占位后继及其他需要换来源的节点
+  一起纳入 edits，并各自给出最终位置；工具不隐式挤掉未声明节点。
+- 服务在同一候选和事务里腾空、落位，中间状态不写盘，不制造临时旁支。
+  过期哈希 412、占位冲突 409、成环或重复 next 422，失败不提交该批源修改。
+- 成功后读 `result.editRefs[nodeId].ref`；重排的 `result.editRef` 为 null。
+  新凭据只在返回时有效，未返回或刷新待完成时按实际状态重读。
+  需要核对最终编号时读 structure，编号由程序派生。
+- 单条无占位冲突的改接仍可用 connect；新节点插入已有 next 之前，
+  当前需要先创建，再用 rearrange 落位，共两次提交。
 
 ## 重要标记与最近更新
 
-`important` 是节点自身的元数据，表示“值得回看”；`lastChange` 是界面图数据里按主题保留的最近一批提交记录，普通 `read --node` 不返回。两者不要混用：最近更新不是重要性，也不是修改历史。
-
-读重要性看 `read --node` 返回的 `node.important`（布尔，缺省 false）。写：
+节点自身的 `node.important` 表示值得回看，缺省 false。
 
 ```powershell
-node "<aichat-cli>" important --node "<nodeId>" --on --workspace "<工作区>"
-node "<aichat-cli>" important --ref "<实际读取凭据>" --off --workspace "<工作区>"
+node "$cli" important --node '<nodeId>' --on --workspace "$ws"
+node "$cli" important --ref '<真实 token>' --off --workspace "$ws"
 ```
 
-- `--node` 会在同一条命令里先做一次真实在线读取取得凭据，再提交；服务不可达时明确失败，离线不伪造。
-- 已有读取凭据时用 `--ref`，保留冲突检查：读取后源文件被改过会 412，不偷偷补最新哈希。
-- 只改这一项元数据，不改变正文、编号、连接或顺序；`lastChange` 也不因重要性单独变化。
-- 取消标记会移除源文件中的 `important` 字段；不要手改源字段绕过事务。
-- 界面通过 `POST /api/importance` 切换，那是界面入口；Agent 用上面的命令。
+- node 与 ref 二选一，on 与 off 二选一。
+  `--node` 在命令内先在线读 meta，`--ref` 使用已有读取版本，冲突不偷偷补哈希。
+- 标记不改变正文、编号或连接。取消会移除源文件中的 important 字段。
+- 最近更新来自图接口 `lastChanges[topicId] = { at, nodeIds }`，普通 read 不返回。
+  每主题保留最近一批最终真实写盘的内容节点，不累计每轮历史。
+  读取、浏览、导出、被动重编号和单独改重要性不会替换该集合。
+- 单独编辑旧节点、再创建新问题目前是两次提交，同主题最终只保留后一批更新标记。
+  外部直接改文件也不产生这份标记，不能据此推断文件从未修改。
+
+## 能力边界与底层命令
+
+高层 CLI 当前没有独立的 insert、merge 或 delete 命令。
+“整合正文”不等于“删除冗余节点”，rearrange 也不会自动合并正文。
+需要底层操作时先核对当前变更 schema、真实旧哈希与授权，不能编造新命令。
+
+| 命令 | 用途 |
+| --- | --- |
+| `check --input <json>` | 验证完整底层变更集合，不写盘 |
+| `apply --input <json>` | 提交完整变更集合，包含真实旧哈希和固定 requestId |
+| `status <requestId>` | 查询原请求状态；也可 `--input <原变更.json>` |
+
+check／apply 的 JSON 与 rearrange 的 `{edits:[...]}` 不是同一种格式。
+`--input-stdin` 目前只在 rearrange 提供，不能推广到 check／apply。
+同一批修改只选择托管提交或直接编辑，直接编辑后按实际需要校验。
 
 ## 长文本与转义
 
-正文、描述和整批变更不要拼进命令行字符串再层层转义——多层引号经常在 CLI 解析阶段就失败，命令根本没执行，事后看像“没有写入”。
-
-- 正文：长文用 `--body-file <路径>` 或 `--body-stdin`；只有短文本才用 `--body`。
-- 追加／局部替换：`--append-file`、`--replace-file`（`[{old,new}]`），不手拼 JSON 字符串。
-- 整批结构变更：写成 JSON 文件再 `check --input <json>`／`apply --input <json>`。
-- 描述里出现中文弯引号（`“”`、`‘’`）时，外层用单引号；PowerShell 会把它们当引号，参数被截成多段并报未知选项。
-
-错误示范（不要这样写）：正文里含 JSON 和引号时，把整段塞进外层双引号再拼 `node <cli> edit --ref <ref> --body "{\"title\":\"...\",\"text\":\"...\"}"`。反斜杠与嵌套引号在参数解析阶段就被吃掉，命令报未知选项或截断参数；即使偶尔拼对了，下一处改动也极易再错。改成写文件：
+长正文优先用 UTF-8 文件或 `--body-stdin`，不拼接多层 JSON 和命令行引号。
+append-file 会插入段落分隔；replace-file 保存替换对，不把 JSON 再包成正文。
 
 ```powershell
-node <aichat-cli> connect --ref <editRef> '--description=改得更“准确”的说明' --workspace "<workspace>"
-node "<aichat-cli>" edit --ref "<实际读取凭据>" --append-file "<补充正文.md>" --workspace "<工作区>"
+Get-Content -Raw -Encoding utf8 '<正文.md>' |
+  node "$cli" edit --ref '<token>' --body-stdin --workspace "$ws"
+node "$cli" connect --ref '<token>' '--description=改得更“准确”的说明' --workspace "$ws"
 ```
 
-## 工作区与服务
+PowerShell 使用 ASCII 引号包裹参数；含空格、弯引号或复杂内容时优先使用文件、
+参数数组和字面量字符串，不把 JSON.stringify 的结果当作 shell 转义。
+遇到未知选项先核对 stderr：命令可能在解析阶段就失败，不是保存后“没有更新”。
 
-| 命令 | 说明 |
+## 工作区、服务与错误
+
+| 命令 | 用途 |
 | --- | --- |
-| `init <path> [--name n]` | 新工作区；目标已存在则拒绝 |
-| `serve --workspace <path> [--port n]` | 默认 127.0.0.1:4317；端口占用明确失败 |
-| `whoami` | 核对描述文件、服务与磁盘身份 |
+| `init <path> [--name <名称>]` | 初始化不存在的新目录，不覆盖已有库 |
+| `serve --workspace <path> [--port <端口>]` | 启动本机服务，默认 127.0.0.1:4317 |
+| `whoami --workspace <path>` | 核对描述文件、磁盘和实际服务身份 |
 
-## 退出码
+服务管理沿用用户授权；有同工作区服务时不启动第二个写进程。
+端口冲突明确失败，不猜其他服务或自动切换工作区。
 
-| 码 | 含义 |
+| 退出码 | 含义及处理 |
 | --- | --- |
-| 0 | 成功 |
-| 2 | 用法／输入错误（含 `--input` 结构不合法） |
+| 0 | 成功；写入还需看 result.state |
+| 2 | 用法、输入、范围或预算错误；先修参数 |
 | 3 | 工作区或 workspaceId 不一致 |
-| 4 | 412 版本冲突（旧哈希／过期凭据） |
-| 5 | 409 语义冲突 |
-| 6 | 422 校验失败，或离线校验不通过 |
-| 7 | 服务不可达、描述文件陈旧、身份不符、启动失败 |
-| 8 | 写入结果未知：先 status 与重读，不盲目重发 |
-| 9 | 服务返回非标准错误体、端点缺失等 HTTP 错误；按 stderr 的 message/details 处理 |
-| 10 | 未预期的内部错误；保留 stderr 的上下文 |
-| 11 | 找不到节点／主题／文件 |
+| 4 | 412 版本冲突，重读并重新判断 |
+| 5 | 409 语义冲突，或 STALE_READ 续读失效 |
+| 6 | 422 结构校验失败，或离线 validate 不通过 |
+| 7 | 服务不可达、陈旧描述、服务身份不符或启动失败 |
+| 8 | 写入结果未知，先查原 requestId 和源内容 |
+| 9 | 非标准 HTTP 错误、端点缺失等 |
+| 10 | 未预期内部错误，保留具体上下文 |
+| 11 | 找不到节点、主题或文件 |
 
-错误统一为 stderr 上的 `{ ok: false, error: { code, message, details?, diagnostics? } }`。
+默认 JSON 模式的错误写到 stderr：
+`{ok:false,error:{code,message,details?,diagnostics?,usage?}}`。
+用法错误也返回 JSON，可能带 error.usage；`--text` 错误才是人类可读文本。
+不要只凭退出码猜原因，同码下按 code、message 与 diagnostics 处理。
 
-版本冲突后重新读取并重新判断，不能只取最新哈希让旧改动强行通过。语义冲突先检查当前结构，校验失败根据 diagnostics 修正内容。
-
-退出码 8 时，先用原 requestId 查询 `status`，再核对源内容；未知既不证明成功也不证明失败，不换 requestId 盲目重发。服务重启后重新获取 editRef。服务不可达时可继续离线阅读与讨论；启动或直接写文件沿用用户已有授权，否则说明保存受阻。
+退出码 8 不换 requestId 盲目重发；status 的 unknown 既不证明成功也不证明失败。
+服务重启后重新获取 editRef，不能靠手补哈希恢复旧凭据。
