@@ -1,10 +1,7 @@
 import { createContext, useContext } from 'react';
 import type {
   LayoutDiagnostic,
-  LayoutEdgeRoute,
   LayoutInput,
-  LayoutNodeInput,
-  LayoutPosition,
   LayoutResult,
 } from '../layout/types.js';
 import type {
@@ -163,14 +160,6 @@ export function createWorkerLayoutEngine(worker: Worker): LayoutEngine {
   };
 }
 
-export class LayoutUnavailableError extends Error {
-  readonly code = 'LAYOUT_UNAVAILABLE';
-  constructor(message = '布局模块尚未接入：src/web/layout 未提供可用实现，界面不会伪造节点坐标。') {
-    super(message);
-    this.name = 'LayoutUnavailableError';
-  }
-}
-
 export interface LayoutEngineSlot {
   /** loading = worker module still being fetched; missing = no layout implementation. */
   status: 'loading' | 'ready' | 'missing';
@@ -181,38 +170,4 @@ export const LayoutEngineContext = createContext<LayoutEngineSlot>({ status: 'mi
 
 export function useLayoutEngine(): LayoutEngineSlot {
   return useContext(LayoutEngineContext);
-}
-
-/** Converts layout output into maps the React Flow adapter consumes. */
-export function indexLayout(result: LayoutResult): {
-  positions: Map<string, LayoutPosition>;
-  routes: Map<string, LayoutEdgeRoute>;
-} {
-  return {
-    positions: new Map(Object.entries(result.positions)),
-    routes: new Map(result.edgeRoutes.map((route) => [route.id, route])),
-  };
-}
-
-export interface LayoutNodeSeed {
-  id: string;
-  from: string | null;
-  flow: 'root' | 'next' | 'branch';
-  side?: 'left' | 'right';
-  order?: number;
-  label?: string;
-  topicId?: string;
-}
-
-/** Strips UI-only fields; layout must not receive titles, bodies or numbers. */
-export function toLayoutNodeInput(node: LayoutNodeSeed): LayoutNodeInput {
-  return {
-    id: node.id,
-    from: node.from,
-    flow: node.flow,
-    side: node.side ?? null,
-    order: node.order ?? null,
-    label: node.label ?? null,
-    topicId: node.topicId ?? null,
-  };
 }

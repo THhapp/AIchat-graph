@@ -2,9 +2,9 @@ import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
 import type { LayoutNodeInput } from '../layout/types.js';
 import { cardHeightForTitle } from './cardMetrics.js';
 
-/** The relationship sentence drawn on the connector: description wins, label is format-1 compat. */
-export function connectionText(node: Pick<GraphNode, 'description' | 'label'>): string {
-  return (node.description ?? node.label ?? '').trim();
+/** The relationship sentence drawn on the connector. */
+export function connectionText(node: Pick<GraphNode, 'description'>): string {
+  return (node.description ?? '').trim();
 }
 
 /**
@@ -128,8 +128,8 @@ export function buildGraphView(
 
   const nodes = graph.nodes.filter((node) => visibleIds.has(node.id));
   const layoutNodes: LayoutNodeWithHeight[] = nodes.map((node) => {
-    // Shared legacy topics can enter from outside the reading boundary. Only
-    // the layout treats that entry as a local root; source relationship stays.
+    // A topic boundary can expose a parent outside the graph being drawn. Only
+    // the layout treats that entry as a local root; the source relationship stays.
     const localRoot = node.from !== null && !byId.has(node.from);
     return {
       id: node.id,

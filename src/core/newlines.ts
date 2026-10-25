@@ -7,12 +7,32 @@ export interface LineBounds {
   readonly next: number;
 }
 
-/** 定位从 start 开始的行；兼容 LF、CRLF 与单独的 CR。 */
+/**
+ * 定位从 start 开始的行，只按 LF 分行。
+ *
+ * CRLF 的 CR 归入行尾但不包含在 end 里；单独的 CR 不视为换行，会留在行内容中。
+ * 解析层只支持 LF／CRLF；裸 CR 文件目前不会被拒绝，而会被当成一行或行内字符，
+ * 调用方不应依赖这里提供裸 CR 分行能力。
+ */
 export function lineBounds(text: string, start: number): LineBounds {
   const newline = text.indexOf("\n", start);
   if (newline === -1) return { end: text.length, next: text.length };
   const end = newline > start && text[newline - 1] === "\r" ? newline - 1 : newline;
   return { end, next: newline + 1 };
+}
+
+/** 把任意换行统一成 LF 后再转换为目标换行；目标不是 LF 时按 LF 逐段替换。 */
+export function normalizeNewlines(value: string, nl: string): string {
+  const lf = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return nl === "\n" ? lf : lf.replace(/\n/g, nl);
+}
+
+/**
+ * 选择文件的主要换行：出现 CRLF 即按 CRLF，否则 LF。
+ * 只表达"写回时用哪种换行"，与 detectNewlineStyle 的完整事实区分。
+ */
+export function detectLineEnding(text: string): "\n" | "\r\n" {
+  return text.includes("\r\n") ? "\r\n" : "\n";
 }
 
 /** 只报告原文换行事实；解析与范围都不做换行归一化。 */

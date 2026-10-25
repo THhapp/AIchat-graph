@@ -7,7 +7,6 @@
 import {
   parseWorkspaceDocuments,
   workspaceMetaSchema,
-  type SupportedSchemaVersion,
   type WorkspaceMeta,
 } from "../core/index.js";
 import {
@@ -203,5 +202,3 @@ export async function readSnapshot(
   }
   return { files, outcome: await evaluateFiles(files, context) };
 }
-
-export type { SupportedSchemaVersion };

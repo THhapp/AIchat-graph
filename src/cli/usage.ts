@@ -4,7 +4,7 @@ export const USAGE = [
   "aichat <command> [options]",
   "",
   "Read (offline, straight from disk):",
-  "  topics --workspace <path>                   列出主题（V1 单文件／V2 一节点一份）",
+  "  topics --workspace <path>                   列出主题（一节点一份）",
   "  search <query> --workspace <path> [--topic <topicId>] [--limit <n>] [--page <n>]",
   "                                              搜索标题／摘要／正文（默认 10 项，最多 100）",
   "  read <topicId|relative-path> --workspace <path>",
@@ -33,12 +33,8 @@ export const USAGE = [
   "  apply --input <json>                        提交底层变更集合（须带真实旧哈希）",
   "  status <requestId>                          查询请求状态；unknown 不证明成功或失败",
   "",
-  "Migration (isolated; never in place):",
-  "  migrate --source <v1-dir> --destination <new-dir> [--preview] [--descriptions <json>]",
-  "                                              格式 1 → 格式 2，目标必须不存在",
-  "",
   "Workspace / service:",
-  "  init <path> [--name <name>] [--format <1|2>]  新建工作区（默认格式 2，不覆盖已有目录）",
+  "  init <path> [--name <name>]                   新建工作区（不覆盖已有目录）",
   "  serve --workspace <path> [--port <port>]      启动本机服务（默认 127.0.0.1:4317）",
   "  whoami --workspace <path>                     核对服务与磁盘身份",
   "",
@@ -53,7 +49,7 @@ export const USAGE = [
 ].join("\n");
 
 export const COMMAND_USAGE: Record<string, string> = {
-  init: "aichat init <path> [--name <name>] [--format <1|2>] [--json|--text]",
+  init: "aichat init <path> [--name <name>] [--json|--text]",
   serve: "aichat serve --workspace <path> [--port <port>] [--json|--text]",
   topics: "aichat topics --workspace <path> [--json|--text]",
   search:
@@ -100,10 +96,6 @@ export const COMMAND_USAGE: Record<string, string> = {
   apply: "aichat apply --input <json> --workspace <path> [--json|--text]",
   status: "aichat status <requestId|--input <json>> --workspace <path> [--json|--text]",
   whoami: "aichat whoami --workspace <path> [--json|--text]",
-  migrate: [
-    "aichat migrate --source <v1-dir> --destination <new-dir> [--preview]",
-    "                 [--descriptions <nodeId→description JSON>] [--json|--text]",
-  ].join("\n"),
 };
 
 export function usageFor(command: string | undefined): string {
@@ -118,6 +110,6 @@ export function briefUsage(command: string | undefined): string {
   if (command && COMMAND_USAGE[command]) return "Usage: " + COMMAND_USAGE[command];
   return (
     "Usage: aichat <command> [options]\n" +
-    "Commands: init serve topics search read validate edit branch next connect rearrange important create-root create-topic migrate check apply status whoami"
+    "Commands: init serve topics search read validate edit branch next connect rearrange important create-root create-topic check apply status whoami"
   );
 }

@@ -255,45 +255,6 @@ describe("POST /api/importance", () => {
     const after = await graphOf(handle.url);
     expect(after.revision).toBe(before.revision);
   });
-
-  it("格式 1 工作区明确拒绝（不新增写入口）", async () => {
-    const parent = await fs.mkdtemp(path.join(os.tmpdir(), "aichat-importance-v1-"));
-    temporaryRoots.push(parent);
-    const root = path.join(parent, "workspace");
-    await initWorkspace({ root, name: "v1", schemaVersion: 1 });
-    const topicId = "t_" + "4".repeat(32);
-    await fs.writeFile(
-      path.join(root, "topics", "topic.md"),
-      [
-        "---",
-        "schemaVersion: 1",
-        "topicId: " + topicId,
-        "title: 条目整理",
-        "nodes:",
-        "  " + ROOT_NODE + ":",
-        "    from: null",
-        "    flow: root",
-        "    state: agreed",
-        "---",
-        "",
-        "## 记录的目的 <!-- node:" + ROOT_NODE + " -->",
-        "",
-        "根节点正文。",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    const handle = await startService({ root, port: await freePort() });
-    running.push(handle);
-    const response = await fetch(handle.url + "/api/importance", {
-      method: "POST",
-      headers: writeHeaders(),
-      body: JSON.stringify({ topicId, nodeId: ROOT_NODE, important: true }),
-    });
-    expect(response.status).toBe(409);
-    const body = (await response.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("OPERATION_CONFLICT");
-  });
 });
 
 describe("GraphResponse.lastChanges", () => {
@@ -323,11 +284,18 @@ describe("GraphResponse.lastChanges", () => {
     expect((await graphOf(handle.url)).lastChanges).toBeUndefined();
 
     const edited = await editNode(handle, NEXT_NODE, { append: "\n\n追加一段。" });
+    const respondedAt = Date.now();
     expect(edited.status).toBe(200);
     const first = (await graphOf(handle.url)).lastChanges?.[TOPIC_ID];
     expect(first?.nodeIds).toEqual([NEXT_NODE]);
     expect(typeof first?.at).toBe("string");
     expect(Number.isNaN(Date.parse(first?.at ?? ""))).toBe(false);
+
+    // 时序：记录在提交链路内写盘，提交响应到达时文件已存在且时间不晚于响应。
+    const recordAfterFirst = JSON.parse(
+      await fs.readFile(path.join(root, ".aichat", "runtime", "last-change.json"), "utf8"),
+    ) as { topics: Record<string, { at: string }> };
+    expect(Date.parse(recordAfterFirst.topics[TOPIC_ID]?.at ?? "")).toBeLessThanOrEqual(respondedAt);
 
     // 纯读取：graph／节点详情／主题详情都不改变标记。
     await graphOf(handle.url);

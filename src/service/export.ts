@@ -38,7 +38,7 @@ import {
   type ExportConfigStore,
   type ExportPendingRecord,
   type ExportTargetRecord,
-} from "./exportConfig.js";
+} from "./export-config.js";
 import type { WorkspaceRuntime } from "./workspace.js";
 import { isAbsoluteHtml, resolveTarget, targetInsideRoots } from "./export/targets.js";
 import { buildTopicDocument } from "./export/document.js";

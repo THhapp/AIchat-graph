@@ -5,10 +5,10 @@ import path from "node:path";
 import {
   commitFiles,
   initWorkspace,
-  prepareChangesV2,
+  prepareChanges,
   readWorkspaceFiles,
-  type V2ChangeRequest,
-  type V2Operation,
+  type ChangeRequest,
+  type Operation,
 } from "../../src/storage/index.js";
 
 /**
@@ -84,9 +84,9 @@ async function newWorkspace(): Promise<string> {
   return fs.realpath(root);
 }
 
-async function prepare(root: string, operations: V2Operation[]) {
+async function prepare(root: string, operations: Operation[]) {
   const files = await readWorkspaceFiles(root);
-  const request: V2ChangeRequest = {
+  const request: ChangeRequest = {
     workspaceId: files.workspace.workspaceId,
     requestId: "00000000-0000-4000-8000-000000000001",
     expectedFiles: {
@@ -95,7 +95,7 @@ async function prepare(root: string, operations: V2Operation[]) {
     },
     operations,
   };
-  return { files, prepared: prepareChangesV2(files, request) };
+  return { files, prepared: prepareChanges(files, request) };
 }
 
 describe("setImportance 候选变换", () => {
@@ -145,7 +145,7 @@ describe("setImportance 候选变换", () => {
   it("删除节点只计入 changedNodeIds，不算内容更新", async () => {
     const root = await newWorkspace();
     const files = await readWorkspaceFiles(root);
-    const prepared = prepareChangesV2(files, {
+    const prepared = prepareChanges(files, {
       workspaceId: files.workspace.workspaceId,
       requestId: "00000000-0000-4000-8000-000000000002",
       expectedFiles: {

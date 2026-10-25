@@ -3,7 +3,7 @@ import type {
   ExportsResponse,
   TopicExportStatus,
 } from '../../shared/protocol.js';
-import { ApiError, errorMessage, getJson } from './client.js';
+import { ApiError, getJson } from './client.js';
 
 /**
  * Export target/status calls go through the local service. The page never writes
@@ -90,5 +90,3 @@ export function describeExportFreshness(status: TopicExportStatus): string {
   if (status.exportedFingerprint === status.sourceFingerprint) return '成品与当前源一致';
   return '成品来自较早的源版本';
 }
-
-export { errorMessage };

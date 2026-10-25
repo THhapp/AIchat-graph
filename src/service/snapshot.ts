@@ -19,7 +19,6 @@ import type {
 import type {
   ParsedNode,
   ParsedTopic,
-  SupportedSchemaVersion,
   WorkspaceGraph,
   WorkspaceMeta,
 } from "../core/index.js";
@@ -43,7 +42,7 @@ export interface SnapshotResourceFile {
 export interface TopicSnapshot {
   readonly topicId: string;
   readonly title: string;
-  /** 主题入口文件（V2 为 topic.md；V1 为该主题文件）。 */
+  /** 主题入口文件（topic.md）。 */
   readonly path: string;
   /** 与 raw 对应的磁盘原始字节 SHA-256。 */
   readonly fileHash: string;
@@ -52,7 +51,7 @@ export interface TopicSnapshot {
   readonly files: readonly SnapshotSourceFile[];
   /** 该主题全部源文件的合并哈希；任何节点文件变化都会改变它。 */
   readonly contentHash: string;
-  /** 按源文件顺序（V2 按目录＋路径，V1 按正文顺序）。 */
+  /** 按目录＋路径的稳定顺序。 */
   readonly nodes: readonly ParsedNode[];
   /** 已解析资源键（Markdown 中出现的引用）→ data URI。 */
   readonly resources: Record<string, string>;
@@ -64,8 +63,7 @@ export interface TopicSnapshot {
 export interface SnapshotData {
   readonly workspaceId: string;
   readonly name: string;
-  readonly schemaVersion: SupportedSchemaVersion;
-  readonly topicMode?: "isolated" | "shared";
+  readonly schemaVersion: 2;
   readonly activeNode: string | null;
   readonly workspaceHash: string;
   readonly graph: WorkspaceGraph;
@@ -147,17 +145,13 @@ export function buildSnapshot(input: {
     const source: IndexTopicSource & {
       fileHashes?: Record<string, string>;
       sourcePaths?: readonly string[];
-      schemaVersion?: SupportedSchemaVersion;
     } = {
       topicId: topic.topicId,
-      title: topic.title,
       path: topic.path,
       fileHash: topic.fileHash,
-      raw: topic.raw,
       nodes: topic.nodes,
       fileHashes: Object.fromEntries(topic.files.map((file) => [file.path, file.fileHash])),
       sourcePaths: topic.files.map((file) => file.path),
-      schemaVersion: input.workspace.schemaVersion,
     };
     return source;
   });
@@ -180,8 +174,7 @@ export function buildSnapshot(input: {
   return {
     workspaceId: input.workspace.workspaceId,
     name: input.workspace.name,
-    schemaVersion: input.workspace.schemaVersion,
-    topicMode: input.workspace.topicMode ?? "shared",
+    schemaVersion: 2,
     activeNode: input.workspace.activeNode,
     workspaceHash: input.workspaceHash,
     graph: input.graph,
@@ -201,14 +194,11 @@ export function buildSnapshot(input: {
 export function emptySnapshot(
   workspaceId: string,
   name: string,
-  schemaVersion: SupportedSchemaVersion = 2,
-  topicMode: "isolated" | "shared" = "shared",
 ): SnapshotData {
   const graph: WorkspaceGraph = {
     workspaceId,
     name,
     activeNode: null,
-    rootId: null,
     rootIds: [],
     topics: [],
     nodes: [],
@@ -217,8 +207,7 @@ export function emptySnapshot(
   return {
     workspaceId,
     name,
-    schemaVersion,
-    topicMode,
+    schemaVersion: 2,
     activeNode: null,
     workspaceHash: "",
     graph,
@@ -234,7 +223,7 @@ export function findTopic(snapshot: SnapshotData, topicId: string): TopicSnapsho
   return snapshot.topics.find((topic) => topic.topicId === topicId);
 }
 
-/** 节点真实源文件的冻结副本；V1 与主题入口相同。 */
+/** 节点真实源文件的冻结副本。 */
 export function sourceFileOf(snapshot: SnapshotData, nodeId: string): SnapshotSourceFile | undefined {
   const node = snapshot.graph.nodes.find((entry) => entry.id === nodeId);
   if (node === undefined) return undefined;
@@ -242,8 +231,28 @@ export function sourceFileOf(snapshot: SnapshotData, nodeId: string): SnapshotSo
   return topic?.files.find((file) => file.path === node.sourcePath);
 }
 
-export function toGraphNode(node: WorkspaceGraph["nodes"][number]): GraphNode {
-  const described = node.description !== undefined ? { description: node.description } : {};
+/**
+ * 服务端唯一的节点投影输入：图节点、解析节点和磁盘详情回退节点都按这组字段投影。
+ * number 由调用方提供（回退节点用空字符串，绝不借用其他编号）。
+ */
+export interface GraphNodeSource {
+  readonly id: string;
+  readonly topicId: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly number: string;
+  readonly from: string | null;
+  readonly flow: NodeFlow;
+  readonly state: NodeState;
+  readonly important: boolean;
+  readonly description?: string | undefined;
+  readonly side?: BranchSide | undefined;
+  readonly order?: number | undefined;
+  readonly sourcePath?: string | undefined;
+}
+
+/** 节点 → 传输／快照 DTO；description 是唯一的连接文字。 */
+export function toGraphNode(node: GraphNodeSource): GraphNode {
   return {
     id: node.id,
     topicId: node.topicId,
@@ -251,15 +260,13 @@ export function toGraphNode(node: WorkspaceGraph["nodes"][number]): GraphNode {
     summary: node.summary,
     number: node.number,
     from: node.from,
-    flow: node.flow as NodeFlow,
-    state: node.state as NodeState,
+    flow: node.flow,
+    state: node.state,
     important: node.important,
-    ...described,
-    ...(node.side !== undefined ? { side: node.side as BranchSide } : {}),
+    ...(node.description !== undefined ? { description: node.description } : {}),
+    ...(node.side !== undefined ? { side: node.side } : {}),
     ...(node.order !== undefined ? { order: node.order } : {}),
-    // label 仅格式 1 兼容；格式 2 的来源说明走 description。
-    ...(node.description === undefined && node.label !== undefined ? { label: node.label } : {}),
-    sourcePath: node.sourcePath,
+    ...(node.sourcePath !== undefined ? { sourcePath: node.sourcePath } : {}),
   };
 }
 
@@ -297,7 +304,6 @@ function nodeSignature(node: ParsedNode): string {
     node.side ?? null,
     node.order ?? null,
     node.important,
-    node.label ?? null,
   ]);
 }
 

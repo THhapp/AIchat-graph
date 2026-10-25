@@ -2,7 +2,7 @@ import { workspaceMetaSchema } from "./schema.js";
 import type { WorkspaceMeta } from "./schema.js";
 import { makeDiagnostic } from "./diagnostics.js";
 import type { Diagnostic, DiagnosticContext } from "./diagnostics.js";
-import type { ParsedNode, ParsedTopic } from "./parser.js";
+import type { ParsedNode, ParsedTopic } from "./model.js";
 
 export interface WorkspaceTopicView {
   readonly topicId: string;
@@ -26,9 +26,7 @@ export interface WorkspaceNodeSummary {
   readonly from: string | null;
   readonly side?: ParsedNode["side"] | undefined;
   readonly order?: number | undefined;
-  /** 重要标记（格式 2 源字段）；格式 1 恒为 false。 */
   readonly important: boolean;
-  readonly label?: string | undefined;
   readonly number: string;
   readonly nextId: string | null;
   readonly branchIds: readonly string[];
@@ -50,11 +48,10 @@ export interface WorkspaceGraph {
   readonly workspaceId: string;
   readonly name: string;
   readonly activeNode: string | null;
-  /** 仅单根时有值；隔离多主题或空工作区为 null。 */
-  readonly rootId: string | null;
-  readonly rootIds?: readonly string[];
+  /** 各主题的 root ID，按 ID 排序；空工作区为空数组。 */
+  readonly rootIds: readonly string[];
   readonly topics: readonly WorkspaceTopicView[];
-  /** 按派生编号稳定排序；含正文，调用方可用 toNodeSummary 转成轻量视图。 */
+  /** 按主题与派生编号稳定排序；含正文，调用方可用 toNodeSummary 转成轻量视图。 */
   readonly nodes: readonly WorkspaceNodeView[];
 }
 
@@ -90,9 +87,9 @@ function nodeContext(node: ParsedNode): DiagnosticContext {
   return { topicPath: node.topicPath, topicId: node.topicId, nodeId: node.id };
 }
 
-/** 优先报节点真实文件内的位置；V2 没有 heading 范围时回退到节点整块起点。 */
+/** 节点范围即整个节点文件，可直接定位回源文件。 */
 function locate(node: ParsedNode): { start: number; end: number } {
-  return node.ranges.heading ?? node.ranges.node;
+  return node.ranges.node;
 }
 
 function padding(value: number): string {
@@ -125,7 +122,6 @@ export function toNodeSummary(node: WorkspaceNodeView): WorkspaceNodeSummary {
     ...(node.side !== undefined ? { side: node.side } : {}),
     ...(node.order !== undefined ? { order: node.order } : {}),
     important: node.important,
-    ...(node.label !== undefined ? { label: node.label } : {}),
     number: node.number,
     nextId: node.nextId,
     branchIds: node.branchIds,
@@ -134,6 +130,7 @@ export function toNodeSummary(node: WorkspaceNodeView): WorkspaceNodeSummary {
 
 /**
  * 校验整个工作区并派生编号。core 只处理内存数据，不读文件、不写文件。
+ * 固定 isolated：每个非空主题恰好一个 root，禁止跨主题连接。
  * 失败时不返回 graph，避免调用方把部分结构误当成有效图。
  */
 export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorkspaceResult {
@@ -148,7 +145,6 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
     return { ok: false, diagnostics };
   }
   const workspace = workspaceParsed.data;
-  const isolated = workspace.topicMode === "isolated";
 
   const nodesById = new Map<string, IndexedNode>();
   const topicIds = new Set<string>();
@@ -225,7 +221,7 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
         diagnose(node, "NODE_FROM_UNKNOWN", "from 指向不存在的节点 " + node.from);
         continue;
       }
-      if (isolated && nodeById.get(node.from)?.topicId !== node.topicId) {
+      if (nodeById.get(node.from)?.topicId !== node.topicId) {
         diagnose(node, "NODE_CROSS_TOPIC", "隔离主题不能连接其他主题的节点 " + node.from);
         continue;
       }
@@ -235,26 +231,14 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
     }
   }
 
-  if (isolated) {
-    for (const topic of input.topics) {
-      const topicRoots = roots.filter((node) => node.topicId === topic.topicId);
-      if (topic.nodes.length > 0 && topicRoots.length === 0) {
-        diagnostics.push(makeDiagnostic("NODE_ROOT_MISSING", "非空主题必须恰好有一个 root", {
-          topicId: topic.topicId, topicPath: topic.document.path,
-        }));
-      } else if (topicRoots.length > 1) {
-        for (const root of topicRoots) diagnose(root, "NODE_ROOT_MULTIPLE", "每个主题只能有一个 root");
-      }
-    }
-  } else if (allNodes.length > 0) {
-    if (roots.length === 0) {
-      diagnostics.push(
-        makeDiagnostic("NODE_ROOT_MISSING", "非空工作区必须恰好有一个 root 节点"),
-      );
-    } else if (roots.length > 1) {
-      for (const root of roots) {
-        diagnose(root, "NODE_ROOT_MULTIPLE", "非空工作区只能有一个 root；发现 " + roots.length + " 个");
-      }
+  for (const topic of input.topics) {
+    const topicRoots = roots.filter((node) => node.topicId === topic.topicId);
+    if (topic.nodes.length > 0 && topicRoots.length === 0) {
+      diagnostics.push(makeDiagnostic("NODE_ROOT_MISSING", "非空主题必须恰好有一个 root", {
+        topicId: topic.topicId, topicPath: topic.document.path,
+      }));
+    } else if (topicRoots.length > 1) {
+      for (const root of topicRoots) diagnose(root, "NODE_ROOT_MULTIPLE", "每个主题只能有一个 root");
     }
   }
 
@@ -312,20 +296,17 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
     for (const id of path) cycleVisited.add(id);
   }
 
-  const rootNode = roots.length === 1 ? roots[0] : undefined;
   const reachable = new Set<string>();
-  if (isolated || rootNode) {
-    const queue: ParsedNode[] = isolated ? [...roots] : [rootNode as ParsedNode];
-    while (queue.length > 0) {
-      const current = queue.shift() as ParsedNode;
-      if (reachable.has(current.id)) continue;
-      reachable.add(current.id);
-      for (const child of childrenOf.get(current.id) ?? []) queue.push(child);
-    }
-    for (const node of allNodes) {
-      if (!reachable.has(node.id)) {
-        diagnose(node, "NODE_UNREACHABLE", "节点不能从 root 到达");
-      }
+  const queue: ParsedNode[] = [...roots];
+  while (queue.length > 0) {
+    const current = queue.shift() as ParsedNode;
+    if (reachable.has(current.id)) continue;
+    reachable.add(current.id);
+    for (const child of childrenOf.get(current.id) ?? []) queue.push(child);
+  }
+  for (const node of allNodes) {
+    if (!reachable.has(node.id)) {
+      diagnose(node, "NODE_UNREACHABLE", "节点不能从所在主题的 root 到达");
     }
   }
 
@@ -392,7 +373,8 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
     return counter;
   };
 
-  for (const root of isolated ? roots : rootNode ? [rootNode] : []) assignChain(root.id, null, 1);
+  // 隔离主题各自从 01 起编号；root 顺序不影响编号结果。
+  for (const root of roots) assignChain(root.id, null, 1);
 
   if (numberCollision || numbers.size !== allNodes.length) {
     return {
@@ -420,13 +402,16 @@ export function validateWorkspace(input: ValidateWorkspaceInput): ValidateWorksp
         branchIds: branches,
       };
     })
-    .sort((left, right) => (isolated ? left.topicId.localeCompare(right.topicId) : 0) || byNumberSegments(left.number, right.number));
+    .sort(
+      (left, right) =>
+        (left.topicId < right.topicId ? -1 : left.topicId > right.topicId ? 1 : 0) ||
+        byNumberSegments(left.number, right.number),
+    );
 
   const graph: WorkspaceGraph = {
     workspaceId: workspace.workspaceId,
     name: workspace.name,
     activeNode: workspace.activeNode,
-    rootId: rootNode ? rootNode.id : null,
     rootIds: roots.map((node) => node.id).sort(),
     topics: topicViews,
     nodes: views,

@@ -1,15 +1,21 @@
 /**
  * 进程内 Unicode 子串检索，不依赖分词与数据库。
  *
- * 排序：标题精确 > 标题包含 > 摘要包含 > 正文命中；同档次按图的稳定编号顺序。
- * 查询与命中数都有上限，避免一次搜索把整库塞给调用方。
+ * 排序：标题精确 > 标题包含 > 摘要包含 > 正文命中；同档次按文档顺序。
+ * searchIndex 是服务端索引的薄包装，CLI 等其他调用方直接传文档数组，
+ * 共用同一套匹配、排序与 snippet 规则。
  */
 import type { SearchField, SearchHit } from "../shared/protocol.js";
-import type { SearchIndex, SearchOutcome, SearchDocument } from "./types.js";
+import type {
+  SearchIndex,
+  SearchOutcome,
+  SearchDocument,
+  SearchDocumentsOptions,
+} from "./types.js";
 
 /** 查询最多保留的码点数；超出直接拒绝，由调用方报 400。 */
 export const MAX_QUERY_LENGTH = 128;
-/** 单次返回的命中上限。 */
+/** 服务端索引单次返回的命中上限。 */
 export const MAX_SEARCH_RESULTS = 50;
 /** 摘要片段在命中位置前后各保留的码点数。 */
 const SNIPPET_RADIUS = 40;
@@ -74,16 +80,29 @@ function matchField(document: SearchDocument, query: string): { field: SearchFie
   return null;
 }
 
+function normalizeBound(value: number | undefined, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new RangeError(name + " 必须是非负整数");
+  }
+  return value;
+}
+
 /**
- * 检索一份索引。空查询返回空结果（调用方仍可返回 200），
- * 结果按 rank、图的稳定顺序排序；超过上限时 truncated=true。
+ * 检索一组文档。空查询返回空结果（调用方仍可返回 200）。
+ * 命中先按 rank、再按文档顺序排序；offset/limit 切出返回窗口，
+ * totalHits 是全部命中数，truncated 表示窗口之后仍有命中。
  */
-export function searchIndex(index: SearchIndex, rawQuery: string): SearchOutcome {
+export function searchDocuments(
+  documents: readonly SearchDocument[],
+  rawQuery: string,
+  options: SearchDocumentsOptions = {},
+): SearchOutcome {
   const query = normalizeQuery(rawQuery);
-  if (query.length === 0) return { hits: [], truncated: false };
+  if (query.length === 0) return { hits: [], totalHits: 0, truncated: false };
 
   const ranked: RankedHit[] = [];
-  index.documents.forEach((document, position) => {
+  documents.forEach((document, position) => {
     const match = matchField(document, query);
     if (match === null) return;
     const source = match.field === "title" ? document.title : match.field === "summary" ? document.summary : document.body;
@@ -102,6 +121,14 @@ export function searchIndex(index: SearchIndex, rawQuery: string): SearchOutcome
   });
 
   ranked.sort((left, right) => (left.rank !== right.rank ? left.rank - right.rank : left.index - right.index));
-  const hits = ranked.slice(0, MAX_SEARCH_RESULTS).map((entry) => entry.hit);
-  return { hits, truncated: ranked.length > hits.length };
+  const offset = normalizeBound(options.offset, "offset") ?? 0;
+  const limit = normalizeBound(options.limit, "limit");
+  const end = limit === undefined ? ranked.length : offset + limit;
+  const hits = ranked.slice(offset, end).map((entry) => entry.hit);
+  return { hits, totalHits: ranked.length, truncated: offset + hits.length < ranked.length };
+}
+
+/** 服务端索引检索：默认最多返回 50 条。 */
+export function searchIndex(index: SearchIndex, rawQuery: string): SearchOutcome {
+  return searchDocuments(index.documents, rawQuery, { limit: MAX_SEARCH_RESULTS });
 }

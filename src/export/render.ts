@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
 import { ExportError } from './errors.js';
+import { sha256Bytes } from '../storage/hash.js';
 import {
   EXPORT_DATA_ELEMENT_ID,
   EXPORT_FORMAT_VERSION,
@@ -65,7 +65,7 @@ export function computeContentFingerprint(document: ExportDocumentLike): string 
   const record = document as unknown as Record<string, unknown>;
   const content: Record<string, unknown> = {};
   for (const field of CONTENT_FIELDS) content[field] = record[field];
-  return sha256(stableStringify(content));
+  return sha256Bytes(stableStringify(content));
 }
 
 /** 转义为可安全放进 <script type="application/json"> 的文本。 */
@@ -88,10 +88,6 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function sha256(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
-}
-
 /**
  * 计算成品指纹。
  * - contentFingerprint 由内容字段独立计算，不读 document.fingerprint。
@@ -111,8 +107,8 @@ export function computeExportFingerprints(input: RenderTopicHtmlInput): ExportFi
       'document.fingerprint 与当前内容指纹不一致；请先用 computeContentFingerprint 填充',
     );
   }
-  const readerFingerprint = sha256(input.readerScript + '\u0000' + input.readerStyles);
-  const exportFingerprint = sha256(
+  const readerFingerprint = sha256Bytes(input.readerScript + '\u0000' + input.readerStyles);
+  const exportFingerprint = sha256Bytes(
     contentFingerprint + '\u0000' + readerFingerprint + '\u0000' + String(EXPORT_FORMAT_VERSION),
   );
   return { contentFingerprint, readerFingerprint, exportFingerprint };

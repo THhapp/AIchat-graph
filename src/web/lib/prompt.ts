@@ -50,7 +50,7 @@ export function buildContinuationPrompt(context: ContinuationContext): string {
   lines.push('');
   lines.push('读取指引：');
   lines.push('1. 读取同版本 Skill，核对 workspace.json 和上述工作区身份。本对话绑定上述 topicId／主题目录；之后前端切换主题不会自动改变本对话的记录目标。');
-  lines.push('2. 读取本主题相关源 Markdown，按需使用 CLI 定位、分段读取和受控修改。格式 2 的 topic.md 是元数据，每节点有独立 Markdown；旧格式以实际 schemaVersion 为准。结构顺序由 from／flow 决定，不按文件名或聊天轮次推断。');
+  lines.push('2. 读取本主题相关源 Markdown，按需使用 CLI 定位、分段读取和受控修改。topic.md 是元数据，每节点有独立 Markdown。结构顺序由 from／flow 决定，不按文件名或聊天轮次推断。');
   lines.push('3. 新增与修改保持在绑定主题内，不把全库 activeNode 当作其他主题的默认写入目标。需要切换记录主题时先取得用户明确指示。');
   lines.push('4. 正常继续讨论并按需整理，无实质变化不必写入，也不要求每轮操作汇报。修改须依据实际读取凭据，冲突重新读取，不直接覆盖。');
   return lines.join('\n');

@@ -158,7 +158,10 @@ export function buildOrthogonalPath(
   return path;
 }
 
-/** Length of the drawn path measured from the first point. */
+/**
+ * Length of the drawn path measured from the first point.
+ * Exported for the path-length regression test; no production caller.
+ */
 export function pathLength(points: readonly LayoutPoint[], radius: number = EDGE_CORNER_RADIUS): number {
   const pieces = buildPieces(points, radius);
   const last = pieces[pieces.length - 1];

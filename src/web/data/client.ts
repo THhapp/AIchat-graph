@@ -55,10 +55,6 @@ export async function getJson<T>(path: string, signal: AbortSignal): Promise<T> 
   return body as T;
 }
 
-export function errorCode(error: unknown): string | null {
-  return error instanceof ApiError ? error.code : null;
-}
-
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;

@@ -2,15 +2,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseTopicDocument } from "../../src/core/index.js";
 import {
   ChangeError,
+  changeRequestSchema,
+  commitFiles,
+  flattenChangeRequestIssues,
+  initWorkspace,
   prepareChanges,
+  readWorkspaceFiles,
+  recoverTransactions,
   type ChangeRequest,
   type Operation,
-} from "../../src/storage/changes.js";
-import { initWorkspace, readWorkspaceFiles, sha256Bytes } from "../../src/storage/index.js";
-import type { WorkspaceFiles } from "../../src/storage/workspace.js";
+} from "../../src/storage/index.js";
 
 const temporaryRoots: string[] = [];
 
@@ -22,525 +25,238 @@ afterEach(async () => {
 
 const ROOT_ID = "n_00000000000000000000000000000001";
 const CHILD_ID = "n_00000000000000000000000000000002";
-const NEXT_ID = "n_00000000000000000000000000000003";
-const BRANCH_ID = "n_00000000000000000000000000000004";
-const OTHER_ID = "n_00000000000000000000000000000005";
-const TOPIC_A = "t_0000000000000000000000000000000a";
-const TOPIC_B = "t_0000000000000000000000000000000b";
+const BRANCH_ID = "n_00000000000000000000000000000003";
+const TOPIC_ID = "t_0000000000000000000000000000000a";
+const TOPIC_ID_2 = "t_0000000000000000000000000000000b";
 
-interface TopicNodeFixture {
-  id: string;
+function nodeFile(options: {
+  nodeId: string;
   title: string;
-  body?: string;
+  state?: string;
   from?: string | null;
   flow?: "root" | "next" | "branch";
-  state?: "agreed" | "proposed" | "reference";
+  description?: string;
   side?: "left" | "right";
   order?: number;
-  label?: string;
-  summary?: string;
-}
-
-function buildTopic(options: {
-  topicId: string;
-  title: string;
-  nodes: TopicNodeFixture[];
+  body?: string;
   nl?: string;
-  bom?: boolean;
 }): string {
   const nl = options.nl ?? "\n";
-  const lines: string[] = ["schemaVersion: 1", "topicId: " + options.topicId, "title: " + options.title];
-  if (options.nodes.length === 0) lines.push("nodes: {}");
-  else {
-    lines.push("nodes:");
-    for (const node of options.nodes) {
-      lines.push("  " + node.id + ":");
-      lines.push("    from: " + (node.from === undefined || node.from === null ? "null" : node.from));
-      lines.push("    flow: " + (node.flow ?? "next"));
-      lines.push("    state: " + (node.state ?? "proposed"));
-      if (node.side !== undefined) lines.push("    side: " + node.side);
-      if (node.order !== undefined) lines.push("    order: " + node.order);
-      if (node.label !== undefined) lines.push("    label: " + JSON.stringify(node.label));
-      if (node.summary !== undefined) lines.push("    summary: " + JSON.stringify(node.summary));
-    }
-  }
-  const parts = ["---", ...lines, "---", ""];
-  for (const node of options.nodes) {
-    parts.push("## " + node.title + " <!-- node:" + node.id + " -->", "");
-    if (node.body !== undefined) parts.push(node.body, "");
-  }
-  const text = parts.join(nl) + nl;
-  return (options.bom ? "\uFEFF" : "") + text;
+  const lines = [
+    "---",
+    "nodeId: " + options.nodeId,
+    "title: " + options.title,
+    "state: " + (options.state ?? "proposed"),
+    "from: " + (options.from ?? "null"),
+    "flow: " + (options.flow ?? "next"),
+  ];
+  if (options.description !== undefined) lines.push("description: " + options.description);
+  if (options.side !== undefined) lines.push("side: " + options.side);
+  if (options.order !== undefined) lines.push("order: " + options.order);
+  lines.push("---", "");
+  if (options.body !== undefined) lines.push(options.body, "");
+  return lines.join(nl) + nl;
 }
 
-const ROOT_NODE: TopicNodeFixture = {
-  id: ROOT_ID,
-  title: "根节点",
-  body: "根节点正文。",
-  flow: "root",
-  from: null,
-  state: "agreed",
-};
+function topicMeta(topicId: string, title: string): string {
+  return "---\ntopicId: " + topicId + "\ntitle: " + title + "\n---\n";
+}
 
-const CHILD_NODE: TopicNodeFixture = {
-  id: CHILD_ID,
-  title: "子节点",
-  body: "子节点正文。",
-  from: ROOT_ID,
-  flow: "next",
-  state: "agreed",
-};
-
-async function newFiles(
-  topics: Record<string, string>,
-  workspaceOverride?: Record<string, unknown>,
-): Promise<{ files: WorkspaceFiles; root: string }> {
+async function newWorkspace(topics: Record<string, Record<string, string>>): Promise<{
+  root: string;
+  files: Awaited<ReturnType<typeof readWorkspaceFiles>>;
+}> {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), "aichat-changes-"));
   temporaryRoots.push(parent);
   const root = path.join(parent, "ws");
-  // 本文件全部是格式 1（一个主题文件内多张卡）的候选用例：显式要求格式 1。
-  const { workspaceId } = await initWorkspace({ root, name: "changes-test", schemaVersion: 1 });
-  for (const [relative, content] of Object.entries(topics)) {
-    const target = path.join(root, ...relative.split("/"));
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, content, "utf8");
+  await initWorkspace({ root, name: "changes-test" });
+  for (const [dir, files] of Object.entries(topics)) {
+    const target = path.join(root, "topics", dir);
+    await fs.mkdir(target, { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      await fs.writeFile(path.join(target, name), content, "utf8");
+    }
   }
-  if (workspaceOverride) {
-    const identity = JSON.parse(await fs.readFile(path.join(root, "workspace.json"), "utf8")) as Record<string, unknown>;
-    await fs.writeFile(
-      path.join(root, "workspace.json"),
-      JSON.stringify({ ...identity, ...workspaceOverride }, null, 2) + "\n",
-      "utf8",
-    );
-  }
-  const files = await readWorkspaceFiles(root);
-  expect(files.workspace.workspaceId).toBe(workspaceId);
-  return { files, root };
+  return { root, files: await readWorkspaceFiles(root) };
 }
 
-function expectedAll(files: WorkspaceFiles, overrides: Record<string, string | null> = {}): Record<string, string | null> {
+function expectedAll(files: Awaited<ReturnType<typeof readWorkspaceFiles>>): Record<string, string | null> {
   const declared: Record<string, string | null> = { "workspace.json": files.workspaceFile.sha256 };
   for (const topic of files.topics) declared[topic.path] = topic.sha256;
-  return { ...declared, ...overrides };
+  return declared;
 }
 
 function request(
-  files: WorkspaceFiles,
+  files: Awaited<ReturnType<typeof readWorkspaceFiles>>,
   operations: Operation[],
-  options: { expectedFiles?: Record<string, string | null>; workspaceId?: string } = {},
+  overrides: Record<string, string | null> = {},
 ): ChangeRequest {
   return {
-    workspaceId: options.workspaceId ?? files.workspace.workspaceId,
+    workspaceId: files.workspace.workspaceId,
     requestId: crypto.randomUUID(),
-    expectedFiles: options.expectedFiles ?? expectedAll(files),
+    expectedFiles: { ...expectedAll(files), ...overrides },
     operations,
   };
 }
 
-function fileOf(changes: ReturnType<typeof prepareChanges>, filePath: string) {
-  return changes.files.find((file) => file.path === filePath);
-}
+const BASE_TOPIC = {
+  "topic.md": topicMeta(TOPIC_ID, "协作方式"),
+  [ROOT_ID + ".md"]: nodeFile({
+    nodeId: ROOT_ID,
+    title: "根节点",
+    flow: "root",
+    state: "agreed",
+    body: "根节点正文。",
+  }),
+  [CHILD_ID + ".md"]: nodeFile({
+    nodeId: CHILD_ID,
+    title: "子节点",
+    from: ROOT_ID,
+    state: "agreed",
+    description: "从根节点继续",
+    body: "子节点正文。",
+  }),
+};
 
-function nodeBlock(text: string, nodeId: string): string {
-  const parsed = parseTopicDocument(text);
-  expect(parsed.ok).toBe(true);
-  const node = parsed.topic?.nodes.find((entry) => entry.id === nodeId);
-  expect(node).toBeDefined();
-  return text.slice(node!.ranges.node.start, node!.ranges.node.end);
-}
+describe("当前格式扫描与 init", () => {
+  it("新工作区默认 schemaVersion 2，节点是独立文件且无总表", async () => {
+    const parent = await fs.mkdtemp(path.join(os.tmpdir(), "aichat-changes-init-"));
+    temporaryRoots.push(parent);
+    const root = path.join(parent, "ws");
+    await initWorkspace({ root, name: "新工作区" });
+    const info = JSON.parse(await fs.readFile(path.join(root, "workspace.json"), "utf8")) as {
+      schemaVersion: number;
+    };
+    expect(info.schemaVersion).toBe(2);
+    expect(await fs.readdir(path.join(root, "topics"))).toEqual([]);
+    const agents = await fs.readFile(path.join(root, "AGENTS.md"), "utf8");
+    expect(agents).toContain("一个节点一份 Markdown");
+    expect(agents).toContain("description");
+    expect(agents).not.toContain("## 典型流程");
+  });
 
-describe("prepareChanges：局部更新保持相邻正文", () => {
-  it("中文😀与 CRLF 文件的正文局部更新不影响相邻卡片", async () => {
-    const topicText = buildTopic({
-      topicId: TOPIC_A,
-      title: "主题甲",
-      nl: "\r\n",
-      bom: true,
-      nodes: [
-        { ...ROOT_NODE, title: "根节点 😀", body: "第一段中文😀内容。\r\n\r\n- 列表项一\r\n- 列表项二" },
-        { ...CHILD_NODE, title: "子节点", body: "子节点正文，保持原样。" },
-      ],
-    });
-    const { files } = await newFiles({ "topics/a.md": topicText });
-    const before = nodeBlock(topicText, CHILD_ID);
+  it("扫描把 topic.md 与节点文件都当作原始事实", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    expect(files.workspace.schemaVersion).toBe(2);
+    expect(files.topics.map((file) => file.path).sort()).toEqual(
+      [
+        "topics/协作方式/" + CHILD_ID + ".md",
+        "topics/协作方式/" + ROOT_ID + ".md",
+        "topics/协作方式/topic.md",
+      ].sort(),
+    );
+  });
+});
 
-    const updated = "改写后的中文😀正文。\n\n### 内部三级标题\n\n细节说明。";
+describe("当前格式候选：局部修改与结构", () => {
+  it("patchNode 片段替换只改目标节点文件，其他节点逐字节不变", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
     const changes = prepareChanges(
       files,
-      request(files, [{ op: "updateNode", nodeId: ROOT_ID, body: updated, title: "根节点 😀 v2" }]),
+      request(files, [{ op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "根节点正文。", new: "改写后的根节点正文。" }] }]),
     );
-
-    const output = fileOf(changes, "topics/a.md");
-    expect(output?.content).toBeTypeOf("string");
-    const text = output!.content as string;
-    expect(text.startsWith("\uFEFF")).toBe(true);
-    expect(text).toContain("\r\n");
-    expect(text).not.toMatch(/[^\r]\n/);
-    expect(text).toContain("根节点 😀 v2");
-    expect(text).toContain("### 内部三级标题");
-    expect(nodeBlock(text, CHILD_ID)).toBe(before);
+    expect(changes.files.map((file) => file.path)).toEqual(["topics/协作方式/" + ROOT_ID + ".md"]);
+    expect(changes.files[0]!.content).toContain("改写后的根节点正文。");
     expect(changes.changedNodeIds).toEqual([ROOT_ID]);
-    expect(changes.files).toHaveLength(1);
-    expect(output?.expectedSha256).toBe(files.topics[0]?.sha256);
+    const childFile = files.topics.find((file) => file.path.endsWith(CHILD_ID + ".md"))!;
+    expect(changes.files.some((file) => file.path === childFile.path)).toBe(false);
   });
 
-  it("无实际变化的 updateNode 返回空文件列表", async () => {
-    const { files } = await newFiles({
-      "topics/a.md": buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE] }),
-    });
-    const changes = prepareChanges(files, request(files, [{ op: "updateNode", nodeId: ROOT_ID }]));
-    expect(changes.files).toEqual([]);
-    expect(changes.changedNodeIds).toEqual([]);
-  });
-});
-
-describe("prepareChanges：insertNext 跨文件重新连接", () => {
-  it("跨文件插入新节点时把原后继接回新节点", async () => {
-    const topicA = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE] });
-    const topicB = buildTopic({ topicId: TOPIC_B, title: "乙", nodes: [CHILD_NODE] });
-    const { files } = await newFiles({ "topics/a.md": topicA, "topics/b.md": topicB });
-
-    const changes = prepareChanges(
-      files,
-      request(files, [
-        {
-          op: "insertNext",
-          sourceId: ROOT_ID,
-          node: {
-            nodeId: NEXT_ID,
-            topicId: TOPIC_A,
-            title: "插入节点",
-            body: "插入正文。",
-            state: "proposed",
-          },
-        },
-      ]),
+  it("patchNode 的 old 不唯一或找不到时拒绝", async () => {
+    const topic = {
+      ...BASE_TOPIC,
+      [ROOT_ID + ".md"]: nodeFile({
+        nodeId: ROOT_ID,
+        title: "根节点",
+        flow: "root",
+        state: "agreed",
+        body: "重复片段。\n\n重复片段。",
+      }),
+    };
+    const { files } = await newWorkspace({ 协作方式: topic });
+    const run = (op: Operation) => {
+      try {
+        prepareChanges(files, request(files, [op]));
+        return null;
+      } catch (error) {
+        return error as ChangeError;
+      }
+    };
+    expect(run({ op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "重复片段。", new: "x" }] })?.code).toBe(
+      "OPERATION_CONFLICT",
     );
-
-    const changedA = parseTopicDocument(fileOf(changes, "topics/a.md")!.content as string);
-    const changedB = parseTopicDocument(fileOf(changes, "topics/b.md")!.content as string);
-    expect(changedA.ok && changedB.ok).toBe(true);
-    const inserted = changedA.topic!.nodes.find((node) => node.id === NEXT_ID);
-    const reconnected = changedB.topic!.nodes.find((node) => node.id === CHILD_ID);
-    expect(inserted?.from).toBe(ROOT_ID);
-    expect(inserted?.flow).toBe("next");
-    expect(reconnected?.from).toBe(NEXT_ID);
-    expect(changes.changedNodeIds).toEqual([NEXT_ID, CHILD_ID]);
-    expect(changes.files.map((file) => file.path).sort()).toEqual(["topics/a.md", "topics/b.md"]);
-  });
-});
-
-describe("prepareChanges：moveNodeToTopic 与空主题删除", () => {
-  it("保留节点 ID 并显式删除被清空的主题文件", async () => {
-    const topicA = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE] });
-    const topicB = buildTopic({ topicId: TOPIC_B, title: "乙", nodes: [CHILD_NODE] });
-    const { files } = await newFiles({ "topics/a.md": topicA, "topics/b.md": topicB });
-
-    const changes = prepareChanges(
-      files,
-      request(files, [{ op: "moveNodeToTopic", nodeId: CHILD_ID, topicId: TOPIC_A }]),
+    expect(run({ op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "不存在的片段", new: "x" }] })?.code).toBe(
+      "OPERATION_CONFLICT",
     );
-
-    expect(fileOf(changes, "topics/b.md")).toEqual({
-      path: "topics/b.md",
-      content: null,
-      expectedSha256: files.topics.find((file) => file.path === "topics/b.md")!.sha256,
-    });
-    const merged = parseTopicDocument(fileOf(changes, "topics/a.md")!.content as string);
-    expect(merged.ok).toBe(true);
-    expect(merged.topic!.nodes.map((node) => node.id)).toEqual([ROOT_ID, CHILD_ID]);
-    expect(merged.topic!.nodes[1]?.from).toBe(ROOT_ID);
-  });
-});
-
-describe("prepareChanges：前置哈希", () => {
-  it("缺少 workspace.json 声明时拒绝（409 details.missingFiles）", async () => {
-    const topicText = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE] });
-    const { files } = await newFiles({ "topics/a.md": topicText });
-    const expected = expectedAll(files);
-    delete expected["workspace.json"];
-
-    let error: unknown;
-    try {
-      prepareChanges(
-        files,
-        request(files, [{ op: "setDiscussionFocus", nodeId: ROOT_ID }], { expectedFiles: expected }),
-      );
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(ChangeError);
-    expect((error as ChangeError).code).toBe("OPERATION_CONFLICT");
-    expect((error as ChangeError).details?.["missingFiles"]).toEqual(["workspace.json"]);
   });
 
-  it("哈希不符时返回 412 冲突明细且不产生候选", async () => {
-    const topicText = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE] });
-    const { files } = await newFiles({ "topics/a.md": topicText });
-    const expected = expectedAll(files, { "topics/a.md": sha256Bytes("stale") });
-
-    let error: unknown;
-    try {
-      prepareChanges(
-        files,
-        request(files, [{ op: "setDiscussionFocus", nodeId: null }], { expectedFiles: expected }),
-      );
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(ChangeError);
-    const changeError = error as ChangeError;
-    expect(changeError.code).toBe("VERSION_CONFLICT");
-    const conflicts = changeError.details?.["conflicts"] as Array<Record<string, unknown>>;
-    expect(conflicts).toHaveLength(1);
-    expect(conflicts[0]).toMatchObject({
-      path: "topics/a.md",
-      expectedSha256: sha256Bytes("stale"),
-      actualSha256: files.topics[0]?.sha256,
-    });
-  });
-
-  it("未声明的新建文件目标路径与 workspaceId 不符都被拒绝", async () => {
-    const { files } = await newFiles({});
-    let mismatch: unknown;
-    try {
-      prepareChanges(files, request(files, [], { workspaceId: "w_other" }));
-    } catch (caught) {
-      mismatch = caught;
-    }
-    expect((mismatch as ChangeError).code).toBe("BAD_REQUEST");
-
-    let unknownField: unknown;
-    try {
-      prepareChanges(files, {
-        ...request(files, []),
-        extra: true,
-      } as unknown as ChangeRequest);
-    } catch (caught) {
-      unknownField = caught;
-    }
-    expect((unknownField as ChangeError).code).toBe("BAD_REQUEST");
-  });
-});
-
-describe("prepareChanges：replaceTopic 修复坏主题", () => {
-  it("用合法原文替换无法解析的主题，其他操作不得基于旧快照", async () => {
-    const broken = "---\nschemaVersion: 1\ntopicId: " + TOPIC_A + "\ntitle: 坏主题\nnodes:\n  " + ROOT_ID + ":\n    from: null\n    flow: root\n    state: agreed\n---\n\n## 缺注释的标题\n\n正文\n";
-    const { files } = await newFiles({ "topics/a.md": broken });
-    expect(files.topics).toHaveLength(1);
-
-    let blocked: unknown;
-    try {
-      prepareChanges(files, request(files, [{ op: "setDiscussionFocus", nodeId: ROOT_ID }]));
-    } catch (caught) {
-      blocked = caught;
-    }
-    expect((blocked as ChangeError).code).toBe("VALIDATION_FAILED");
-
-    const raw = buildTopic({
-      topicId: TOPIC_A,
-      title: "修好的主题",
-      nodes: [ROOT_NODE],
-    });
-    const changes = prepareChanges(
-      files,
-      request(files, [{ op: "replaceTopic", topicId: TOPIC_A, path: "topics/a.md", raw }]),
-    );
-    expect(fileOf(changes, "topics/a.md")?.content).toBe(raw);
-    expect(changes.changedNodeIds).toEqual([ROOT_ID]);
-  });
-});
-
-describe("prepareChanges：mergeNodes 必须显式重接", () => {
-  const survivor = { ...ROOT_NODE, id: "n_0000000000000000000000000000000a", title: "幸存者" };
-  const merged = { ...CHILD_NODE, id: "n_0000000000000000000000000000000b", title: "被合并", from: survivor.id };
-  const orphan = { ...ROOT_NODE, id: "n_0000000000000000000000000000000c", title: "后继", flow: "next" as const, from: merged.id };
-
-  it("未重接被合并节点的后继时拒绝，重接后保留 survivor ID", async () => {
-    const topicText = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [survivor, merged, orphan] });
-    const { files } = await newFiles({ "topics/a.md": topicText });
-
+  it("patchNode 正文模式互斥，append 追加到正文末尾", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
     let error: unknown;
     try {
       prepareChanges(
         files,
         request(files, [
           {
-            op: "mergeNodes",
-            survivorId: survivor.id,
-            mergedNodeIds: [merged.id],
-            body: "合并后的正文。",
-            reconnect: [],
-            activeNode: survivor.id,
-          },
+            op: "patchNode",
+            nodeId: ROOT_ID,
+            append: "追加段落。",
+            body: "整篇替换",
+          } as unknown as Operation,
         ]),
       );
     } catch (caught) {
       error = caught;
     }
-    expect((error as ChangeError).code).toBe("OPERATION_CONFLICT");
-    expect((error as ChangeError).details?.["missingReconnect"]).toEqual([orphan.id]);
+    expect((error as ChangeError).code).toBe("BAD_REQUEST");
 
     const changes = prepareChanges(
       files,
-      request(files, [
-        {
-          op: "mergeNodes",
-          survivorId: survivor.id,
-          mergedNodeIds: [merged.id],
-          body: "合并后的正文。",
-          reconnect: [{ nodeId: orphan.id, from: survivor.id, flow: "next" }],
-          activeNode: survivor.id,
-        },
-      ]),
+      request(files, [{ op: "patchNode", nodeId: ROOT_ID, append: "追加段落。" }]),
     );
-    const result = parseTopicDocument(fileOf(changes, "topics/a.md")!.content as string);
-    expect(result.ok).toBe(true);
-    expect(result.topic!.nodes.map((node) => node.id)).toEqual([survivor.id, orphan.id]);
-    expect(result.topic!.nodes[0]?.body).toBe("合并后的正文。");
-    expect(result.topic!.nodes[1]?.from).toBe(survivor.id);
-  });
-});
-
-describe("prepareChanges：removeLeaf 与结构校验", () => {
-  it("拒绝删除仍有后继的节点", async () => {
-    const topicText = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE, CHILD_NODE] });
-    const { files } = await newFiles({ "topics/a.md": topicText });
-    let error: unknown;
-    try {
-      prepareChanges(files, request(files, [{ op: "removeLeaf", nodeId: ROOT_ID }]));
-    } catch (caught) {
-      error = caught;
-    }
-    expect((error as ChangeError).code).toBe("OPERATION_CONFLICT");
-    expect((error as ChangeError).details?.["children"]).toEqual([CHILD_ID]);
+    const text = changes.files[0]!.content as string;
+    expect(text).toContain("根节点正文。\n\n追加段落。");
   });
 
-  it("删除真正的叶节点并保留其余结构", async () => {
-    const leaf = { ...CHILD_NODE, id: "n_0000000000000000000000000000000d", title: "叶子" };
-    const topicText = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE, leaf] });
-    const { files } = await newFiles({ "topics/a.md": topicText });
-    const changes = prepareChanges(files, request(files, [{ op: "removeLeaf", nodeId: leaf.id }]));
-    const result = parseTopicDocument(fileOf(changes, "topics/a.md")!.content as string);
-    expect(result.ok).toBe(true);
-    expect(result.topic!.nodes.map((node) => node.id)).toEqual([ROOT_ID]);
-  });
-});
-
-describe("prepareChanges：createTopic 必须同批带首卡", () => {
-  it("只有 createTopic 时拒绝，带 createNode 时新建文件", async () => {
-    const { files } = await newFiles({});
-    const expected = { "workspace.json": files.workspaceFile.sha256, "topics/new.md": null };
-    let error: unknown;
-    try {
-      prepareChanges(
-        files,
-        request(files, [{ op: "createTopic", topicId: TOPIC_B, path: "topics/new.md", title: "新主题" }], {
-          expectedFiles: expected,
-        }),
-      );
-    } catch (caught) {
-      error = caught;
-    }
-    expect((error as ChangeError).code).toBe("OPERATION_CONFLICT");
-
-    const changes = prepareChanges(
-      files,
-      request(
-        files,
-        [
-          { op: "createTopic", topicId: TOPIC_B, path: "topics/new.md", title: "新主题" },
-          {
-            op: "createNode",
-            nodeId: ROOT_ID,
-            topicId: TOPIC_B,
-            title: "首卡",
-            body: "首卡正文。",
-            from: null,
-            flow: "root",
-            state: "proposed",
-          },
-        ],
-        { expectedFiles: expected },
-      ),
-    );
-    const created = fileOf(changes, "topics/new.md");
-    expect(created?.expectedSha256).toBeNull();
-    const result = parseTopicDocument(created!.content as string, { path: "topics/new.md" });
-    expect(result.ok).toBe(true);
-    expect(result.topic!.topicId).toBe(TOPIC_B);
-    expect(result.topic!.nodes[0]?.id).toBe(ROOT_ID);
-  });
-});
-
-describe("prepareChanges：标题与元数据约束", () => {
-  it("标题含伪 ID 标记或换行时拒绝，摘要 null 删除显式摘要", async () => {
-    const topicText = buildTopic({
-      topicId: TOPIC_A,
-      title: "甲",
-      nodes: [{ ...ROOT_NODE, summary: "显式摘要" }],
-    });
-    const { files } = await newFiles({ "topics/a.md": topicText });
-
-    for (const title of ["坏 <!-- node:n_0000000000000000000000000000000f -->", "多\n行"]) {
-      let error: unknown;
-      try {
-        prepareChanges(files, request(files, [{ op: "updateNode", nodeId: ROOT_ID, title }]));
-      } catch (caught) {
-        error = caught;
-      }
-      expect((error as ChangeError).code).toBe("BAD_REQUEST");
-    }
-
-    const changes = prepareChanges(
-      files,
-      request(files, [{ op: "updateNode", nodeId: ROOT_ID, summary: null }]),
-    );
-    const result = parseTopicDocument(fileOf(changes, "topics/a.md")!.content as string);
-    expect(result.ok).toBe(true);
-    expect(result.topic!.nodes[0]?.summaryExplicit).toBe(false);
-  });
-
-  it("新增 branch 缺 order 时按 core 规则默认 max+10，并持久化该值", async () => {
-    const existingBranch = {
-      ...ROOT_NODE,
-      id: "n_0000000000000000000000000000000e",
-      title: "既有分支",
-      flow: "branch" as const,
-      from: ROOT_ID,
-      side: "left" as const,
-      order: 10,
+  it("createNode 新增分支默认 max+10，description 必需非 root", async () => {
+    const withBranch = {
+      ...BASE_TOPIC,
+      [BRANCH_ID + ".md"]: nodeFile({
+        nodeId: BRANCH_ID,
+        title: "既有分支",
+        from: ROOT_ID,
+        flow: "branch",
+        description: "既有分支理由",
+        side: "left",
+        order: 10,
+      }),
     };
-    const { files } = await newFiles({
-      "topics/a.md": buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE, existingBranch] }),
-    });
-    const changes = prepareChanges(
+    const { files } = await newWorkspace({ 协作方式: withBranch });
+    const newBranchId = "n_00000000000000000000000000000004";
+    // 新建文件必须由调用方显式声明"不存在"；候选不替调用者补前置值。
+    const createdRequest = request(
       files,
-      request(files, [
+      [
         {
           op: "createNode",
-          nodeId: BRANCH_ID,
-          topicId: TOPIC_A,
-          title: "分支",
-          body: "",
+          nodeId: newBranchId,
+          topicId: TOPIC_ID,
+          title: "新分支",
+          body: "新分支正文。",
           from: ROOT_ID,
           flow: "branch",
           state: "proposed",
+          description: "从根节点展开的另一条线索",
           side: "right",
         },
-      ]),
+      ],
+      { ["topics/协作方式/" + newBranchId + ".md"]: null },
     );
-    const result = parseTopicDocument(fileOf(changes, "topics/a.md")!.content as string);
-    expect(result.ok).toBe(true);
-    const created = result.topic!.nodes.find((node) => node.id === BRANCH_ID);
-    expect(created?.order).toBe(20);
-    expect(created?.side).toBe("right");
-  });
+    const changes = prepareChanges(files, createdRequest);
+    const createdFile = changes.files.find((file) => file.path.endsWith(newBranchId + ".md"))!;
+    expect(createdFile.content).toContain("order: 20");
+    expect(createdFile.expectedSha256).toBeNull();
 
-  it("全局图校验兜底：next 冲突被拒绝", async () => {
-    const secondNext = { ...CHILD_NODE, id: OTHER_ID, title: "第二个后继" };
-    const topicText = buildTopic({ topicId: TOPIC_A, title: "甲", nodes: [ROOT_NODE, CHILD_NODE] });
-    const { files } = await newFiles({ "topics/a.md": topicText });
     let error: unknown;
     try {
       prepareChanges(
@@ -548,10 +264,10 @@ describe("prepareChanges：标题与元数据约束", () => {
         request(files, [
           {
             op: "createNode",
-            nodeId: OTHER_ID,
-            topicId: TOPIC_A,
-            title: secondNext.title,
-            body: "x",
+            nodeId: "n_00000000000000000000000000000005",
+            topicId: TOPIC_ID,
+            title: "缺描述",
+            body: "",
             from: ROOT_ID,
             flow: "next",
             state: "proposed",
@@ -561,70 +277,348 @@ describe("prepareChanges：标题与元数据约束", () => {
     } catch (caught) {
       error = caught;
     }
+    expect((error as ChangeError).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("updateConnection 改接来源必须显式给 description，并拒绝挤掉 next", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    const otherRoot = "n_00000000000000000000000000000006";
+    const withOther = {
+      ...BASE_TOPIC,
+      [otherRoot + ".md"]: nodeFile({
+        nodeId: otherRoot,
+        title: "另一分支",
+        from: ROOT_ID,
+        flow: "branch",
+        description: "另一分支理由",
+        side: "left",
+        order: 10,
+      }),
+    };
+    const { files: second } = await newWorkspace({ 协作方式: withOther });
+    let error: unknown;
+    try {
+      prepareChanges(second, request(second, [{ op: "updateConnection", nodeId: CHILD_ID, from: otherRoot }]));
+    } catch (caught) {
+      error = caught;
+    }
     expect((error as ChangeError).code).toBe("OPERATION_CONFLICT");
+
+    const ok = prepareChanges(
+      second,
+      request(second, [
+        {
+          op: "updateConnection",
+          nodeId: CHILD_ID,
+          from: otherRoot,
+          description: "改挂到另一分支后重新说明理由",
+        },
+      ]),
+    );
+    const text = ok.files[0]!.content as string;
+    expect(text).toContain("from: " + otherRoot);
+    expect(text).toContain("改挂到另一分支后重新说明理由");
+    expect(ok.changedNodeIds).toEqual([CHILD_ID]);
+    expect(ok.contentNodeIds).toEqual([CHILD_ID]);
+    void files;
+  });
+
+  it("removeLeaf 拒绝删除仍有后继的节点，允许删除真叶", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    let error: unknown;
+    try {
+      prepareChanges(files, request(files, [{ op: "removeLeaf", nodeId: ROOT_ID }]));
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as ChangeError).code).toBe("OPERATION_CONFLICT");
+    expect((error as ChangeError).details?.["children"]).toEqual([CHILD_ID]);
+
+    const changes = prepareChanges(files, request(files, [{ op: "removeLeaf", nodeId: CHILD_ID }]));
+    expect(changes.files).toEqual([
+      {
+        path: "topics/协作方式/" + CHILD_ID + ".md",
+        content: null,
+        expectedSha256: files.topics.find((file) => file.path.endsWith(CHILD_ID + ".md"))!.sha256,
+      },
+    ]);
+  });
+
+  it("moveNodeToTopic 保留 ID 与连接，并删除被清空的主题入口", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    // 迁移时整棵结构一起处理：root 与子节点都保留原 from，源主题随之清空。
+    const changes = prepareChanges(
+      files,
+      request(
+        files,
+        [
+          { op: "createTopic", topicId: TOPIC_ID_2, path: "条目整理", title: "条目整理" },
+          { op: "moveNodeToTopic", nodeId: ROOT_ID, topicId: TOPIC_ID_2 },
+          { op: "moveNodeToTopic", nodeId: CHILD_ID, topicId: TOPIC_ID_2 },
+        ],
+        {
+          ["topics/条目整理/topic.md"]: null,
+          ["topics/条目整理/" + ROOT_ID + ".md"]: null,
+          ["topics/条目整理/" + CHILD_ID + ".md"]: null,
+        },
+      ),
+    );
+    const deleted = changes.files
+      .filter((file) => file.content === null)
+      .map((file) => file.path)
+      .sort();
+    expect(deleted).toEqual(
+      [
+        "topics/协作方式/topic.md",
+        "topics/协作方式/" + ROOT_ID + ".md",
+        "topics/协作方式/" + CHILD_ID + ".md",
+      ].sort(),
+    );
+    const movedMeta = changes.files.find((file) => file.path === "topics/条目整理/topic.md")!;
+    expect(movedMeta.content).toContain("topicId: " + TOPIC_ID_2);
+    const movedRoot = changes.files.find(
+      (file) => file.path === "topics/条目整理/" + ROOT_ID + ".md",
+    )!;
+    expect(movedRoot.content).toContain("flow: root");
+    const movedChild = changes.files.find(
+      (file) => file.path === "topics/条目整理/" + CHILD_ID + ".md",
+    )!;
+    expect(movedChild.content).toContain("nodeId: " + CHILD_ID);
+    expect(movedChild.content).toContain("from: " + ROOT_ID);
   });
 });
-const FIXTURE = path.resolve("tests/fixtures/workspace");
 
-describe("prepareChanges：真实样例工作区", () => {
-  it("moveBranch 只移动入口节点自身，后代保持原 from，其他卡片正文不变", async () => {
-    const files = await readWorkspaceFiles(FIXTURE);
-    expect(files.topics.length).toBe(2);
-    const topicFile = files.topics.find((file) => file.path.includes("记录的分寸"))!;
-    const parsed = parseTopicDocument(topicFile.text, { path: topicFile.path });
-    expect(parsed.ok).toBe(true);
-    const branch = parsed.topic!.nodes.find((node) => node.flow === "branch")!;
-    const descendants = parsed.topic!.nodes.filter((node) => node.from === branch.id);
-    expect(descendants.length).toBeGreaterThan(0);
-
-    // 改挂到工作区根节点（不在该分支的子树内，不会成环）。
-    const rootId = "n_6fe284797b7d4f249440c5e8596f715d";
-    const changes = prepareChanges(files, request(files, [{ op: "moveBranch", nodeId: branch.id, from: rootId, side: "left", order: 30 }]),
+describe("内容节点：只记录最终真实写盘", () => {
+  it("同批改正文再恢复原值：不写文件，也不计入最近内容更新", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    const changes = prepareChanges(
+      files,
+      request(files, [
+        { op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "根节点正文。", new: "临时正文。" }] },
+        { op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "临时正文。", new: "根节点正文。" }] },
+      ]),
     );
-
-    const output = changes.files.find((file) => file.path === topicFile.path)!;
-    const text = output.content as string;
-    const after = parseTopicDocument(text, { path: topicFile.path });
-    expect(after.ok).toBe(true);
-    expect(after.topic!.nodes.map((node) => node.id)).toEqual(
-      parsed.topic!.nodes.map((node) => node.id),
-    );
-    for (const node of parsed.topic!.nodes) {
-      if (node.id === branch.id) continue;
-      const now = after.topic!.nodes.find((entry) => entry.id === node.id)!;
-      expect(text.slice(now.ranges.node.start, now.ranges.node.end)).toBe(
-        topicFile.text.slice(node.ranges.node.start, node.ranges.node.end),
-      );
-    }
-    const moved = after.topic!.nodes.find((node) => node.id === branch.id)!;
-    expect(moved.from).toBe(rootId);
-    expect(moved.side).toBe("left");
-    expect(moved.order).toBe(30);
-    for (const child of descendants) {
-      const now = after.topic!.nodes.find((node) => node.id === child.id)!;
-      expect(now.from).toBe(branch.id);
-    }
-    expect(changes.changedNodeIds).toEqual([branch.id]);
+    expect(changes.files).toEqual([]);
+    expect(changes.changedNodeIds).toEqual([ROOT_ID]);
+    expect(changes.contentNodeIds).toEqual([]);
   });
 
-  it("setDiscussionFocus 只改 workspace.json，同值视为 no-op", async () => {
-    const files = await readWorkspaceFiles(FIXTURE);
-    const current = files.workspace.activeNode!;
-    expect(current).toBeTruthy();
+  it("setImportance 与另一节点真实正文修改同批：只记录真实改写的节点", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    const changes = prepareChanges(
+      files,
+      request(files, [
+        { op: "setImportance", nodeId: ROOT_ID, important: true },
+        {
+          op: "patchNode",
+          nodeId: CHILD_ID,
+          replace: [{ old: "子节点正文。", new: "改写后的子节点正文。" }],
+        },
+      ]),
+    );
+    expect(changes.files.map((file) => file.path).sort()).toEqual(
+      ["topics/协作方式/" + ROOT_ID + ".md", "topics/协作方式/" + CHILD_ID + ".md"].sort(),
+    );
+    expect(changes.changedNodeIds).toEqual([ROOT_ID, CHILD_ID]);
+    expect(changes.contentNodeIds).toEqual([CHILD_ID]);
+  });
 
-    const unchanged = prepareChanges(files, request(files, [{ op: "setDiscussionFocus", nodeId: current }]));
-    expect(unchanged.files).toEqual([]);
-    expect(unchanged.changedNodeIds).toEqual([]);
+  it("updateConnection 值不变不写入：只记录另一节点的真实正文修改", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    const changes = prepareChanges(
+      files,
+      request(files, [
+        {
+          op: "updateConnection",
+          nodeId: CHILD_ID,
+          from: ROOT_ID,
+          flow: "next",
+          description: "从根节点继续",
+        },
+        { op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "根节点正文。", new: "改写后的根节点正文。" }] },
+      ]),
+    );
+    expect(changes.files.map((file) => file.path)).toEqual(["topics/协作方式/" + ROOT_ID + ".md"]);
+    expect(changes.changedNodeIds).toEqual([CHILD_ID, ROOT_ID]);
+    expect(changes.contentNodeIds).toEqual([ROOT_ID]);
+  });
 
-    const cleared = prepareChanges(files, request(files, [{ op: "setDiscussionFocus", nodeId: null }]));
-    expect(cleared.files.map((file) => file.path)).toEqual(["workspace.json"]);
-    const output = cleared.files[0]!;
-    expect(output.expectedSha256).toBe(files.workspaceFile.sha256);
-    expect(JSON.parse(output.content as string)).toMatchObject({
-      schemaVersion: 1,
-      workspaceId: files.workspace.workspaceId,
-      name: files.workspace.name,
-      activeNode: null,
-    });
+  it("同批新建节点计入，删除真叶不计入", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    const newId = "n_00000000000000000000000000000008";
+    const changes = prepareChanges(
+      files,
+      request(
+        files,
+        [
+          {
+            op: "createNode",
+            nodeId: newId,
+            topicId: TOPIC_ID,
+            title: "新节点",
+            body: "新节点正文。",
+            from: ROOT_ID,
+            flow: "branch",
+            state: "proposed",
+            description: "从根节点展开的新分支",
+            side: "right",
+          },
+          { op: "removeLeaf", nodeId: CHILD_ID },
+        ],
+        { ["topics/协作方式/" + newId + ".md"]: null },
+      ),
+    );
+    expect(changes.files.map((file) => file.path).sort()).toEqual(
+      ["topics/协作方式/" + CHILD_ID + ".md", "topics/协作方式/" + newId + ".md"].sort(),
+    );
+    expect(changes.files.find((file) => file.path.endsWith(CHILD_ID + ".md"))?.content).toBeNull();
+    expect(changes.files.find((file) => file.path.endsWith(newId + ".md"))?.content).toContain(
+      "新节点正文。",
+    );
+    expect(changes.changedNodeIds).toEqual([newId, CHILD_ID]);
+    expect(changes.contentNodeIds).toEqual([newId]);
+  });
+});
+
+
+describe("前置哈希与恢复", () => {
+  it("错哈希拒绝，且不产生候选", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    let error: unknown;
+    try {
+      prepareChanges(
+        files,
+        request(files, [{ op: "patchNode", nodeId: ROOT_ID, append: "追加。" }], {
+          ["topics/协作方式/" + ROOT_ID + ".md"]: "0".repeat(64),
+        }),
+      );
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as ChangeError).code).toBe("VERSION_CONFLICT");
+    const conflicts = (error as ChangeError).details?.["conflicts"] as Array<Record<string, unknown>>;
+    expect(conflicts[0]?.["path"]).toBe("topics/协作方式/" + ROOT_ID + ".md");
+    expect(conflicts[0]?.["expectedSha256"]).toBe("0".repeat(64));
+  });
+
+  it("缺少新文件声明时 409 missingFiles，提交后仍可用现有事务恢复", async () => {
+    const { root, files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    const newId = "n_00000000000000000000000000000007";
+    let error: unknown;
+    try {
+      prepareChanges(
+        files,
+        request(files, [
+          {
+            op: "createNode",
+            nodeId: newId,
+            topicId: TOPIC_ID,
+            title: "新节点",
+            body: "内容。",
+            from: ROOT_ID,
+            flow: "branch",
+            state: "proposed",
+            description: "从根节点展开的新线索",
+            side: "right",
+          },
+        ]),
+      );
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as ChangeError).code).toBe("OPERATION_CONFLICT");
+    expect((error as ChangeError).details?.["missingFiles"]).toContain(
+      "topics/协作方式/" + newId + ".md",
+    );
+
+    // 同一候选交给现有事务层：仍走 prepared／committed 与恢复，不另写提交栈。
+    const prepared = prepareChanges(
+      files,
+      request(
+        files,
+        [
+          {
+            op: "createNode",
+            nodeId: newId,
+            topicId: TOPIC_ID,
+            title: "新节点",
+            body: "内容。",
+            from: ROOT_ID,
+            flow: "branch",
+            state: "proposed",
+            description: "从根节点展开的新线索",
+            side: "right",
+          },
+        ],
+        { ["topics/协作方式/" + newId + ".md"]: null },
+      ),
+    );
+    const committed = await commitFiles({ root, files: prepared.files });
+    expect(committed.committed).toBe(true);
+    const recovered = await recoverTransactions({ root });
+    expect(recovered.writable).toBe(true);
+    expect(recovered.committedPendingRefresh).toContain(committed.transactionId);
+    const reread = await readWorkspaceFiles(root);
+    expect(reread.workspace.schemaVersion).toBe(2);
+    expect(reread.topics.some((file) => file.path.endsWith(newId + ".md"))).toBe(true);
+  });
+});
+
+describe("请求 schema", () => {
+  const shell = () => ({
+    workspaceId: "w_1",
+    requestId: crypto.randomUUID(),
+    expectedFiles: {},
+    operations: [] as unknown[],
+  });
+
+  it("当前操作被严格 schema 接纳，未知字段被拒绝且错误能指向具体操作", () => {
+    const patch = {
+      ...shell(),
+      operations: [{ op: "patchNode", nodeId: ROOT_ID, append: "追加。" }],
+    };
+    expect(changeRequestSchema.safeParse(patch).success).toBe(true);
+
+    const connect = {
+      ...shell(),
+      operations: [{ op: "updateConnection", nodeId: CHILD_ID, description: "改接理由" }],
+    };
+    expect(changeRequestSchema.safeParse(connect).success).toBe(true);
+
+    const unknownField = {
+      ...shell(),
+      operations: [{ op: "patchNode", nodeId: ROOT_ID, append: "x", bogus: 1 }],
+    };
+    expect(changeRequestSchema.safeParse(unknownField).success).toBe(false);
+
+    const unknownTopLevel = { ...shell(), extra: true };
+    const topLevel = changeRequestSchema.safeParse(unknownTopLevel);
+    expect(topLevel.success).toBe(false);
+    if (!topLevel.success) {
+      const issues = flattenChangeRequestIssues(topLevel.error);
+      expect(issues.some((issue) => issue.code === "unrecognized_keys")).toBe(true);
+    }
+
+    const unknownOp = { ...shell(), operations: [{ op: "nope" }] };
+    const opResult = changeRequestSchema.safeParse(unknownOp);
+    expect(opResult.success).toBe(false);
+    if (!opResult.success) {
+      const issues = flattenChangeRequestIssues(opResult.error);
+      // 不能只报一条无路径的 invalid_union：要指出是第几个操作的 op 坏了。
+      expect(issues[0]?.path.join(".")).toContain("operations.0");
+    }
+  });
+});
+
+describe("barrel 导出", () => {
+  it("只暴露当前实现的入口，不保留旧格式分派与转换导出", async () => {
+    const barrel = await import("../../src/storage/index.js");
+    expect(typeof barrel.changeRequestSchema.safeParse).toBe("function");
+    expect(typeof barrel.flattenChangeRequestIssues).toBe("function");
+    expect(typeof barrel.prepareChanges).toBe("function");
+    expect(typeof barrel.isTopicFilePath).toBe("function");
+    expect("prepareChangesForWorkspace" in barrel).toBe(false);
+    expect("anyChangeRequestSchema" in barrel).toBe(false);
+    expect("planConversion" in barrel).toBe(false);
   });
 });

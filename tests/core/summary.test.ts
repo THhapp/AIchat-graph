@@ -6,11 +6,6 @@ import {
   plainText,
   truncateSummary,
 } from "../../src/core/index.js";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "workspace");
 
 describe("纯文本与摘要工具", () => {
   it("跳过图片与 HTML，折叠空白并处理链接文字", () => {
@@ -32,8 +27,8 @@ describe("纯文本与摘要工具", () => {
 
   it("诊断格式化包含位置与节点", () => {
     const result = parseTopicDocument(
-      readFileSync(join(fixtureRoot, "topics", "协作方式.md"), "utf8"),
-      { path: "topics/协作方式.md" },
+      "---\ntopicId: t_00000000000000000000000000000001\ntitle: 测试主题\n---\n",
+      "topics/测试/topic.md",
     );
     expect(result.diagnostics).toEqual([]);
     expect(formatDiagnostic({

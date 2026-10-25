@@ -54,6 +54,16 @@ export class UsageError extends CliError {
   }
 }
 
+/** 参数值不合法（区别于缺命令／未知选项）：统一 INVALID_ARGUMENT + usage 退出码。 */
+export function invalidArgument(
+  message: string,
+  details?: Record<string, unknown>,
+): CliError {
+  return new CliError("INVALID_ARGUMENT", message, EXIT_CODES.usage, {
+    ...(details ? { details } : {}),
+  });
+}
+
 export interface ErrorBody {
   readonly code: string;
   readonly message: string;

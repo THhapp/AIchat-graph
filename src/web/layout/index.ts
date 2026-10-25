@@ -1,5 +1,6 @@
 import { LAYOUT_VERSION, type LayoutInput, type LayoutPosition, type LayoutResult, type LayoutSide } from './types.js';
-import { compareIds, createDiagnosticSink, emptyResult, isRecord, type MeasureContext } from './internal.js';
+import { compareIds, createDiagnosticSink, emptyResult } from './internal.js';
+import { isRecord } from '../../shared/guards.js';
 import {
   defaultConfig,
   readConfig,
@@ -13,7 +14,8 @@ import {
   computeVisibility,
   buildVisibleTree,
 } from './inputTree.js';
-import { measureBlock, applyPreviousAnchor, buildEdgeRoutes, reportRoutePenetrations, computeBounds } from './geometry.js';
+import { measureBlock, type MeasureContext } from './measure.js';
+import { applyPreviousAnchor, buildEdgeRoutes, reportRoutePenetrations, computeBounds } from './routing.js';
 
 export * from './types.js';
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,8 @@ import { loadWorkspace } from "../../src/cli/workspace.js";
 import { initWorkspace } from "../../src/storage/index.js";
 import { locateSection } from "../../src/core/index.js";
 import { startService } from "../../src/service/index.js";
+import { createApp } from "../../src/service/server.js";
+import { WorkspaceRuntime } from "../../src/service/workspace.js";
 
 const temporaryRoots: string[] = [];
 const running: Array<{ stop(): Promise<void> }> = [];
@@ -591,7 +593,6 @@ describe("Agent 动作编译", () => {
     const handle = await startService({ root, port: await freePort() });
     running.push(handle);
     const beforeWorkspace = await fs.readFile(path.join(root, "workspace.json"), "utf8");
-    expect(JSON.parse(beforeWorkspace).topicMode).toBe("isolated");
 
     const command = ["create-topic", "--workspace", root, "--topic-title", "第二主题", "--directory", "自定义目录", "--body", "默认更新现有内容，但属于另一个主题。"];
     const created = await runCli(command);
@@ -600,15 +601,12 @@ describe("Agent 动作编译", () => {
     const secondId = result.created.topicId;
     const secondRoot = result.created.nodeIds[0]!;
     expect(await fs.readFile(path.join(root, "topics", "自定义目录", "topic.md"), "utf8")).toContain(secondId);
-    const workspace = await (await fetch(handle.url + "/api/workspace")).json() as { topicMode: string; agentEntry: { cliPath: string; skillPath: string } };
-    expect(workspace.topicMode).toBe("isolated");
+    const workspace = await (await fetch(handle.url + "/api/workspace")).json() as { agentEntry: { cliPath: string; skillPath: string } };
     expect(workspace.agentEntry.cliPath.replaceAll("\\", "/")).toMatch(/\/dist\/cli\/index\.js$/);
     expect(workspace.agentEntry.skillPath.replaceAll("\\", "/")).toMatch(/\/skills\/aichat-graph\/SKILL\.md$/);
-    const graph = await (await fetch(handle.url + "/api/graph")).json() as { topicMode: string; nodes: Array<{ id: string; topicId: string; flow: string; number: string }> };
-    expect(graph.topicMode).toBe("isolated");
+    const graph = await (await fetch(handle.url + "/api/graph")).json() as { nodes: Array<{ id: string; topicId: string; flow: string; number: string }> };
     expect(graph.nodes.filter((node) => node.flow === "root").map((node) => node.number)).toEqual(["01", "01"]);
     const snapshot = await loadWorkspace(root);
-    expect(snapshot.graph?.rootId).toBeNull();
     expect(snapshot.graph?.rootIds).toHaveLength(2);
     const manifest = JSON.parse(await fs.readFile(path.join(root, ".aichat/cache/manifest.json"), "utf8"));
     expect(manifest.roots).toHaveLength(2);
@@ -664,7 +662,7 @@ describe("Agent 动作编译", () => {
       }),
     });
     expect(focus.status).toBe(200);
-    expect(JSON.parse(await fs.readFile(path.join(root, "workspace.json"), "utf8"))).toMatchObject({ topicMode: "isolated", activeNode: secondRoot });
+    expect(JSON.parse(await fs.readFile(path.join(root, "workspace.json"), "utf8"))).toMatchObject({ activeNode: secondRoot });
   });
 
   it("createRoot 只用于空工作区，并在同一事务创建主题与根", async () => {
@@ -887,28 +885,20 @@ describe("editRef 与读取后源变化", () => {
 
   it("无关主题发布后旧 ref 仍可用（不以全局 revision 否决）", async () => {
     const root = await newWorkspace();
-    // 此历史用例故意保留 shared 的跨主题侧枝，不让新 init 默认值改变验证语义。
-    const metaPath = path.join(root, "workspace.json");
-    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
-    await fs.writeFile(metaPath, JSON.stringify({ ...meta, topicMode: "shared" }, null, 2) + "\n");
-    // 第二个主题，用来制造"无关发布"。
+    // 第二个隔离主题有自己的根，用来制造"无关发布"。
     const otherDir = path.join(root, "topics", "别的主题");
     await fs.mkdir(otherDir, { recursive: true });
     const otherTopic = "t_" + "7".repeat(32);
     const otherRoot = "n_" + "8".repeat(32);
     await fs.writeFile(otherDir + "/topic.md", "---\ntopicId: " + otherTopic + "\ntitle: 别的主题\n---\n", "utf8");
-    // 跨主题侧枝：保持单一 root 的合法图，同时让另一个主题成为"无关发布"来源。
     const otherNode = (title: string, body: string): string =>
       [
         "---",
         "nodeId: " + otherRoot,
         "title: " + title,
         "state: agreed",
-        "from: " + ROOT_NODE,
-        "flow: branch",
-        "description: 从根展开的另一个主题",
-        "side: left",
-        "order: 10",
+        "from: null",
+        "flow: root",
         "---",
         "",
         body,
@@ -1376,5 +1366,161 @@ describe("服务读取契约：meta 与 section", () => {
     ).json()) as { range: { start: number }; section: { title: string } | null };
     expect(indexed.range.start).toBe(locateSection(full.body, "同名", 1).start);
     expect(indexed.section?.title).toBe("同名");
+  });
+
+  it("缩进标题与围栏代码共用 AST 章节表，index 是全文标题顺序", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const file = path.join(root, "topics", DIR, NEXT_NODE + ".md");
+    const text = await fs.readFile(file, "utf8");
+    const body = [
+      "   ## 缩进标题",
+      "",
+      "第一段。",
+      "",
+      "```md",
+      "# 围栏里的假标题",
+      "```",
+      "",
+      "## 第二个标题",
+      "",
+      "第二段。",
+      "",
+    ].join("\n");
+    await fs.writeFile(
+      file,
+      text.replace("默认更新现有内容。\n\n第二段补充说明。\n", body),
+      "utf8",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+
+    const full = (await (
+      await fetch(handle.url + "/api/agent/nodes/" + NEXT_NODE + "?full=true")
+    ).json()) as { body: string };
+
+    // 缩进标题由 AST 识别；start 从 `#` 起算，与离线 locateSection 一致。
+    const indented = (await (
+      await fetch(
+        handle.url +
+          "/api/agent/nodes/" +
+          NEXT_NODE +
+          "?section=" +
+          encodeURIComponent("缩进标题") +
+          "&full=true",
+      )
+    ).json()) as {
+      body: string;
+      range: { start: number };
+      section: { index: number; title: string; level: number; start: number } | null;
+    };
+    expect(indented.range.start).toBe(locateSection(full.body, "缩进标题").start);
+    expect(indented.body.startsWith("## 缩进标题")).toBe(true);
+    expect(indented.section).toMatchObject({ index: 0, title: "缩进标题", level: 2 });
+
+    // 围栏里的 "#" 不是章节。
+    const fenced = await fetch(
+      handle.url +
+        "/api/agent/nodes/" +
+        NEXT_NODE +
+        "?section=" +
+        encodeURIComponent("围栏里的假标题"),
+    );
+    expect(fenced.status).toBe(400);
+    expect(((await fenced.json()) as { error: { code: string } }).error.code).toBe(
+      "INVALID_SECTION",
+    );
+
+    // 假标题不占 index：第二个真实标题是全文第 1 个章节（0 起）。
+    const second = (await (
+      await fetch(
+        handle.url +
+          "/api/agent/nodes/" +
+          NEXT_NODE +
+          "?section=" +
+          encodeURIComponent("第二个标题") +
+          "&full=true",
+      )
+    ).json()) as {
+      range: { start: number };
+      section: { index: number; title: string } | null;
+    };
+    expect(second.range.start).toBe(full.body.indexOf("## 第二个标题"));
+    expect(second.section).toMatchObject({ index: 1, title: "第二个标题" });
+  });
+});
+describe("提交刷新失败", () => {
+  it("源文件已提交但快照刷新失败：返回 pending、保留日志、停用写入并给出统一诊断", async () => {
+    const root = await newWorkspace();
+    const runtime = await WorkspaceRuntime.create(root);
+    running.push(runtime);
+    runtime.port = 4399;
+    vi.spyOn(runtime, "reloadFromDisk").mockResolvedValue({
+      ok: false,
+      diagnostics: [
+        { code: "DISK_UNREADABLE", message: "测试用无法重建快照", severity: "error" },
+      ],
+      snapshot: null,
+      revision: runtime.revision,
+      published: false,
+    });
+
+    const app = createApp({ runtime, webRoot: null });
+    const response = await app.request("http://127.0.0.1:4399/api/agent/changes", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:4399",
+        "content-type": "application/json",
+        "x-aichat-client": "cli",
+      },
+      body: JSON.stringify({
+        workspaceId: runtime.workspaceId,
+        requestId: randomUUID(),
+        action: { action: "createTopic", topicTitle: "刷新失败主题", body: "仍应落盘。" },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      state: string;
+      transactionId: string | null;
+      journalCleaned: boolean;
+      diagnostics: Array<{ code: string; message: string }>;
+      created: { topicPath: string | null; nodeIds: string[] };
+      editRef: unknown;
+      editRefs: unknown;
+    };
+    expect(body.state).toBe("committed_refresh_pending");
+    expect(body.transactionId).not.toBeNull();
+    expect(body.journalCleaned).toBe(false);
+    // 与低层 apply 一致：刷新失败诊断 + 明确的保留日志说明。
+    expect(body.diagnostics.map((item) => item.code)).toContain("DISK_UNREADABLE");
+    const pending = body.diagnostics.filter(
+      (item) => item.code === "COMMITTED_REFRESH_PENDING",
+    );
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.message).toContain("源文件已提交并保留事务日志");
+    expect(body.editRef).toBeNull();
+    expect(body.editRefs).toEqual({});
+
+    // 不回滚：新节点文件已落盘；写入停用；事务日志仍在等待重启核对。
+    const topicDir = (body.created.topicPath ?? "").split("/")[1] ?? "";
+    expect(
+      await fs.readFile(
+        path.join(root, ...(body.created.topicPath ?? "").split("/")),
+        "utf8",
+      ),
+    ).toContain("刷新失败主题");
+    const nodePath = path.join(
+      root,
+      "topics",
+      topicDir,
+      (body.created.nodeIds[0] ?? "") + ".md",
+    );
+    expect(await fs.readFile(nodePath, "utf8")).toContain("仍应落盘。");
+    expect(runtime.writable).toBe(false);
+    expect(runtime.writableReason).toBe("COMMITTED_REFRESH_PENDING");
+    const journals = await fs.readdir(path.join(root, ".aichat", "runtime", "transactions"));
+    expect(journals.length).toBeGreaterThan(0);
   });
 });

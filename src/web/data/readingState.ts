@@ -53,7 +53,7 @@ export interface ReadingState {
   topicStates: Record<string, TopicReadingState>;
 }
 
-export function emptyNavTree(): NavTreeState {
+function emptyNavTree(): NavTreeState {
   return { expandedTopicIds: [], collapsedTopicIds: [], collapsedNodeIdsByTopic: {} };
 }
 

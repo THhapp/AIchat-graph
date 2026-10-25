@@ -16,12 +16,22 @@ import type {
   AgentRearrangeEdit,
 } from "../shared/protocol.js";
 import { parseOptions, type ParsedArgs } from "./args.js";
-import { readAppendText, readReplacePairs, readStdinText, resolveBody } from "./body-input.js";
-import { emit, invalidArgument, parseOutputMode, workspaceRoot } from "./commands.js";
+import {
+  readAppendText,
+  readReplacePairs,
+  readStdinText,
+  resolveBody,
+  type IoContext,
+} from "./body-input.js";
 import type { CliContext } from "./context.js";
 import { readAgentNode, submitAgentChange } from "./agent-client.js";
-import { CliError, EXIT_CODES, UsageError } from "./errors.js";
+import { CliError, EXIT_CODES, UsageError, invalidArgument } from "./errors.js";
+import { isRecord } from "../shared/guards.js";
+import { OUTPUT_OPTIONS, WORKSPACE_OPTION, parseIntegerOption } from "./options.js";
+import { emit, parseOutputMode } from "./output.js";
 import { resolveServiceForWorkspace } from "./service-client.js";
+import type { ResolvedService } from "./service-client.js";
+import { workspaceRoot } from "./workspace.js";
 
 const NODE_STATES = ["agreed", "proposed", "reference"] as const;
 const FLOWS = ["root", "next", "branch"] as const;
@@ -30,11 +40,6 @@ const SIDES = ["left", "right"] as const;
 type NodeState = (typeof NODE_STATES)[number];
 type NodeFlow = (typeof FLOWS)[number];
 type BranchSide = (typeof SIDES)[number];
-
-const OUTPUT = [
-  { name: "json", boolean: true },
-  { name: "text", boolean: true },
-] as const;
 
 const BODY_SOURCE = [
   { name: "body" },
@@ -54,18 +59,12 @@ function parseEnum<T extends string>(
   return raw as T;
 }
 
-function parseOrder(raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  if (!/^[0-9]+$/.test(raw)) throw invalidArgument(`--order 必须是非负整数: ${raw}`);
-  return Number(raw);
-}
-
 function normalizeText(value: string): string {
   return value.replace(/\r\n/g, "\n");
 }
 
-function ioOf(ctx: CliContext) {
-  return { cwd: ctx.cwd, stdin: ctx.stdin ?? (async () => "") };
+function ioOf(ctx: CliContext): IoContext {
+  return { cwd: ctx.cwd, stdin: ctx.stdin ?? readStdinText };
 }
 
 async function readBodyInput(parsed: ParsedArgs, ctx: CliContext) {
@@ -135,7 +134,7 @@ function summarize(command: string, response: AgentChangeResponse): string[] {
 /* ---------------------------------- edit ---------------------------------- */
 
 const EDIT_OPTIONS = [
-  { name: "workspace" },
+  WORKSPACE_OPTION,
   { name: "ref" },
   { name: "title" },
   { name: "state" },
@@ -143,7 +142,7 @@ const EDIT_OPTIONS = [
   { name: "append-file" },
   { name: "replace-file" },
   ...BODY_SOURCE,
-  ...OUTPUT,
+  ...OUTPUT_OPTIONS,
 ] as const;
 
 export async function runEdit(args: readonly string[], ctx: CliContext): Promise<number> {
@@ -183,7 +182,7 @@ export async function runBranch(args: readonly string[], ctx: CliContext): Promi
   const parsed = parseOptions(
     args,
     [
-      { name: "workspace" },
+      WORKSPACE_OPTION,
       { name: "from-ref" },
       { name: "title" },
       { name: "description" },
@@ -191,7 +190,7 @@ export async function runBranch(args: readonly string[], ctx: CliContext): Promi
       { name: "side" },
       { name: "order" },
       ...BODY_SOURCE,
-      ...OUTPUT,
+      ...OUTPUT_OPTIONS,
     ],
     0,
   );
@@ -213,7 +212,7 @@ export async function runBranch(args: readonly string[], ctx: CliContext): Promi
   }
   const state = parseEnum(parsed.values.get("state"), NODE_STATES, "--state");
   const side = parseEnum(parsed.values.get("side"), SIDES, "--side");
-  const order = parseOrder(parsed.values.get("order"));
+  const order = parseIntegerOption(parsed.values.get("order"), "--order");
   const action: AgentChangeAction = {
     action: "createBranch",
     editRef: fromRef,
@@ -240,14 +239,14 @@ export async function runNext(args: readonly string[], ctx: CliContext): Promise
   const parsed = parseOptions(
     args,
     [
-      { name: "workspace" },
+      WORKSPACE_OPTION,
       { name: "from-ref" },
       { name: "title" },
       { name: "description" },
       { name: "state" },
       { name: "topic-id" },
       ...BODY_SOURCE,
-      ...OUTPUT,
+      ...OUTPUT_OPTIONS,
     ],
     0,
   );
@@ -286,14 +285,14 @@ export async function runConnect(args: readonly string[], ctx: CliContext): Prom
   const parsed = parseOptions(
     args,
     [
-      { name: "workspace" },
+      WORKSPACE_OPTION,
       { name: "ref" },
       { name: "from-ref" },
       { name: "flow" },
       { name: "side" },
       { name: "order" },
       { name: "description" },
-      ...OUTPUT,
+      ...OUTPUT_OPTIONS,
     ],
     0,
   );
@@ -304,7 +303,7 @@ export async function runConnect(args: readonly string[], ctx: CliContext): Prom
   const fromRef = parsed.values.get("from-ref");
   const flow = parseEnum(parsed.values.get("flow"), FLOWS, "--flow");
   const side = parseEnum(parsed.values.get("side"), SIDES, "--side");
-  const order = parseOrder(parsed.values.get("order"));
+  const order = parseIntegerOption(parsed.values.get("order"), "--order");
   const description = parsed.values.get("description");
   if (description === undefined) {
     throw new UsageError("connect 必须给出 --description：解释为什么现在接到这个来源");
@@ -326,17 +325,13 @@ export async function runConnect(args: readonly string[], ctx: CliContext): Prom
 /* -------------------------------- rearrange ------------------------------- */
 
 const REARRANGE_OPTIONS = [
-  { name: "workspace" },
+  WORKSPACE_OPTION,
   { name: "input" },
   { name: "input-stdin", boolean: true },
-  ...OUTPUT,
+  ...OUTPUT_OPTIONS,
 ] as const;
 
 const REARRANGE_EDIT_FIELDS = new Set(["ref", "fromRef", "flow", "side", "order", "description"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function specString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -455,12 +450,12 @@ export async function runRearrange(args: readonly string[], ctx: CliContext): Pr
 /* -------------------------------- important ------------------------------- */
 
 const IMPORTANT_OPTIONS = [
-  { name: "workspace" },
+  WORKSPACE_OPTION,
   { name: "ref" },
   { name: "node" },
   { name: "on", boolean: true },
   { name: "off", boolean: true },
-  ...OUTPUT,
+  ...OUTPUT_OPTIONS,
 ] as const;
 
 /**
@@ -486,19 +481,28 @@ export async function runImportant(args: readonly string[], ctx: CliContext): Pr
   const important = on;
 
   let editRef: string;
+  let service: ResolvedService | undefined;
   if (ref !== undefined) {
     editRef = ref;
   } else {
-    const service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
+    service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
     const read = await readAgentNode(service, nodeId as string, { meta: true }, ctx.fetchImpl ?? fetch);
     editRef = read.editRef.ref;
   }
 
   const action: AgentChangeAction = { action: "setImportance", editRef, important };
-  return submitAction("important", action, root, ctx, mode, (response) => ({
-    nodeId: nodeId ?? response.editRef?.nodeId ?? null,
-    important,
-  }));
+  return submitAction(
+    "important",
+    action,
+    root,
+    ctx,
+    mode,
+    (response) => ({
+      nodeId: nodeId ?? response.editRef?.nodeId ?? null,
+      important,
+    }),
+    service,
+  );
 }
 
 /* ------------------------------- create-root ------------------------------ */
@@ -511,13 +515,13 @@ export async function runCreateRoot(args: readonly string[], ctx: CliContext, cr
   const parsed = parseOptions(
     args,
     [
-      { name: "workspace" },
+      WORKSPACE_OPTION,
       { name: "topic-title" },
       ...(createTopic ? [{ name: "directory" }] : []),
       { name: "title" },
       { name: "state" },
       ...BODY_SOURCE,
-      ...OUTPUT,
+      ...OUTPUT_OPTIONS,
     ],
     0,
   );
@@ -552,8 +556,11 @@ async function submitAction(
   ctx: CliContext,
   mode: "json" | "text",
   extras?: (response: AgentChangeResponse) => Record<string, unknown>,
+  resolvedService?: ResolvedService,
 ): Promise<number> {
-  const service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
+  // important --node 已经读取过服务身份；同一次命令不重复 GET /api/workspace。
+  const service =
+    resolvedService ?? (await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch));
   const result = await submitAgentChange(service, action, ctx.fetchImpl ?? fetch);
   const payload = {
     ok: true,

@@ -181,7 +181,6 @@ function fakeService(options: FakeOptions): { fetchImpl: typeof fetch; requests:
         instanceId: options.instanceId ?? "inst-1",
         revision: 4,
         created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
-        affectedNodeIds: [CHILD_NODE],
         changedNodeIds: [CHILD_NODE],
         touchedFiles: [
           {
@@ -677,6 +676,81 @@ describe("低摩擦写入命令", () => {
     // 只做一次只读状态探测，不重放写请求；结果如实标记 unknown。
     expect((error["statusProbe"] as Record<string, unknown>)["state"]).toBe("unknown");
     expect(error["error"]).toMatchObject({ code: "RESULT_UNKNOWN" });
+  });
+
+  it("branch --body-stdin 从注入 stdin 读取正文并提交", async () => {
+    const { root, fetchImpl, requests } = await withService();
+    const result = await main(
+      [
+        "branch",
+        "--from-ref",
+        "ref-parent",
+        "--title",
+        "从 stdin 来的旁支",
+        "--description",
+        "正文较长，走 stdin 避免命令行长度限制",
+        "--body-stdin",
+        "--workspace",
+        root,
+      ],
+      { fetchImpl, stdin: async () => "stdin 里的正文。\r\n第二行。\r\n" },
+    );
+    expect(result.exitCode).toBe(0);
+    const action = parseBody(
+      requests.find((request) => request.url.endsWith("/api/agent/changes")),
+    )["action"] as Record<string, unknown>;
+    expect(action["action"]).toBe("createBranch");
+    // CRLF 统一成 LF，避免把平台差异写进节点文件。
+    expect(action["body"]).toBe("stdin 里的正文。\n第二行。\n");
+  });
+
+  it("important --node 只解析一次服务身份（一次 GET /api/workspace）", async () => {
+    const { root, fetchImpl, requests } = await withService();
+    const result = await main(
+      ["important", "--node", CHILD_NODE, "--on", "--workspace", root],
+      { fetchImpl },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(
+      requests.filter((request) => request.url.endsWith("/api/workspace")),
+    ).toHaveLength(1);
+    const action = parseBody(
+      requests.find((request) => request.url.endsWith("/api/agent/changes")),
+    )["action"] as Record<string, unknown>;
+    expect(action).toMatchObject({ action: "setImportance", editRef: "ref-abc123", important: true });
+  });
+
+  it("read --node 的 404 标准 NOT_FOUND 仍映射为节点不存在（退出码 11）", async () => {
+    const { root, workspaceId } = await newV2Workspace();
+    await writeDescriptor(root, workspaceId);
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      if (url.endsWith("/api/workspace")) {
+        return json(200, {
+          workspaceId,
+          instanceId: "inst-1",
+          revision: 1,
+          rootPath: root,
+          name: "agent-test",
+          activeNode: null,
+          stale: false,
+          diagnostics: [],
+        });
+      }
+      return json(404, { error: { code: "NOT_FOUND", message: "当前快照中没有节点" } });
+    }) as typeof fetch;
+
+    const result = await main(
+      ["read", "--node", "n_00000000000000000000000000000000", "--workspace", root],
+      { fetchImpl },
+    );
+    expect(result.exitCode).toBe(11);
+    expect(JSON.parse(result.stderr).error.code).toBe("NOT_FOUND");
   });
 
   it("serve 仍可用替身启动并按关停信号停止", async () => {

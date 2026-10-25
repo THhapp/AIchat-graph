@@ -5,7 +5,8 @@
  * - editRef 是服务实例内的短凭据，绑定工作区／节点／真实源路径／读取时哈希；
  *   CLI 原样回传，不自己补最新哈希、不按显示编号重定位；
  * - 外层 requestId 由 CLI 生成；同 requestId 重放由服务幂等处理；
- * - 结果不明时先查 status，再如实报告 unknown；不换 requestId 盲重发。
+ * - 结果不明时先查一次 status，再如实报告 unknown；不换 requestId 盲重发。
+ * - fetch／超时／错误体映射统一在 transport，本模块只描述端点与响应形状。
  */
 import { randomUUID } from "node:crypto";
 import type {
@@ -16,12 +17,17 @@ import type {
   AgentReadRange,
 } from "../shared/protocol.js";
 import { CliError, EXIT_CODES } from "./errors.js";
-import { CLIENT_HEADER, CLIENT_HEADER_VALUE, REQUEST_TIMEOUT_MS } from "./service-client.js";
+import { isRecord } from "../shared/guards.js";
+import { CLIENT_HEADER, CLIENT_HEADER_VALUE } from "./service-client.js";
 import type { ResolvedService } from "./service-client.js";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import {
+  queryRequestStatus,
+  requestJson,
+  resultUnknownError,
+  serviceErrorFromResponse,
+  type HttpOutcome,
+  type RequestStatusProbe,
+} from "./transport.js";
 
 export interface AgentReadOptions {
   readonly start?: number | undefined;
@@ -46,15 +52,6 @@ function buildReadUrl(baseUrl: string, nodeId: string, options: AgentReadOptions
     url.searchParams.set("section-index", String(options.sectionIndex));
   }
   return url.toString();
-}
-
-function unreachable(url: string, error: unknown): CliError {
-  return new CliError(
-    "SERVICE_UNREACHABLE",
-    `无法连接服务 ${url}：${error instanceof Error ? error.message : String(error)}`,
-    EXIT_CODES.service,
-    { details: { url }, cause: error },
-  );
 }
 
 function invalidResponse(url: string, detail: string): CliError {
@@ -85,26 +82,20 @@ export async function readAgentNode(
   fetchImpl: typeof fetch = fetch,
 ): Promise<AgentNodeReadResponse> {
   const url = buildReadUrl(service.baseUrl, nodeId, options);
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
+  const outcome = await requestJson(
+    url,
+    { method: "GET", headers: { Accept: "application/json" } },
+    { fetchImpl },
+  );
+  if (outcome.status < 200 || outcome.status >= 300) {
+    // 读取端点的 404 + 标准 NOT_FOUND 才是“节点不存在”（退出码 11）。
+    throw serviceErrorFromResponse(outcome, {
+      endpoint: url,
       method: "GET",
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      notFoundIsResource: true,
     });
-  } catch (error) {
-    throw unreachable(url, error);
   }
-  const text = await response.text();
-  let body: unknown;
-  try {
-    body = text.length > 0 ? (JSON.parse(text) as unknown) : undefined;
-  } catch {
-    body = undefined;
-  }
-  if (!response.ok) {
-    throw httpError(url, response.status, body, text, null);
-  }
+  const body = outcome.body;
   if (!isRecord(body)) throw invalidResponse(url, "响应必须是 JSON 对象");
   if (typeof body["node"] !== "object" || body["node"] === null) {
     throw invalidResponse(url, "缺少 node");
@@ -153,40 +144,20 @@ export async function readAgentNode(
 }
 
 /**
- * 一次状态探测：GET /api/changes/:requestId。
+ * 一次状态探测：GET /api/changes/:requestId 的薄调用。
  * 只读查询，不重放写请求；失败也如实返回原因，不据此推断提交结果。
  */
 export async function probeRequestStatus(
   service: ResolvedService,
   requestId: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<
-  | { readonly ok: true; readonly httpStatus: number; readonly state: string }
-  | { readonly ok: false; readonly reason: string }
-> {
-  const url = new URL(`api/changes/${encodeURIComponent(requestId)}`, service.baseUrl).toString();
+): Promise<RequestStatusProbe> {
   try {
-    const response = await fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(5000),
+    const result = await queryRequestStatus(service.baseUrl, requestId, {
+      fetchImpl,
+      timeoutMs: 5000,
     });
-    const text = await response.text();
-    let body: unknown;
-    try {
-      body = text.length > 0 ? (JSON.parse(text) as unknown) : undefined;
-    } catch {
-      body = undefined;
-    }
-    if (response.status === 404) {
-      return { ok: true, httpStatus: 404, state: "unknown" };
-    }
-    if (!response.ok) {
-      return { ok: false, reason: `状态探测返回 HTTP ${response.status}` };
-    }
-    const state =
-      isRecord(body) && typeof body["state"] === "string" ? body["state"] : "unknown";
-    return { ok: true, httpStatus: response.status, state };
+    return { ok: true, httpStatus: result.httpStatus, state: result.state };
   } catch (error) {
     return {
       ok: false,
@@ -195,87 +166,10 @@ export async function probeRequestStatus(
   }
 }
 
-/** 服务统一错误体 → CLI 错误；退出码按 HTTP 状态映射。 */
-function httpError(
-  url: string,
-  status: number,
-  body: unknown,
-  rawText: string,
-  requestId: string | null,
-): CliError {
-  const exitCode =
-    status === 412
-      ? EXIT_CODES.versionConflict
-      : status === 409
-        ? EXIT_CODES.operationConflict
-        : status === 422
-          ? EXIT_CODES.validation
-          : status === 404
-            ? EXIT_CODES.notFound
-            : status === 400
-              ? EXIT_CODES.usage
-              : EXIT_CODES.http;
-  const errorValue = isRecord(body) ? body["error"] : undefined;
-  if (isRecord(errorValue) && typeof errorValue["code"] === "string") {
-    const diagnostics = Array.isArray(errorValue["diagnostics"])
-      ? (errorValue["diagnostics"] as readonly unknown[])
-      : undefined;
-    return new CliError(
-      errorValue["code"],
-      typeof errorValue["message"] === "string" ? errorValue["message"] : "服务拒绝了请求",
-      exitCode,
-      {
-        ...(isRecord(errorValue["details"]) ? { details: errorValue["details"] } : {}),
-        ...(diagnostics ? { diagnostics } : {}),
-        extras: {
-          httpStatus: status,
-          ...(requestId ? { requestId } : {}),
-          endpoint: url,
-        },
-      },
-    );
-  }
-  return new CliError("SERVICE_HTTP_ERROR", `服务返回 HTTP ${status} 且无标准错误体`, exitCode, {
-    details: { endpoint: url, body: rawText.slice(0, 2000) },
-    extras: { httpStatus: status, ...(requestId ? { requestId } : {}), endpoint: url },
-  });
-}
-
 export interface AgentChangeResult {
   readonly requestId: string;
   readonly httpStatus: number;
   readonly response: AgentChangeResponse;
-}
-
-async function postAgentChange(
-  service: ResolvedService,
-  request: AgentChangeRequest,
-  fetchImpl: typeof fetch,
-): Promise<{ status: number; body: unknown; text: string }> {
-  const url = new URL("api/agent/changes", service.baseUrl).toString();
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        [CLIENT_HEADER]: CLIENT_HEADER_VALUE,
-        Accept: "application/json",
-      },
-      body: JSON.stringify(request),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch (error) {
-    throw unreachable(url, error);
-  }
-  const text = await response.text();
-  let body: unknown;
-  try {
-    body = text.length > 0 ? (JSON.parse(text) as unknown) : undefined;
-  } catch {
-    body = undefined;
-  }
-  return { status: response.status, body, text };
 }
 
 /**
@@ -306,45 +200,40 @@ export async function submitAgentChange(
     requestId,
     action,
   };
+  const endpoint = new URL("api/agent/changes", service.baseUrl).toString();
 
-  let outcome: { status: number; body: unknown; text: string };
+  let outcome: HttpOutcome;
   try {
-    outcome = await postAgentChange(service, request, fetchImpl);
+    outcome = await requestJson(
+      endpoint,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [CLIENT_HEADER]: CLIENT_HEADER_VALUE,
+          Accept: "application/json",
+        },
+        body: JSON.stringify(request),
+      },
+      { fetchImpl },
+    );
   } catch (error) {
-    const cli = error instanceof CliError ? error : undefined;
-    if (cli?.code !== "SERVICE_UNREACHABLE") throw error;
+    if (!(error instanceof CliError) || error.code !== "SERVICE_UNREACHABLE") throw error;
     // 只探测一次原 requestId 的状态（不是重放写请求）：可能因服务短暂不可达而失败。
     const probe = await probeRequestStatus(service, requestId, fetchImpl);
-    throw new CliError(
-      "RESULT_UNKNOWN",
-      `提交结果未知：请求可能已提交也可能未提交。原 requestId ${requestId}；` +
-        `先运行 aichat status ${requestId} 或重读源文件，不要换 requestId 重发。`,
-      EXIT_CODES.resultUnknown,
-      {
-        details: {
-          requestId,
-          endpoint: new URL("api/agent/changes", service.baseUrl).toString(),
-          cause: cli.message,
-          statusProbe: probe,
-        },
-        extras: { requestId, status: "unknown", statusProbe: probe },
-      },
-    );
+    throw resultUnknownError(requestId, endpoint, error.message, probe);
   }
   if (outcome.status < 200 || outcome.status >= 300) {
-    throw httpError(
-      new URL("api/agent/changes", service.baseUrl).toString(),
-      outcome.status,
-      outcome.body,
-      outcome.text,
+    // 写端点 404 是端点缺失，不能冒充“节点不存在”。
+    throw serviceErrorFromResponse(outcome, {
+      endpoint,
+      method: "POST",
       requestId,
-    );
+      notFoundIsResource: false,
+    });
   }
   if (!isRecord(outcome.body) || outcome.body["ok"] !== true) {
-    throw invalidResponse(
-      new URL("api/agent/changes", service.baseUrl).toString(),
-      "缺少 ok:true",
-    );
+    throw invalidResponse(endpoint, "缺少 ok:true");
   }
   return {
     requestId,

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { computeLayout, type LayoutNodeInput, type LayoutResult } from '../../src/web/layout/index.js';
+import {
+  CARD_BASE_HEIGHT,
+  CARD_WIDTH,
+  LAYOUT_HORIZONTAL_GAP,
+  LAYOUT_VERTICAL_GAP,
+  cardHeightForTitle,
+} from '../../src/web/graph/cardMetrics.js';
 
 /**
  * 复杂结构的几何不变量：同带放置 + 走廊绕行在任意拓扑下都必须保持
@@ -189,5 +196,63 @@ describe('geometry invariants on dense structures', () => {
       expect(reversed.edgeRoutes.map((edge) => edge.points)).toEqual(forward.edgeRoutes.map((edge) => edge.points));
       expect(reversed.branchTrunks).toEqual(forward.branchTrunks);
     }
+  });
+});
+
+/**
+ * 生产参数契约：线上/离线阅读器用 cardMetrics 的 120px 横向间距、158px 默认
+ * 卡高和逐卡标题高度调用布局，而上面大多数用例走 layout 默认的 88/152。
+ * 这组小结构显式使用生产参数，防止真实阅读时出现只在默认参数下成立的几何。
+ */
+describe('production card metrics contract', () => {
+  it('keeps cards and routes apart with the live gaps and per-card heights', () => {
+    const titles: Record<string, string> = {
+      p: '根节点',
+      n: '主线二：需要换行才能完整显示的较长标题',
+      b1: '右侧第一条并列分支的标题足够长，占三行也不会被裁切',
+      b2: '右侧第二条',
+      b3: '左侧分支同样需要换行',
+      b1n: '枝内后续',
+      b1b: '枝内再分支',
+    };
+    const shape: Omit<LayoutNodeInput, 'height'>[] = [
+      { id: 'p', from: null, flow: 'root' },
+      { id: 'n', from: 'p', flow: 'next' },
+      { id: 'b1', from: 'n', flow: 'branch', side: 'right', order: 10 },
+      { id: 'b2', from: 'n', flow: 'branch', side: 'right', order: 20 },
+      { id: 'b3', from: 'n', flow: 'branch', side: 'left', order: 10 },
+      { id: 'b1n', from: 'b1', flow: 'next' },
+      { id: 'b1b', from: 'b1', flow: 'branch', side: 'right', order: 10 },
+    ];
+    const nodes: LayoutNodeInput[] = shape.map((node) => ({
+      ...node,
+      height: cardHeightForTitle(titles[node.id] ?? ''),
+    }));
+    const input = {
+      nodes,
+      visibleNodeIds: nodes.map((node) => node.id),
+      cardWidth: CARD_WIDTH,
+      cardHeight: CARD_BASE_HEIGHT,
+      verticalGap: LAYOUT_VERTICAL_GAP,
+      horizontalGap: LAYOUT_HORIZONTAL_GAP,
+      structureVersion: 'production-contract',
+    };
+
+    const result = computeLayout(input);
+    expect(result.cardWidth).toBe(CARD_WIDTH);
+    expect(result.cardHeight).toBe(CARD_BASE_HEIGHT);
+    for (const node of nodes) {
+      expect(result.heights[node.id]).toBe(cardHeightForTitle(titles[node.id] ?? ''));
+    }
+    expect([...overlaps(result), ...penetrated(result), ...diagonals(result)]).toEqual([]);
+    expect(result.structureVersion).toBe('production-contract');
+
+    // 同输入同输出；输入顺序不应改变生产参数下的几何。
+    const again = computeLayout(input);
+    expect(again.positions).toEqual(result.positions);
+    const reversed = computeLayout({ ...input, nodes: [...nodes].reverse() });
+    expect(reversed.positions).toEqual(result.positions);
+    expect(reversed.edgeRoutes.map((edge) => edge.points)).toEqual(result.edgeRoutes.map((edge) => edge.points));
+    expect(reversed.branchTrunks).toEqual(result.branchTrunks);
   });
 });

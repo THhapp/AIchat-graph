@@ -15,16 +15,15 @@ import {
   type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
-import type { LayoutBranchTrunk, LayoutResult } from '../layout/types.js';
-import { connectionText, type GraphView } from '../graph/viewModel.js';
+import type { LayoutResult } from '../layout/types.js';
+import type { GraphView } from '../graph/viewModel.js';
+import { buildFlowEdges } from '../graph/flowEdges.js';
 import type { SavedViewport } from '../data/readingState.js';
 import { TopicCard, type TopicCardData } from './TopicCard.js';
 import { RouteEdge } from './RouteEdge.js';
 import { TrunkEdge } from './TrunkEdge.js';
 
 export interface CanvasProps {
-  graph: GraphResponse;
   view: GraphView;
   layout: LayoutResult | null;
   layoutStatus: 'idle' | 'loading' | 'ready' | 'error';
@@ -41,8 +40,6 @@ export interface CanvasProps {
   savedViewport: SavedViewport | null;
   /** Node to keep at its previous screen position after a structural change. */
   anchorNodeId: string | null;
-  /** Screen position of the anchor captured *before* the new geometry was applied. */
-  anchorScreen: { x: number; y: number } | null;
   /**
    * Node ids of the current topic's `GraphResponse.lastChanges[topicId].nodeIds`.
    * Read-only decoration: it never affects geometry, and view-only actions cannot
@@ -54,64 +51,8 @@ export interface CanvasProps {
 const nodeTypes = { topic: TopicCard };
 const edgeTypes = { route: RouteEdge, trunk: TrunkEdge };
 
-/**
- * Display edges for one layout result.
- *
- * One relationship is still exactly one edge (and one label), but the shared
- * geometry of sibling branches is now a separate, relationship-free edge: the
- * trunk is drawn once and every branch only paints its own exclusive stub from
- * the join down to its target. Counting stays checkable — relationship edges
- * equal the visible parent links, display paths equal that plus the trunks.
- */
-export function buildFlowEdges(layout: LayoutResult, view: GraphView): Edge[] {
-  const routes = new Map(layout.edgeRoutes.map((route) => [route.id, route]));
-  const edges: Edge[] = [];
-
-  // Trunks first, so the branch stubs are painted over the shared run.
-  for (const trunk of layout.branchTrunks ?? []) {
-    if (trunk.points.length < 2) continue;
-    // `to` is only the node that mounts the display edge (the farthest member);
-    // the geometry comes from `points`, never from the node positions.
-    if (!view.visibleIds.has(trunk.from) || !view.visibleIds.has(trunk.to)) continue;
-    if (layout.positions[trunk.from] === undefined || layout.positions[trunk.to] === undefined) continue;
-    edges.push({
-      id: 'trunk|' + trunk.id,
-      source: trunk.from,
-      target: trunk.to,
-      type: 'trunk',
-      className: 'rf-edge--trunk',
-      data: { trunk },
-      selectable: false,
-      focusable: false,
-      deletable: false,
-    });
-  }
-
-  for (const node of view.nodes) {
-    if (node.from === null || !view.visibleIds.has(node.from)) continue;
-    if (layout.positions[node.id] === undefined || layout.positions[node.from] === undefined) continue;
-    const id = node.from + '->' + node.id;
-    const route = routes.get(id) ?? null;
-    edges.push({
-      id,
-      source: node.from,
-      target: node.id,
-      type: 'route',
-      className: 'rf-edge--' + node.flow,
-      // Format 2 keeps the relationship sentence in description; label is the
-      // legacy format-1 field. The connector is now the only place it is drawn.
-      label: connectionText(node) || undefined,
-      data: { flow: node.flow, route },
-      selectable: false,
-      focusable: false,
-      deletable: false,
-    });
-  }
-  return edges;
-}
-
 function CanvasInner(props: CanvasProps): React.JSX.Element {
-  const { graph, view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, anchorScreen, recentNodeIds } = props;
+  const { view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, recentNodeIds } = props;
   const { fitView, getNode, setViewport, getViewport } = useReactFlow();
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -436,19 +377,3 @@ export function GraphCanvas(props: CanvasProps): React.JSX.Element {
     </ReactFlowProvider>
   );
 }
-
-/** Anchor = selected node, else nearest visible ancestor, else root. */
-export function findAnchorNodeId(view: GraphView, selectedId: string | null, graph: GraphResponse): string | null {
-  if (selectedId === null) return graph.nodes.find((node) => node.flow === 'root')?.id ?? null;
-  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
-  let current: string | null = selectedId;
-  const seen = new Set<string>();
-  while (current !== null && !seen.has(current)) {
-    if (view.visibleIds.has(current)) return current;
-    seen.add(current);
-    current = byId.get(current)?.from ?? null;
-  }
-  return graph.nodes.find((node) => node.flow === 'root')?.id ?? null;
-}
-
-export type { GraphNode };

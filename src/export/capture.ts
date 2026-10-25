@@ -5,6 +5,7 @@ import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import type { Root, RootContent } from 'mdast';
 import type { Diagnostic, SnapshotVersion } from '../shared/protocol.js';
+import { sha256Bytes } from '../storage/hash.js';
 import { ExportError } from './errors.js';
 import {
   DEFAULT_MAX_RESOURCE_BYTES,
@@ -117,7 +118,7 @@ export async function captureResources(
           diagnostics.push(errorAt('RESOURCE_TYPE_MISMATCH', '内联图片声明类型与实际内容不符', node.id, undefined, trimmed));
           continue;
         }
-        const sha256 = await sha256Of(bytes);
+        const sha256 = sha256Bytes(bytes);
         const existing = dataImageBytes.get(sha256);
         if (existing === undefined) {
           dataImageBytes.set(sha256, { mediaType, bytes, count: 1 });
@@ -266,7 +267,7 @@ async function readOneResource(
     return fail('RESOURCE_TYPE_MISMATCH', '资源扩展名与实际内容不符: ' + reference.path);
   }
 
-  const sha256 = await sha256Of(bytes);
+  const sha256 = sha256Bytes(bytes);
   return {
     file: {
       path: reference.path,
@@ -425,11 +426,6 @@ function detectMediaType(bytes: Uint8Array): CapturedResourceFile['mediaType'] |
     return 'image/webp';
   }
   return null;
-}
-
-async function sha256Of(bytes: Uint8Array): Promise<string> {
-  const { createHash } = await import('node:crypto');
-  return createHash('sha256').update(bytes).digest('hex');
 }
 
 /**

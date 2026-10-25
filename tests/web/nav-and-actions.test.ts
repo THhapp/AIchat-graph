@@ -8,7 +8,6 @@ import {
 } from '../../src/web/data/readingState.js';
 import { visibleTreeNodes } from '../../src/web/components/Sidebar.js';
 import { buildGraphView } from '../../src/web/graph/viewModel.js';
-import { recentNodeIds } from '../../src/web/lib/recent.js';
 import { writeImportance } from '../../src/web/lib/importance.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string, topicId = 't_1'): GraphNode {
@@ -50,19 +49,6 @@ describe('directory fold versus graph fold', () => {
     expect(state.collapsedNodeIds).toEqual([]);
     expect(view.visibleIds.has('n07')).toBe(true);
     expect(view.visibleIds.has('n0601')).toBe(true);
-  });
-});
-
-describe('recent-change marker is decoration only', () => {
-  it('never changes the structure key, so no card moves when it appears', () => {
-    const plain = buildGraphView(graph, new Set(), 't_1');
-    const withChange = {
-      ...graph,
-      lastChanges: { t_1: { at: '2026-10-24T06:00:00.000Z', nodeIds: ['n06', 'n0601'] } },
-    };
-    const marked = buildGraphView(withChange, new Set(), 't_1');
-    expect(marked.structureKey).toBe(plain.structureKey);
-    expect([...recentNodeIds(withChange, 't_1')]).toEqual(['n06', 'n0601']);
   });
 });
 

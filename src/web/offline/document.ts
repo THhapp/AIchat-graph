@@ -1,4 +1,5 @@
-import type { Diagnostic, GraphNode, GraphResponse, GraphTopic, OfflineTopicDocument } from '../../shared/protocol.js';
+import type { Diagnostic, GraphNode, GraphResponse, OfflineTopicDocument } from '../../shared/protocol.js';
+import { isRecord } from '../../shared/guards.js';
 
 /**
  * Reads the frozen document from the inert JSON block the exporter writes.
@@ -13,10 +14,6 @@ export class OfflineDocumentError extends Error {
     this.name = 'OfflineDocumentError';
     this.code = code;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 /** Validates the parts this reader actually consumes; never silently invents content. */
@@ -84,7 +81,6 @@ export function toGraphResponse(doc: OfflineTopicDocument): GraphResponse {
       ...(node.side !== undefined ? { side: node.side } : {}),
       ...(node.order !== undefined ? { order: node.order } : {}),
       ...(node.description !== undefined ? { description: node.description } : {}),
-      ...(node.label !== undefined ? { label: node.label } : {}),
     })),
     topics: [doc.topic],
   };
@@ -93,9 +89,3 @@ export function toGraphResponse(doc: OfflineTopicDocument): GraphResponse {
 export function bodyById(doc: OfflineTopicDocument): Map<string, string> {
   return new Map(doc.nodes.map((node) => [node.id, node.body]));
 }
-
-export function pathOfTopic(topic: GraphTopic): string {
-  return topic.path;
-}
-
-export type { GraphNode };

@@ -12,12 +12,10 @@ import {
   resolveWorkspaceRoot,
 } from "./paths.js";
 import {
-  TOPIC_META_FILENAME,
-  TOPICS_DIR,
-  isV2TopicFilePath,
+  isTopicFilePath,
   parseTopicPath,
-} from "./format-v2.js";
-import type { WorkspaceSchemaVersion } from "./format-v2.js";
+} from "./format.js";
+import { detectLineEnding } from "../core/newlines.js";
 
 export type LineEnding = "\n" | "\r\n";
 
@@ -40,9 +38,9 @@ export interface WorkspaceFile {
  * 不把未知字段当作可忽略的扩展。
  */
 export interface WorkspaceInfo {
-  /** 1 = 主题文件内多卡片；2 = 一节点一份 Markdown。扫描不改写版本。 */
-  schemaVersion: WorkspaceSchemaVersion;
-  topicMode?: "isolated" | "shared";
+  /** 当前唯一支持的工作区格式：一节点一份 Markdown。扫描不改写版本。 */
+  schemaVersion: 2;
+  topicMode?: "isolated" | undefined;
   workspaceId: string;
   name: string;
   activeNode: string | null;
@@ -58,10 +56,6 @@ export interface WorkspaceFiles {
   /** 路径级诊断（例如跳过的符号链接），不是内容 schema 校验。 */
   diagnostics: StorageDiagnostic[];
   scannedAt: string;
-}
-
-function detectLineEnding(text: string): LineEnding {
-  return text.includes("\r\n") ? "\r\n" : "\n";
 }
 
 /**
@@ -133,7 +127,6 @@ export async function readWorkspaceFile(
 }
 
 const WORKSPACE_ALLOWED_KEYS = new Set(["schemaVersion", "workspaceId", "name", "activeNode", "topicMode"]);
-const SUPPORTED_WORKSPACE_VERSIONS: readonly WorkspaceSchemaVersion[] = [1, 2];
 
 export function parseWorkspaceInfo(text: string, workspacePath = "workspace.json"): WorkspaceInfo {
   let parsed: unknown;
@@ -160,14 +153,14 @@ export function parseWorkspaceInfo(text: string, workspacePath = "workspace.json
     );
   }
   const declaredVersion = record.schemaVersion;
-  if (declaredVersion !== 1 && declaredVersion !== 2) {
+  if (declaredVersion !== 2) {
     throw new StorageError(
       "WORKSPACE_INVALID",
-      `只支持 schemaVersion 1 或 2，收到 ${JSON.stringify(declaredVersion)}；更高版本需要显式迁移`,
+      `只支持 schemaVersion 2，收到 ${JSON.stringify(declaredVersion)}`,
       { path: workspacePath },
     );
   }
-  const schemaVersion: WorkspaceSchemaVersion = declaredVersion;
+  const schemaVersion = 2 as const;
   if (typeof record.workspaceId !== "string" || record.workspaceId.trim() === "") {
     throw new StorageError("WORKSPACE_INVALID", "workspace.json 缺少 workspaceId", {
       path: workspacePath,
@@ -188,11 +181,8 @@ export function parseWorkspaceInfo(text: string, workspacePath = "workspace.json
       path: workspacePath,
     });
   }
-  if (record.topicMode !== undefined && record.topicMode !== "shared" && record.topicMode !== "isolated") {
-    throw new StorageError("WORKSPACE_INVALID", "topicMode 必须是 isolated 或 shared", { path: workspacePath });
-  }
-  if (schemaVersion === 1 && record.topicMode === "isolated") {
-    throw new StorageError("WORKSPACE_INVALID", "格式 1 只支持 shared 主题模式", { path: workspacePath });
+  if (record.topicMode !== undefined && record.topicMode !== "isolated") {
+    throw new StorageError("WORKSPACE_INVALID", "topicMode 只支持 isolated", { path: workspacePath });
   }
   return {
     schemaVersion,
@@ -297,7 +287,7 @@ export async function readWorkspaceFiles(root: string): Promise<WorkspaceFiles> 
   const workspace = parseWorkspaceInfo(workspaceFile.text, "workspace.json");
   const topics: WorkspaceFile[] = [];
   const diagnostics: StorageDiagnostic[] = [];
-  // 扫描事实与格式版本无关：一律列出 topics 下全部 Markdown，由调用方按版本分组。
+  // 一律列出 topics 下全部 Markdown，由调用方按主题目录分组。
   await collectTopicFiles(rootReal, "topics", topics, diagnostics);
   return {
     root: rootReal,
@@ -310,51 +300,36 @@ export async function readWorkspaceFiles(root: string): Promise<WorkspaceFiles> 
   };
 }
 
-/** 便利方法：扫描后按文件路径查找主题。 */
-export function findTopicFile(files: WorkspaceFiles, relativePath: string): WorkspaceFile | undefined {
-  const normalized = relativePath.replace(/\\/g, "/");
-  return files.topics.find((file) => file.path === normalized);
-}
-
 /**
  * 按主题目录分组的扫描事实。
  *
  * 这里只按路径布局分类，不判断文件内容是否合法：谁是 topic.md、谁是节点文件由路径决定，
- * 内容解析与图校验归 core。V1 的文件全部落在 loose 里，因为 V1 没有主题目录概念。
+ * 内容解析与图校验归 core。
  */
 export interface TopicGroup {
-  /** 主题目录（topics 下一层；V1 为空字符串）。 */
+  /** 主题目录（topics 下一层）。 */
   readonly directory: string;
-  /** V2 主题元数据文件（topics/<dir>/topic.md）。 */
+  /** 主题元数据文件（topics/<dir>/topic.md）。 */
   readonly meta: WorkspaceFile | null;
-  /** 该目录下的其余 Markdown（V2 即节点文件）。 */
+  /** 该目录下的其余 Markdown（即节点文件）。 */
   readonly files: readonly WorkspaceFile[];
   /** 本组全部真实源路径，含 topic.md。 */
   readonly sourcePaths: readonly string[];
 }
 
 export interface GroupedWorkspaceFiles {
-  /** topics 根下直接的 Markdown：V1 的主题文件。 */
-  readonly loose: readonly WorkspaceFile[];
   readonly groups: readonly TopicGroup[];
   /** 不符合 topics/<dir>/<file> 层级的路径（诊断用，不参与解析）。 */
   readonly misplaced: readonly string[];
 }
 
-/** 扫描结果的复用入口：按 V2 目录布局分组，V1 归入 loose。 */
+/** 扫描结果的复用入口：按主题目录布局分组。 */
 export function groupWorkspaceFiles(files: WorkspaceFiles): GroupedWorkspaceFiles {
-  if (files.workspace.schemaVersion !== 2) {
-    return {
-      loose: files.topics,
-      groups: [],
-      misplaced: [],
-    };
-  }
   const byDirectory = new Map<string, { meta: WorkspaceFile | null; files: WorkspaceFile[] }>();
   const misplaced: string[] = [];
   for (const file of files.topics) {
     // 主题目录固定 topics 下一层：更深或更浅都属于错误归属，交给诊断，不猜。
-    if (!isV2TopicFilePath(file.path)) {
+    if (!isTopicFilePath(file.path)) {
       misplaced.push(file.path);
       continue;
     }
@@ -382,15 +357,5 @@ export function groupWorkspaceFiles(files: WorkspaceFiles): GroupedWorkspaceFile
       sourcePaths,
     });
   }
-  return { loose: [], groups, misplaced };
-}
-
-/** 该工作区期望的主题入口文件名（V2 固定 topic.md）。 */
-export function expectedTopicMetaPath(directory: string): string {
-  return TOPICS_DIR + "/" + directory + "/" + TOPIC_META_FILENAME;
-}
-
-/** 工作区内的绝对路径（不做存在性检查）。 */
-export function workspaceFilePath(rootReal: string, relativePath: string): string {
-  return resolveWorkspacePath(rootReal, relativePath);
+  return { groups, misplaced };
 }

@@ -41,7 +41,7 @@ CLI 和工作区从用户给定入口、已配置命令或宿主实际加载的�
 
 三者是不同步骤：开发入口随源码变化；`update-daily.cmd` 只换日用快照，不会自动改已安装副本；已安装副本要按实际宿主分别同步，例如 `pwsh scripts/install-skill.ps1 -Host workbuddy -Daily` 或 `-Host codex -Daily`（其他目录用 `-Target` 显式指定），同步前后核对 `local.env.json` 未变。不要把一个宿主的同步结果推广到其他副本；同步后用该副本 `local.env.json` 的 `cli` 运行 `--help`，必要时用实际工作区运行 `whoami` 核对。开发源码和文档可能已变，不能据此假定日用快照或已安装副本已经支持新接口；以实际入口的 `--help` 为准。
 
-随 Skill 提供的 [aichat.ps1](../scripts/aichat.ps1) 由近及远定位，命中即停：
+随 Skill 提供的 [aichat.ps1](../scripts/aichat.ps1) 由近及远定位，命中即停。该脚本与 `scripts/install-skill.ps1` 需要 PowerShell 7（`pwsh`）；仓库根目录的 `start*.cmd` 启动器使用系统自带的 Windows PowerShell 5.1，两者不要混用：
 
 1. `-Cli "<绝对路径>"`：本次调用显式指定；
 2. 脚本同目录或 Skill 根 `local.env.json` 的 `cli` 字段；文件缺失或入口不存在只作说明，不中断查找；
@@ -59,7 +59,7 @@ CLI 和工作区从用户给定入口、已配置命令或宿主实际加载的�
 
 `whoami --workspace "<工作区>"` 核对运行服务与磁盘身份。没有服务时失败不等于源资料不存在，仍可用 `topics`、`read`、`validate` 离线读取检查。身份不符时先解决定位问题，不回退默认端口。
 
-## 当前格式 2 的文件职责
+## 当前格式的文件职责
 
 ```text
 <工作区>/
@@ -81,11 +81,11 @@ CLI 和工作区从用户给定入口、已配置命令或宿主实际加载的�
 
 实际路径使用命令返回结果；不要凭标题或显示编号猜文件名。字段与格式以当前产品契约和校验为准，本文件不维护第二套完整 schema。
 
-新格式 2 工作区默认 `topicMode: isolated`：每个主题目录各有独立 root、主线和编号，父边不能跨主题。旧工作区缺省 `topicMode` 时按 `shared` 兼容，可能仍是一条跨主题的结构；不要仅凭一节点一文件就假定主题已经隔离，也不要自行改模式或移动文件来转换。
+当前格式为 `schemaVersion: 2`、`topicMode: isolated`：每个主题目录各有独立 root、主线和编号，父边不能跨主题。旧格式 1 与 shared 跨主题图不再读取或迁移。
 
 ## 格式与操作范围
 
-`topics` 或 `validate` 返回 `schemaVersion`。格式 1 仍可读，但不是一节点一文件；支持的写入方式见[命令速查](commands.md)。不自动迁移，转换始终隔离生成新目录。
+当前只支持一节点一份 Markdown。`topics`／`validate` 的 `schemaVersion` 恒为 2；写入方式见[命令速查](commands.md)。不提供旧格式转换命令。
 
 推荐托管命令维护源记录。用户授权直接编辑时，先理解实际格式，同一批修改不要与托管提交并行，之后校验。不要通过手补哈希、清除恢复文件或改生成物绕过错误。
 

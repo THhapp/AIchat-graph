@@ -59,8 +59,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
     headingRef.current?.focus();
   }, [tab, node?.id, topic?.id]);
 
-  // description is the format-2 connection text; label is the legacy format-1 fallback.
-  const connectionText = ((tab === 'node' ? node?.description ?? node?.label : '') ?? '').trim();
+  const connectionText = (tab === 'node' ? node?.description ?? '' : '').trim();
   const topicNodes = topicDetail?.nodes ?? null;
   const graphVersion = graph.instanceId + ':' + String(graph.revision);
   const outdated = detailVersion !== null && detailVersion !== graphVersion;
@@ -272,8 +271,8 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                           {item.number} · {flowLabel(item)}
                           {item.id === activeNodeId ? ' · 当前讨论' : ''}
                         </span>
-                        {((item.description ?? item.label ?? '').trim()) !== '' ? (
-                          <p className="topic-reader__desc">{((item.description ?? item.label ?? '').trim())}</p>
+                        {(item.description ?? '').trim() !== '' ? (
+                          <p className="topic-reader__desc">{(item.description ?? '').trim()}</p>
                         ) : null}
                       </div>
                       <StateChip node={item} active={item.id === activeNodeId} />

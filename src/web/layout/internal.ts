@@ -16,6 +16,23 @@ export interface LayoutConfig {
   horizontalGap: number;
 }
 
+/**
+ * 测量与路由共用的带几何常量。
+ * 测量侧用它预留走廊高度，路由侧用它还原干线 y；两处必须取同一值。
+ */
+
+/** 干线离目标带上沿的距离；带内每嵌套一层再抬高一个 TRUNK_STEP。 */
+export const TRUNK_OFFSET = 18;
+/**
+ * 带内每层的抬升。间距 = 本常量：嵌套带的 NESTED_BAND_OFFSET 位移在算干线 y 时被减回去了，两者不叠加。
+ * 14px 低于复核给的 20px 双线阈值，但该拓扑（同带多来源 / 深度≥1 的子干线）在现有数据中为 0 例，
+ * 故不为此放大全局行距（本常量同时是走廊高度与 topExtent，一动全局卡片起点位移）。
+ * 若将来真出现这类形态，应在嵌套那一处按 parentTrunkY - 20 夹取，而不是抬高这个常量。
+ */
+export const TRUNK_STEP = 14;
+/** 分支块自己的子分支带整体下移的距离，只用于层级提示，不改变带内规则。 */
+export const NESTED_BAND_OFFSET = 24;
+
 export interface WorkingNode {
   id: string;
   inputIndex: number;
@@ -28,28 +45,6 @@ export interface WorkingNode {
   height: number;
   label: string | null;
   topicId: string | null;
-}
-
-export interface BlockNode {
-  node: WorkingNode;
-  x: number;
-  y: number;
-}
-
-export interface Block {
-  width: number;
-  /** head 卡的实际高度；同带落位按它判断卡片占用。 */
-  headHeight: number;
-  /** 全块最低边界（head 为原点，向下为正）。 */
-  bottom: number;
-  /** head 上方需要预留的走廊高度，供父 block 判断落位。 */
-  topExtent: number;
-  /**
-   * 本块 head 所在带的分组嵌套深度：0 表示这条带上只有父组一层，
-   * 成员自己在带内再分支时再加一层。干线按它逐层抬高，同带上的组不共线。
-   */
-  bandDepth: number;
-  nodes: BlockNode[];
 }
 
 export interface VisibleTree {
@@ -68,26 +63,6 @@ export interface Visibility {
 export interface DiagnosticSink {
   add: (code: LayoutDiagnosticCode, message: string, nodeId?: string) => void;
   finish: () => LayoutDiagnostic[];
-}
-
-export interface MeasureContext {
-  nextByParent: Map<string, WorkingNode>;
-  branchesByParent: Map<string, WorkingNode[]>;
-  config: LayoutConfig;
-  diagnostics: DiagnosticSink;
-  memo: Map<string, Block>;
-  visiting: Set<string>;
-  /** 每个 branch 的实际落位方向（显式或自动），路由与界面提示复用。 */
-  sides: Map<string, LayoutSide>;
-  /** 并列分组深度：`${from}~${side}` -> 该组在带内的嵌套层数（父组为 0）。 */
-  groupDepths: Map<string, number>;
-  /** branch 节点在父 block 内落到的列（从 1 起，越靠近主脊越小）。 */
-  columns: Map<string, number>;
-  /**
-   * 有入口带的分支节点：node id -> 入口侧（它背向自己方向的那一侧）。
-   * 这一侧的子分支从卡片底边分出，与父节点连进来的中心行横线区分开。
-   */
-  entrySides: Map<string, LayoutSide>;
 }
 
 export function compareIds(a: string, b: string): number {
@@ -140,8 +115,4 @@ export function createDiagnosticSink(): DiagnosticSink {
   };
 
   return { add, finish };
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }

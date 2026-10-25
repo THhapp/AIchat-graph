@@ -9,13 +9,13 @@ import {
 } from './types.js';
 import {
   compareIds,
-  isRecord,
   type DiagnosticSink,
   type LayoutConfig,
   type Visibility,
   type VisibleTree,
   type WorkingNode,
 } from './internal.js';
+import { isRecord } from '../../shared/guards.js';
 
 export function defaultConfig(): LayoutConfig {
   return {

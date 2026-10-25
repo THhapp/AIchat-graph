@@ -628,10 +628,7 @@ describe("导出配置写入守卫", () => {
 describe("导出队列边界", () => {
   it("调度器 finalize 持有队列时第二个 setTarget 必须排队，放行后顺序完成且两条绑定都在", async () => {
     const root = await newWorkspace();
-    const workspacePath = path.join(root, "workspace.json");
-    const workspace = JSON.parse(await fs.readFile(workspacePath, "utf8"));
-    await fs.writeFile(workspacePath, JSON.stringify({ ...workspace, topicMode: "shared" }, null, 2) + "\n", "utf8");
-    // shared 兼容样例：第二个主题仍接同一个 root，验证两条独立绑定都保留。
+    // 第二个隔离主题有自己的起点，用来验证两条独立绑定都保留。
     const otherTopic = "t_" + "9".repeat(32);
     const otherNode = "n_" + "8".repeat(32);
     const otherDir = path.join(root, "topics", "第二个主题");
@@ -648,11 +645,8 @@ describe("导出队列边界", () => {
         "nodeId: " + otherNode,
         "title: 第二棵树",
         "state: agreed",
-        "from: " + ROOT_NODE,
-        "flow: branch",
-        "description: 从根展开的第二个主题",
-        "side: left",
-        "order: 10",
+        "from: null",
+        "flow: root",
         "---",
         "",
         "第二个主题的正文。",

@@ -21,7 +21,7 @@ import {
   toWireStorageDiagnostic,
   wireDiagnostic,
 } from "../errors.js";
-import { combinedHash, graphNodes, graphTopics, type SnapshotData } from "../snapshot.js";
+import { combinedHash, graphNodes, graphTopics, toGraphNode, type SnapshotData } from "../snapshot.js";
 import type { WorkspaceRuntime } from "../workspace.js";
 
 function runtimeAgentEntry(): { cliPath: string; skillPath: string } {
@@ -38,7 +38,6 @@ export function workspaceResponse(runtime: WorkspaceRuntime): WorkspaceResponse 
     workspaceId: runtime.workspaceId,
     name: runtime.current.data.name,
     rootPath: runtime.rootReal,
-    topicMode: runtime.current.data.topicMode ?? "shared",
     agentEntry: runtimeAgentEntry(),
     activeNode: runtime.current.data.graph.activeNode,
     stale: runtime.stale,
@@ -48,7 +47,6 @@ export function workspaceResponse(runtime: WorkspaceRuntime): WorkspaceResponse 
 
 export function graphResponse(runtime: WorkspaceRuntime): GraphResponse {
   return {
-    topicMode: runtime.current.data.topicMode ?? "shared",
     ...runtime.snapshotVersion(),
     workspaceId: runtime.workspaceId,
     activeNode: runtime.current.data.graph.activeNode,
@@ -59,26 +57,6 @@ export function graphResponse(runtime: WorkspaceRuntime): GraphResponse {
     ...(Object.keys(runtime.lastChanges).length === 0
       ? {}
       : { lastChanges: runtime.lastChanges }),
-  };
-}
-
-/** 图节点 → 传输 DTO；description 是格式 2 的来源说明，label 仅格式 1 兼容。 */
-function toWireNode(node: SnapshotData["graph"]["nodes"][number]): GraphNode {
-  return {
-    id: node.id,
-    topicId: node.topicId,
-    title: node.title,
-    summary: node.summary,
-    number: node.number,
-    from: node.from,
-    flow: node.flow,
-    state: node.state,
-    important: node.important,
-    ...(node.description !== undefined ? { description: node.description } : {}),
-    ...(node.side !== undefined ? { side: node.side } : {}),
-    ...(node.order !== undefined ? { order: node.order } : {}),
-    ...(node.description === undefined && node.label !== undefined ? { label: node.label } : {}),
-    sourcePath: node.sourcePath,
   };
 }
 
@@ -95,25 +73,10 @@ function fallbackNode(node: {
   description?: string | undefined;
   side?: "left" | "right" | undefined;
   order?: number | undefined;
-  label?: string | undefined;
   sourcePath?: string | undefined;
 }): GraphNode {
-  return {
-    id: node.id,
-    topicId: node.topicId,
-    title: node.title,
-    summary: node.summary,
-    number: "",
-    from: node.from,
-    flow: node.flow,
-    state: node.state,
-    important: node.important,
-    ...(node.description !== undefined ? { description: node.description } : {}),
-    ...(node.side !== undefined ? { side: node.side } : {}),
-    ...(node.order !== undefined ? { order: node.order } : {}),
-    ...(node.description === undefined && node.label !== undefined ? { label: node.label } : {}),
-    ...(node.sourcePath !== undefined ? { sourcePath: node.sourcePath } : {}),
-  };
+  // 与服务端图节点共用同一投影；唯一差异是回退节点没有派生编号。
+  return toGraphNode({ ...node, number: "" });
 }
 
 export function nodeDetail(
@@ -141,7 +104,7 @@ export function nodeDetail(
   }
   return {
     ...runtime.snapshotVersion(),
-    node: toWireNode(node),
+    node: toGraphNode(node),
     body: node.body,
     topicId: node.topicId,
     // 节点正文的版本是它自己的真实源文件，不是 topic.md 的哈希。
@@ -166,7 +129,7 @@ export function snapshotTopicDetail(
   const nodes: TopicNodeDetail[] = topic.nodes.map((parsed) => {
     const view = graphNodeById.get(parsed.id);
     return {
-      ...(view === undefined ? fallbackNode(parsed) : toWireNode(view)),
+      ...(view === undefined ? fallbackNode(parsed) : toGraphNode(view)),
       body: parsed.body,
       path: parsed.sourcePath,
       fileHash: fileHashByPath.get(parsed.sourcePath) ?? "",
@@ -185,7 +148,7 @@ export function snapshotTopicDetail(
       fileHash: topic.fileHash,
       contentHash: topic.contentHash,
     },
-    // V2 的 raw 只是主题入口（topic.md）；完整阅读按 nodes 里的真实文件。
+    // 主题入口（topic.md）；完整阅读按 nodes 里的真实文件。
     raw: topic.raw,
     fileHash: topic.fileHash,
     nodes,
@@ -204,7 +167,7 @@ export async function diskTopicDetail(
   topicId: string,
 ): Promise<TopicDetailResponse> {
   const known = runtime.current.data.topics.find((entry) => entry.topicId === topicId);
-  // 磁盘详情按一次完整扫描分组解析：V2 一个主题是多份真实文件，不能只读 topic.md。
+  // 磁盘详情按一次完整扫描分组解析：一个主题是多份真实文件，不能只读 topic.md。
   let scanned;
   try {
     scanned = await readWorkspaceFiles(runtime.rootReal);
@@ -219,8 +182,7 @@ export async function diskTopicDetail(
   }
   const parsedWorkspace = parseWorkspaceDocuments({
     workspace: {
-      schemaVersion: scanned.workspace.schemaVersion,
-      ...(scanned.workspace.topicMode !== undefined ? { topicMode: scanned.workspace.topicMode } : {}),
+      schemaVersion: 2,
       workspaceId: scanned.workspace.workspaceId,
       name: scanned.workspace.name,
       activeNode: scanned.workspace.activeNode,
@@ -307,7 +269,7 @@ export async function diskTopicDetail(
     const wire =
       view === undefined
         ? fallbackNode(node)
-        : { ...toWireNode(view), number: view.number };
+        : toGraphNode(view);
     nodes.push({
       ...wire,
       number: wire.number,

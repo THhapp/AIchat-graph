@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GraphResponse, WorkspaceResponse } from '../../shared/protocol.js';
-import { ApiError, errorMessage, getJson } from './client.js';
+import { errorMessage, getJson } from './client.js';
 import type { ExportEvent, TopicExportStatus } from '../../shared/protocol.js';
 
 export type ConnectionState = 'connecting' | 'open' | 'reconnecting' | 'closed';
@@ -13,7 +13,6 @@ export interface SnapshotState {
   /** null while the first load is in flight. */
   error: Error | null;
   loading: boolean;
-  refreshing: boolean;
   connection: ConnectionState;
 }
 
@@ -33,7 +32,6 @@ export function useSnapshot(): SnapshotState & { refresh: () => void } {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [exportStatuses, setExportStatuses] = useState<Record<string, TopicExportStatus>>({});
 
@@ -50,7 +48,6 @@ export function useSnapshot(): SnapshotState & { refresh: () => void } {
     }
     const controller = new AbortController();
     inFlight.current = controller;
-    if (graphRef.current !== null) setRefreshing(true);
     try {
       const [nextWorkspace, nextGraph] = await Promise.all([
         getJson<WorkspaceResponse>('/api/workspace', controller.signal),
@@ -72,7 +69,6 @@ export function useSnapshot(): SnapshotState & { refresh: () => void } {
       if (inFlight.current === controller) inFlight.current = null;
       if (mounted.current) {
         setLoading(false);
-        setRefreshing(false);
       }
       if (queued.current) {
         queued.current = false;
@@ -148,12 +144,7 @@ export function useSnapshot(): SnapshotState & { refresh: () => void } {
     workspace,
     error: error === null ? null : new Error(errorMessage(error)),
     loading,
-    refreshing,
     connection,
     refresh,
   };
-}
-
-export function isStaleError(error: unknown): boolean {
-  return error instanceof ApiError && error.code === 'STALE_SNAPSHOT';
 }

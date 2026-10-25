@@ -18,7 +18,7 @@ export {
 export {
   readReaderAssets,
   assertSelfContainedStyles,
-} from './readerAssets.js';
+} from './reader-assets.js';
 export { ExportError } from './errors.js';
 export {
   EXPORT_FORMAT_VERSION,

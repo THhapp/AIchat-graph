@@ -17,6 +17,7 @@ import {
   StorageError,
 } from "../storage/index.js";
 import { CliError, EXIT_CODES } from "./errors.js";
+import { isRecord } from "../shared/guards.js";
 
 export const SERVICE_DESCRIPTOR_PATH = ".aichat/runtime/service.json";
 export const CLIENT_HEADER = "X-AIchat-Client";
@@ -33,16 +34,11 @@ export interface ServiceDescriptor {
 }
 
 export interface WorkspaceIdentity {
-  readonly topicMode?: "isolated" | "shared";
   readonly workspaceId: string;
   readonly instanceId: string;
   readonly rootPath: string;
   readonly name?: string;
   readonly url: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** 严格解析描述文件；缺字段／类型错误一律视为陈旧描述。 */
@@ -317,7 +313,6 @@ export async function fetchWorkspaceIdentity(
     instanceId,
     rootPath,
     url: baseUrl,
-    ...(body["topicMode"] === "isolated" || body["topicMode"] === "shared" ? { topicMode: body["topicMode"] } : {}),
     ...(typeof body["name"] === "string" ? { name: body["name"] } : {}),
   };
 }

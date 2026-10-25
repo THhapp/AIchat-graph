@@ -4,10 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { initWorkspace, sha256Bytes } from "../../src/storage/index.js";
 import { parseOptions } from "../../src/cli/args.js";
-import { readChangeRequestFile, validateChangeRequestShape } from "../../src/cli/changes.js";
+import { readChangeRequestFile, validateChangeRequestShape } from "../../src/cli/change-input.js";
 import { assertIdentity, assertLoopbackUrl, parseServiceDescriptor } from "../../src/cli/service-client.js";
 import { main } from "../../src/cli/index.js";
-import { sliceBody, locateSection, DEFAULT_READ_LENGTH, MAX_READ_SEGMENT } from "../../src/cli/text.js";
+import {
+  DEFAULT_READ_LENGTH,
+  MAX_READ_SEGMENT,
+  locateSection,
+  sliceBody,
+} from "../../src/core/index.js";
 
 const temporaryRoots: string[] = [];
 
@@ -99,46 +104,20 @@ async function newV2Workspace(
   return { root, workspaceId: created.workspaceId, hashes };
 }
 
-/** 格式 1 工作区：单文件多卡片，仅用于兼容路径。 */
-async function newV1Workspace(): Promise<{ root: string; topicText: string }> {
-  const parent = await newParent();
-  const root = path.join(parent, "workspace-v1");
-  await initWorkspace({ root, name: "cli-v1", schemaVersion: 1 });
-  const topicText = [
-    "---",
-    "schemaVersion: 1",
-    `topicId: ${TOPIC_ID}`,
-    "title: 条目整理",
-    "nodes:",
-    `  ${ROOT_NODE}:`,
-    "    from: null",
-    "    flow: root",
-    "    state: agreed",
-    `  ${CHILD_NODE}:`,
-    `    from: ${ROOT_NODE}`,
-    "    flow: next",
-    "    state: proposed",
-    "---",
-    "",
-    `## 条目整理 <!-- node:${ROOT_NODE} -->`,
-    "",
-    ROOT_BODY,
-    "",
-    `## 可以回查的现场 <!-- node:${CHILD_NODE} -->`,
-    "",
-    CHILD_BODY,
-    "",
-  ].join("\n");
-  await writeFileAt(root, "topics/条目整理.md", topicText);
-  return { root, topicText };
-}
-
 function jsonOf(stdout: string): Record<string, unknown> {
   return JSON.parse(stdout) as Record<string, unknown>;
 }
 
-function errorOf(stderr: string): { code: string; details?: Record<string, unknown> } {
-  return (JSON.parse(stderr) as { error: { code: string; details?: Record<string, unknown> } }).error;
+function errorOf(stderr: string): {
+  code: string;
+  message?: string;
+  details?: Record<string, unknown>;
+} {
+  return (
+    JSON.parse(stderr) as {
+      error: { code: string; message?: string; details?: Record<string, unknown> };
+    }
+  ).error;
 }
 
 describe("参数解析", () => {
@@ -341,6 +320,23 @@ describe("格式 2 工作区", () => {
     expect(fullNode?.["truncated"]).toBe(false);
   });
 
+  it("--start 超过 service 的可接受上限时是参数错误", async () => {
+    const { root } = await newV2Workspace();
+    const result = await main([
+      "read",
+      "--node",
+      CHILD_NODE,
+      "--start",
+      "100000001",
+      "--workspace",
+      root,
+    ]);
+    expect(result.exitCode).toBe(2);
+    const error = errorOf(result.stderr);
+    expect(error.code).toBe("INVALID_ARGUMENT");
+    expect(error.message).toContain("0-100000000");
+  });
+
   it("read 主题返回主题元数据与节点清单，不把节点正文当主题全文", async () => {
     const { root } = await newV2Workspace();
     const byId = await main(["read", TOPIC_ID, "--workspace", root]);
@@ -405,6 +401,7 @@ describe("格式 2 工作区", () => {
     expect((firstBody["hits"] as unknown[]).length).toBe(10);
     expect(firstBody["limit"]).toBe(10);
     expect(firstBody["hasMore"]).toBe(true);
+    expect(firstBody["truncated"]).toBe(true);
     expect(firstBody["totalHits"]).toBe(12);
     const firstHit = (firstBody["hits"] as Array<Record<string, unknown>>)[0];
     expect(firstHit?.["path"]).toMatch(/^topics\/条目整理\/n_/);
@@ -413,10 +410,67 @@ describe("格式 2 工作区", () => {
     const second = await main(["search", "分页检索", "--workspace", root, "--page", "1"]);
     const secondBody = jsonOf(second.stdout);
     expect((secondBody["hits"] as unknown[]).length).toBe(2);
+    expect(secondBody["totalHits"]).toBe(12);
     expect(secondBody["hasMore"]).toBe(false);
+    expect(secondBody["truncated"]).toBe(false);
 
     const badLimit = await main(["search", "分页检索", "--workspace", root, "--limit", "101"]);
     expect(badLimit.exitCode).toBe(2);
+  });
+
+  it("search 按标题 > 摘要 > 正文排序", async () => {
+    const { root } = await newV2Workspace();
+    const titleId = `n_${"1".repeat(32)}`;
+    const summaryId = `n_${"2".repeat(32)}`;
+    const bodyId = `n_${"3".repeat(32)}`;
+    await writeFileAt(
+      root,
+      `topics/条目整理/${titleId}.md`,
+      nodeFile({
+        nodeId: titleId,
+        title: "排序词标题",
+        state: "proposed",
+        from: ROOT_NODE,
+        flow: "branch",
+        body: "标题命中，正文没有重复。",
+        description: "排序用例",
+      }),
+    );
+    await writeFileAt(
+      root,
+      `topics/条目整理/${summaryId}.md`,
+      nodeFile({
+        nodeId: summaryId,
+        title: "摘要命中",
+        state: "proposed",
+        from: ROOT_NODE,
+        flow: "branch",
+        body: "排序词出现在首段。\n\n这一段不改变摘要。",
+        description: "排序用例",
+      }),
+    );
+    await writeFileAt(
+      root,
+      `topics/条目整理/${bodyId}.md`,
+      nodeFile({
+        nodeId: bodyId,
+        title: "正文命中",
+        state: "proposed",
+        from: ROOT_NODE,
+        flow: "branch",
+        body: "首段无关。\n\n排序词只在后续正文出现。",
+        description: "排序用例",
+      }),
+    );
+
+    const result = await main(["search", "排序词", "--workspace", root]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const body = jsonOf(result.stdout);
+    const hits = body["hits"] as Array<Record<string, unknown>>;
+    expect(hits.map((hit) => hit["field"])).toEqual(["title", "summary", "body"]);
+    expect(hits.map((hit) => hit["nodeId"])).toEqual([titleId, summaryId, bodyId]);
+    expect(body["totalHits"]).toBe(3);
+    expect(body["truncated"]).toBe(false);
   });
 
   it("validate 通过并给出 graph；坏节点文件逐个报告且不虚报全图", async () => {
@@ -498,34 +552,6 @@ describe("格式 2 工作区", () => {
   });
 });
 
-describe("格式 1 兼容读取", () => {
-  it("仍按单文件多卡片读取，节点 sourcePath 回退主题文件", async () => {
-    const { root, topicText } = await newV1Workspace();
-    const topics = await main(["topics", "--workspace", root]);
-    expect(topics.exitCode).toBe(0);
-    const topicsBody = jsonOf(topics.stdout);
-    expect(topicsBody["schemaVersion"]).toBe(1);
-    const list = topicsBody["topics"] as Array<Record<string, unknown>>;
-    expect(list).toHaveLength(1);
-    expect(list[0]).toMatchObject({ topicId: TOPIC_ID, path: "topics/条目整理.md", nodeCount: 2 });
-
-    const read = await main(["read", "--node", CHILD_NODE, "--workspace", root]);
-    expect(read.exitCode).toBe(0);
-    const node = (jsonOf(read.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
-    expect(node).toMatchObject({
-      path: "topics/条目整理.md",
-      body: CHILD_BODY,
-    });
-    expect(node?.["node"]).toMatchObject({ id: CHILD_NODE });
-    expect(node?.["schemaVersion"]).toBeUndefined();
-    expect(node?.["fileHash"]).toBe(sha256Bytes(topicText));
-    expect(node?.["file"]).toBeUndefined();
-
-    const validate = await main(["validate", "--workspace", root]);
-    expect(validate.exitCode).toBe(0);
-  });
-});
-
 describe("变更请求形状", () => {
   const valid = {
     workspaceId: "w_1",
@@ -562,7 +588,7 @@ describe("变更请求形状", () => {
     expect(issuesOf({ ...valid, workspaceId: "" }).map((issue) => issue.path)).toContain("workspaceId");
   });
 
-  it("接受 V2 操作（patchNode／updateConnection 带 description），不按 V1 误拒", () => {
+  it("接受当前操作（patchNode／updateConnection 带 description）", () => {
     const v2 = {
       workspaceId: "w_1",
       requestId: "3f0f6f1c-7f0e-4d5b-9a3e-1c2d3e4f5a6b",
@@ -590,7 +616,7 @@ describe("变更请求形状", () => {
     };
     expect(validateChangeRequestShape(connection)).toEqual(connection);
 
-    // V1 的 label／旧字段仍被 V1 分支接受；未知 op 两边都拒绝。
+    // 未知 op 一律拒绝。
     expect(issuesOf({ ...v2, operations: [{ op: "mergeNodes" }] }).length).toBeGreaterThan(0);
   });
 

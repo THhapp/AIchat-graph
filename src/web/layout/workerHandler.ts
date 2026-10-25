@@ -1,4 +1,5 @@
 import { computeLayout } from './index.js';
+import { isRecord } from '../../shared/guards.js';
 import type { LayoutWorkerRequest, LayoutWorkerResponse } from './workerProtocol.js';
 
 export interface LayoutWorkerState {
@@ -8,10 +9,6 @@ export interface LayoutWorkerState {
 
 export function createLayoutWorkerState(): LayoutWorkerState {
   return { latestSequence: Number.NEGATIVE_INFINITY };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 function structureVersionOf(input: unknown): number | string | null {

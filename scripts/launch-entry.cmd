@@ -70,7 +70,7 @@ goto argument_error
 :unknown_arg
 echo [AIchat-graph] Unknown argument: %~1
 :argument_error
-echo Usage: start.cmd or start-dev.cmd [-Workspace ^<dir^>] [-Port ^<n^>] [-NoBrowser] [-Help]
+echo Usage: start.cmd / start-dev.cmd / update-daily.cmd (run with -Help for options)
 set "LAUNCH_EXIT=1"
 set "PAUSE_ON_FAIL=1"
 :after_run

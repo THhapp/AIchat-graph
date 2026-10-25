@@ -17,7 +17,7 @@ import {
   isErrnoCode,
   writeFileDurable,
 } from "../storage/index.js";
-import type { SupportedSchemaVersion } from "../core/index.js";
+import { isRecord } from "../shared/guards.js";
 import type { SnapshotData } from "./snapshot.js";
 
 export const CACHE_DIR = ".aichat/cache";
@@ -25,22 +25,16 @@ const SNAPSHOT_FILE = "snapshot.json";
 const MANIFEST_FILE = "manifest.json";
 const CACHE_FORMAT = 3;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 export interface CacheIdentity {
   readonly workspaceId: string;
   readonly name: string;
-  readonly schemaVersion: SupportedSchemaVersion;
-  readonly topicMode?: "isolated" | "shared";
+  readonly schemaVersion: 2;
 }
 
 interface CachedSnapshot {
   schemaVersion: number;
   workspaceId: string;
-  schemaFormat: 1 | 2;
-  topicMode: "isolated" | "shared";
+  schemaFormat: 2;
   name: string;
   activeNode: string | null;
   workspaceHash: string;
@@ -70,8 +64,7 @@ export async function saveCache(rootReal: string, data: SnapshotData): Promise<b
   const payload: CachedSnapshot = {
     schemaVersion: CACHE_FORMAT,
     workspaceId: data.workspaceId,
-    schemaFormat: data.schemaVersion,
-    topicMode: data.topicMode ?? "shared",
+    schemaFormat: 2,
     name: data.name,
     activeNode: data.activeNode,
     workspaceHash: data.workspaceHash,
@@ -98,8 +91,8 @@ export async function saveCache(rootReal: string, data: SnapshotData): Promise<b
 }
 
 /**
- * 只读取工作区身份与格式。workspace.json 暂时不可读时用于继续提供只读诊断；
- * 不是"有效内容"，也不能据此构造图。
+ * 只读取工作区身份。workspace.json 暂时不可读时用于继续提供只读诊断；
+ * 不是"有效内容"，也不能据此构造图。旧格式或不完整的缓存按 miss 处理。
  */
 export async function loadCacheIdentity(rootReal: string): Promise<CacheIdentity | null> {
   const file = path.join(cacheDir(rootReal), SNAPSHOT_FILE);
@@ -117,11 +110,8 @@ export async function loadCacheIdentity(rootReal: string): Promise<CacheIdentity
     const schemaVersion = parsed["schemaFormat"];
     if (typeof workspaceId !== "string" || workspaceId.length === 0) return null;
     if (typeof name !== "string" || name.length === 0) return null;
-    if (schemaVersion !== 1 && schemaVersion !== 2) return null;
-    const topicMode = parsed["topicMode"] ?? "shared";
-    if (topicMode !== "isolated" && topicMode !== "shared") return null;
-    if (schemaVersion === 1 && topicMode === "isolated") return null;
-    return { workspaceId, name, schemaVersion, topicMode };
+    if (schemaVersion !== 2) return null;
+    return { workspaceId, name, schemaVersion: 2 };
   } catch {
     return null;
   }

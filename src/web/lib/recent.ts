@@ -39,11 +39,3 @@ export function recentNodeIds(
   }
   return merged.size === 0 ? EMPTY : merged;
 }
-
-/** Human-readable time for the marker tooltip; invalid values fall back to the raw text. */
-export function recentTooltip(change: LastChange | null | undefined): string {
-  if (change === undefined || change === null) return '';
-  const at = Date.parse(change.at);
-  if (Number.isNaN(at)) return '最近更新：' + change.at;
-  return '最近更新：' + new Date(at).toLocaleString('zh-CN', { hour12: false });
-}

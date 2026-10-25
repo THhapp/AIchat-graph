@@ -130,17 +130,23 @@ function headingTitle(heading: Heading): string {
   return pieces.join("").replace(/\s+/g, " ").trim();
 }
 
-interface RawSection {
-  readonly offset: number;
-  readonly level: number;
+/** 正文顶层标题：index 是全文标题顺序（0 起），start/end 是 UTF-16 偏移。 */
+export interface DocumentSection {
+  readonly index: number;
   readonly title: string;
+  readonly level: number;
+  /** 标题起始偏移（缩进标题从 `#` 开始，不含前面的空格）。 */
+  readonly start: number;
+  /** 标题行的结束偏移（不含行尾换行）。 */
+  readonly end: number;
 }
 
 /**
  * 用 AST 找正文顶层标题。只取 root 的直接 heading 子节点：
  * 围栏代码块内的 "#" 属于 code 节点，天然不会被计入。
+ * 缩进 0–3 格的 ATX 标题能识别；index 按全文标题出现顺序编号。
  */
-function sectionsOf(text: string): RawSection[] {
+export function sectionsOf(text: string): DocumentSection[] {
   if (text.length === 0) return [];
   let root: Root;
   try {
@@ -148,14 +154,34 @@ function sectionsOf(text: string): RawSection[] {
   } catch {
     return [];
   }
-  const sections: RawSection[] = [];
+  const sections: DocumentSection[] = [];
   for (const node of root.children) {
     if (node.type !== "heading") continue;
-    const offset = node.position?.start?.offset;
-    if (typeof offset !== "number") continue;
-    sections.push({ offset, level: node.depth, title: headingTitle(node) });
+    const start = node.position?.start?.offset;
+    const end = node.position?.end?.offset;
+    if (typeof start !== "number" || typeof end !== "number") continue;
+    sections.push({
+      index: sections.length,
+      level: node.depth,
+      title: headingTitle(node),
+      start,
+      end,
+    });
   }
   return sections;
+}
+
+/** 返回包含 offset 的最近章节（含上一级）；没有标题或 offset 在第一个标题前返回 null。 */
+export function sectionAt(
+  sections: readonly DocumentSection[],
+  offset: number,
+): DocumentSection | null {
+  let found: DocumentSection | null = null;
+  for (const section of sections) {
+    if (section.start > offset) break;
+    found = section;
+  }
+  return found;
 }
 
 /**
@@ -174,8 +200,8 @@ export function locateSection(text: string, title: string, index?: number): Sect
         "标题「" + wanted + "」出现 " + String(matches.length) + " 次；请用 --section-index 指定第几个（0 起）",
       );
     }
-    const only = matches[0] as RawSection;
-    return { start: only.offset, title: wanted, level: only.level, index: 0 };
+    const only = matches[0] as DocumentSection;
+    return { start: only.start, title: wanted, level: only.level, index: 0 };
   }
   if (!Number.isInteger(index) || index < 0) {
     throw new RangeError("--section-index 必须是非负整数: " + String(index));
@@ -187,5 +213,5 @@ export function locateSection(text: string, title: string, index?: number): Sect
       "--section-index " + String(index) + " 超出范围；标题「" + wanted + "」共出现 " + String(matches.length) + " 次",
     );
   }
-  return { start: chosen.offset, title: wanted, level: chosen.level, index };
+  return { start: chosen.start, title: wanted, level: chosen.level, index };
 }

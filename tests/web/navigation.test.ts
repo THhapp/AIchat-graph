@@ -125,18 +125,16 @@ describe('directory panel is remembered per topic', () => {
 });
 
 describe('directory folds are their own state', () => {
-  it('folds topic folders and nodes without touching the graph collapse', () => {
+  it('folds topic folders without touching the graph collapse', () => {
     const base = switchReadingTopic(emptyReadingState(), 't_1');
-    const foldedNode = toggleNavNode(base, 't_1', 'n06');
-    expect(navCollapsedNodeIds(foldedNode.navTree, 't_1')).toEqual(['n06']);
-    // The diagram keeps every card: this is a navigation fold only.
-    expect(foldedNode.collapsedNodeIds).toEqual([]);
-
-    const foldedFolder = toggleNavFolder(foldedNode, 't_1', 't_1');
+    const foldedFolder = toggleNavFolder(base, 't_1', 't_1');
     expect(navFolderExpanded(foldedFolder.navTree, 't_1', 't_1')).toBe(false);
+    // The diagram keeps every card: this is a navigation fold only.
     expect(foldedFolder.collapsedNodeIds).toEqual([]);
-    // The node fold survives folding its folder.
-    expect(navCollapsedNodeIds(foldedFolder.navTree, 't_1')).toEqual(['n06']);
+    // A node fold survives folding its folder.
+    const withNodeFold = toggleNavNode(foldedFolder, 't_1', 'n06');
+    expect(navCollapsedNodeIds(withNodeFold.navTree, 't_1')).toEqual(['n06']);
+    expect(withNodeFold.collapsedNodeIds).toEqual([]);
   });
 
   it('does not touch the graph fold either direction', () => {
@@ -253,19 +251,10 @@ describe('recent-change marker', () => {
     };
     expect([...recentNodeIds(both, 't_1')]).toEqual(['n06']);
     expect([...recentNodeIds(both, 't_2')]).toEqual(['nX']);
-  });
 
-  it('replaces one topic’s batch without touching another', () => {
-    const changes = {
-      t_1: { at: 'a', nodeIds: ['n06', 'n0601'] },
-      t_2: { at: 'b', nodeIds: ['nX'] },
-    };
-    const replaced = {
-      ...graph,
-      lastChanges: { ...changes, t_1: { at: 'c', nodeIds: ['n07'] } },
-    };
-    expect([...recentNodeIds(replaced, 't_1')]).toEqual(['n07']);
-    expect([...recentNodeIds(replaced, 't_2')]).toEqual(['nX']);
+    // Decoration only: the marker data never changes the drawn structure.
+    expect(buildGraphView(onlyFirst, new Set(), 't_1').structureKey)
+      .toBe(buildGraphView(graph, new Set(), 't_1').structureKey);
   });
 
   it('merges every topic in the whole-workspace view without duplicates', () => {
@@ -292,25 +281,6 @@ describe('recent-change marker', () => {
       lastChanges: { t_1: { at: 'x', nodeIds: ['n06', 7, null, 'n06'] } },
     } as unknown as Parameters<typeof recentNodeIds>[0];
     expect([...recentNodeIds(dirty, 't_1')]).toEqual(['n06']);
-  });
-
-  it('does not depend on selection, folding or zoom', () => {
-    const changes = {
-      t_1: { at: 'a', nodeIds: ['n06'] },
-      t_2: { at: 'b', nodeIds: ['nX'] },
-    };
-    const base = { ...graph, lastChanges: changes };
-    const selected = { ...base, activeNode: 'n07' };
-    expect([...recentNodeIds(selected, 't_1')]).toEqual([...recentNodeIds(base, 't_1')]);
-
-    // Folding only changes which cards are drawn; the marker data stays put.
-    const folded = buildGraphView(base, new Set(['n06']), 't_1');
-    const unfolded = buildGraphView(base, new Set(), 't_1');
-    expect(folded.visibleIds).not.toEqual(unfolded.visibleIds);
-    expect([...recentNodeIds(base, 't_1')]).toEqual(['n06']);
-
-    // Zoom belongs to the saved viewport, never to the graph payload.
-    expect([...recentNodeIds({ ...base }, 't_1')]).toEqual(['n06']);
   });
 });
 

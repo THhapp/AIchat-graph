@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  nodeFromV2Document,
-  parseTopicDocument,
-  parseV2NodeDocument,
+  nodeFromDocument,
+  parseNodeDocument,
   parseWorkspaceDocuments,
 } from "../../src/core/index.js";
 
 /**
  * 重要标记（P11）在 core 的读侧契约：
- * 格式 2 节点头可选 `important`，缺省视为 false；格式 1 没有该字段，读侧恒为 false。
+ * 节点头可选 `important`，缺省视为 false。
  */
 
 const NODE_ID = "n_" + "1".repeat(32);
@@ -32,12 +31,12 @@ function nodeFile(extra: readonly string[] = []): string {
 }
 
 function parsedNode(extra: readonly string[] = []) {
-  const parsed = parseV2NodeDocument(nodeFile(extra), "topics/讨论/" + NODE_ID + ".md", CONTEXT);
+  const parsed = parseNodeDocument(nodeFile(extra), "topics/讨论/" + NODE_ID + ".md", CONTEXT);
   if (!parsed.header) throw new Error("节点头未通过：" + JSON.stringify(parsed.diagnostics));
-  return nodeFromV2Document(parsed.document, parsed.header, CONTEXT);
+  return nodeFromDocument(parsed.document, parsed.header, CONTEXT);
 }
 
-describe("格式 2 的 important", () => {
+describe("节点头的 important", () => {
   it("缺省为 false，而不是缺字段", () => {
     const node = parsedNode();
     expect(node.important).toBe(false);
@@ -52,7 +51,7 @@ describe("格式 2 的 important", () => {
   });
 
   it("非布尔值按 schema 错误拒绝", () => {
-    const parsed = parseV2NodeDocument(
+    const parsed = parseNodeDocument(
       nodeFile(['important: "yes"']),
       "topics/讨论/" + NODE_ID + ".md",
       CONTEXT,
@@ -62,7 +61,7 @@ describe("格式 2 的 important", () => {
   });
 
   it("未知字段仍然拒绝（不因为新增了 important 就放宽）", () => {
-    const parsed = parseV2NodeDocument(
+    const parsed = parseNodeDocument(
       nodeFile(["starred: true"]),
       "topics/讨论/" + NODE_ID + ".md",
       CONTEXT,
@@ -70,31 +69,6 @@ describe("格式 2 的 important", () => {
     expect(parsed.header).toBeUndefined();
     const codes = parsed.diagnostics.map((item) => item.code);
     expect(codes).toContain("SCHEMA_UNKNOWN_FIELD");
-  });
-});
-
-describe("格式 1 的 important", () => {
-  it("读侧恒为 false，不新增写入口", () => {
-    const text = [
-      "---",
-      "schemaVersion: 1",
-      "topicId: " + TOPIC_ID,
-      "title: 条目整理",
-      "nodes:",
-      "  " + NODE_ID + ":",
-      "    from: null",
-      "    flow: root",
-      "    state: agreed",
-      "---",
-      "",
-      "## 记录的目的 <!-- node:" + NODE_ID + " -->",
-      "",
-      "保留有用的思路来路。",
-      "",
-    ].join("\n");
-    const parsed = parseTopicDocument(text, { path: "topics/topic.md" });
-    expect(parsed.diagnostics).toEqual([]);
-    expect(parsed.topic?.nodes[0]?.important).toBe(false);
   });
 });
 

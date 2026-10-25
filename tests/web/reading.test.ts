@@ -9,7 +9,7 @@ import { buildContinuationPrompt } from '../../src/web/lib/prompt.js';
 import { computeLayout } from '../../src/web/layout/index.js';
 import type { LayoutEdgeRoute, LayoutInput, LayoutResult } from '../../src/web/layout/types.js';
 import { buildOrthogonalPath, pathLength } from '../../src/web/components/edgePath.js';
-import { buildFlowEdges } from '../../src/web/components/GraphCanvas.js';
+import { buildFlowEdges } from '../../src/web/graph/flowEdges.js';
 import { layoutEdgeLabel } from '../../src/web/components/RouteEdge.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string): GraphResponse['nodes'][number] {
@@ -184,12 +184,10 @@ describe('card height and connector labels', () => {
     expect(view.layoutNodes.find((item) => item.id === 'n1')?.height).toBe(cardHeightForTitle('根节点'));
     expect(view.layoutNodes.find((item) => item.id === 'n2')?.label).toBe('因为要解释排版分工，所以接在主线之后。');
 
-    // Format 1 keeps the legacy label as the connector text.
-    const legacy = { ...graph, nodes: graph.nodes.map((item) => (item.id === 'n3' ? { ...item, label: '旧格式关系' } : item)) };
-    expect(buildGraphView(legacy, new Set(), null).layoutNodes.find((item) => item.id === 'n3')?.label).toBe('旧格式关系');
-    expect(connectionText({ description: '关系句', label: '旧标签' })).toBe('关系句');
-    expect(connectionText({ label: '旧标签' })).toBe('旧标签');
-    expect(connectionText({ description: '   ', label: '旧标签' })).toBe('');
+    // description is the only connection text.
+    expect(connectionText({ description: '关系句' })).toBe('关系句');
+    expect(connectionText({ description: '   ' })).toBe('');
+    expect(connectionText({})).toBe('');
   });
 });
 
@@ -211,7 +209,7 @@ describe('reading state', () => {
 
 describe('isolated topic reading', () => {
   const twoTopics: GraphResponse = {
-    ...graph, topicMode: 'isolated', activeNode: 'other',
+    ...graph, activeNode: 'other',
     nodes: [...graph.nodes, { ...node('other', null, 'root', '01', '另一个主题'), topicId: 't_2' }],
     topics: [...graph.topics, { id: 't_2', title: '另一个主题', path: 'topics/第二主题/topic.md', nodeIds: ['other'], fileHash: 'bbb' }],
   };
@@ -223,15 +221,6 @@ describe('isolated topic reading', () => {
     expect(searchGraph(first, '另一个').nodes).toEqual([]);
     expect(first.activeNode).toBeNull();
     expect(scopeGraphToTopic(twoTopics, 't_2').nodes.map((node) => node.id)).toEqual(['other']);
-    // Shared compatibility does not silently pull cross-topic ancestors into the open diagram.
-    const shared = { ...twoTopics, topicMode: 'shared' as const, nodes: twoTopics.nodes.map((node) => node.id === 'other' ? { ...node, from: 'n2', flow: 'branch' as const } : node) };
-    const sharedView = buildGraphView(scopeGraphToTopic(shared, 't_2'), new Set(), 't_2');
-    expect(sharedView.nodes.map((node) => node.id)).toEqual(['other']);
-    expect(sharedView.nodes[0]?.from).toBe('n2');
-    expect(sharedView.layoutNodes[0]?.from).toBeNull();
-    const layout = computeLayout({ nodes: sharedView.layoutNodes, visibleNodeIds: [...sharedView.visibleIds] });
-    expect(Object.keys(layout.positions)).toEqual(['other']);
-    expect(layout.diagnostics.some((diagnostic) => diagnostic.code === 'unknown-parent')).toBe(false);
   });
 
   it('restores each topic viewport, selection and collapse after switching and reload', () => {

@@ -25,13 +25,3 @@ export async function sha256File(absolutePath: string): Promise<string> {
 export function isSha256Hex(value: string): boolean {
   return SHA256_PATTERN.test(value);
 }
-
-export function normalizeSha256(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (!isSha256Hex(normalized)) {
-    throw new Error(`无效的 SHA-256 值: ${value}`);
-  }
-  return normalized;
-}
-
-export const EMPTY_SHA256 = sha256Bytes(new Uint8Array(0));

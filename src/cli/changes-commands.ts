@@ -6,23 +6,19 @@
  * CLI 不补哈希、不改写 workspaceId。
  */
 import path from "node:path";
-import { readChangeRequestFile, type AnyChangeRequest } from "./changes.js";
-import { emitJson, emitText } from "./output.js";
 import { parseOptions } from "./args.js";
-import { emit, invalidArgument, parseOutputMode, workspaceRoot } from "./commands.js";
+import { readChangeRequestFile, type ChangeRequest } from "./change-input.js";
 import type { CliContext } from "./context.js";
-import { CliError, EXIT_CODES, UsageError } from "./errors.js";
-import { applyChanges, checkChanges, queryChangeStatus } from "./http.js";
+import { CliError, EXIT_CODES, UsageError, invalidArgument } from "./errors.js";
+import { applyChanges, checkChanges, queryChangeStatus } from "./changes-transport.js";
+import { OUTPUT_OPTIONS, WORKSPACE_OPTION } from "./options.js";
+import { emit, parseOutputMode } from "./output.js";
 import { resolveServiceForWorkspace } from "./service-client.js";
 import { briefUsage } from "./usage.js";
-
-const OUTPUT = [
-  { name: "json", boolean: true },
-  { name: "text", boolean: true },
-] as const;
+import { workspaceRoot } from "./workspace.js";
 
 function assertRequestWorkspace(
-  request: AnyChangeRequest,
+  request: ChangeRequest,
   workspaceId: string,
   root: string,
 ): void {
@@ -36,10 +32,6 @@ function assertRequestWorkspace(
   }
 }
 
-async function loadInput(inputPath: string) {
-  return readChangeRequestFile(path.resolve(process.cwd(), inputPath));
-}
-
 export async function runCheckOrApply(
   command: "check" | "apply",
   args: readonly string[],
@@ -47,7 +39,7 @@ export async function runCheckOrApply(
 ): Promise<number> {
   const parsed = parseOptions(
     args,
-    [{ name: "workspace" }, { name: "input" }, ...OUTPUT],
+    [WORKSPACE_OPTION, { name: "input" }, ...OUTPUT_OPTIONS],
     0,
   );
   const mode = parseOutputMode(parsed);
@@ -87,7 +79,7 @@ export async function runCheckOrApply(
 export async function runStatus(args: readonly string[], ctx: CliContext): Promise<number> {
   const parsed = parseOptions(
     args,
-    [{ name: "workspace" }, { name: "input" }, { name: "request-id" }, ...OUTPUT],
+    [WORKSPACE_OPTION, { name: "input" }, { name: "request-id" }, ...OUTPUT_OPTIONS],
     1,
   );
   const mode = parseOutputMode(parsed);
@@ -139,7 +131,7 @@ export async function runStatus(args: readonly string[], ctx: CliContext): Promi
 }
 
 export async function runWhoami(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(args, [{ name: "workspace" }, ...OUTPUT], 0);
+  const parsed = parseOptions(args, [WORKSPACE_OPTION, ...OUTPUT_OPTIONS], 0);
   const mode = parseOutputMode(parsed);
   const root = await workspaceRoot(parsed, ctx);
   const service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
@@ -160,5 +152,3 @@ export async function runWhoami(args: readonly string[], ctx: CliContext): Promi
   ]);
   return EXIT_CODES.ok;
 }
-
-export { emitJson, emitText };

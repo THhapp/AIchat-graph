@@ -4,12 +4,11 @@
  */
 export {
   StorageError,
-  diagnosticFromError,
   isErrnoCode,
   type StorageDiagnostic,
   type StorageErrorCode,
 } from "./errors.js";
-export { sha256Bytes, sha256File, isSha256Hex, normalizeSha256, EMPTY_SHA256 } from "./hash.js";
+export { sha256Bytes, sha256File, isSha256Hex } from "./hash.js";
 export {
   normalizeRelativePath,
   isWritableContentPath,
@@ -32,8 +31,6 @@ export {
   readWorkspaceFiles,
   parseWorkspaceInfo,
   decodeUtf8Strict,
-  findTopicFile,
-  workspaceFilePath,
   type LineEnding,
   type WorkspaceFile,
   type WorkspaceFiles,
@@ -66,73 +63,43 @@ export {
 } from "./transactions.js";
 export {
   ChangeError,
-  changeRequestSchema,
-  anyChangeRequestSchema,
   flattenChangeRequestIssues,
-  prepareChanges,
   type ChangeErrorCode,
   type ChangeErrorOptions,
+  type PreparedChanges,
+  type FlatIssue,
+} from "./changes/shared.js";
+export {
+  changeRequestSchema,
+  prepareChanges,
   type ChangeRequest,
   type CreateTopicOperation,
   type CreateNodeOperation,
   type UpdateNodeOperation,
-  type InsertNextOperation,
-  type InsertNextNodeInput,
-  type MoveBranchOperation,
-  type MoveNodeToTopicOperation,
-  type ReplaceTopicOperation,
-  type SetDiscussionFocusOperation,
-  type RemoveLeafOperation,
-  type MergeNodesOperation,
-  type MergeReconnectEntry,
-  type Operation,
-  type PreparedChanges,
-  prepareChangesForWorkspace,
-  type AnyChangeRequest,
-} from "./changes.js";
-export {
-  prepareChangesV2,
-  v2ChangeRequestSchema,
-  type V2ChangeRequest,
-  type V2Operation,
-  type V2CreateTopicOperation,
-  type V2CreateNodeOperation,
-  type V2UpdateNodeOperation,
-  type V2MoveNodeToTopicOperation,
-  type V2RemoveLeafOperation,
-  type V2SetDiscussionFocusOperation,
-  type V2SetImportanceOperation,
   type PatchNodeOperation,
   type UpdateConnectionOperation,
+  type MoveNodeToTopicOperation,
+  type RemoveLeafOperation,
+  type SetDiscussionFocusOperation,
+  type SetImportanceOperation,
   type ReplaceNodeSourceOperation,
-} from "./changes-v2.js";
-export {
-  planConversion,
-  migrateWorkspace,
-  type ConversionPlan,
-  type ConvertedFile,
-  type ConvertWorkspaceOptions,
-  type MigrateWorkspaceOptions,
-  type MigrateWorkspaceResult,
-} from "./convert-v2.js";
+  type Operation,
+} from "./changes.js";
 export {
   TOPIC_META_FILENAME,
   TOPICS_DIR,
   WORKSPACE_FILENAME,
-  DEFAULT_WORKSPACE_SCHEMA_VERSION,
   nodeFileName,
   nodePath,
   parseTopicPath,
   renderNodeFile,
-  renderTopicMetaFile,
+  renderTopicMetaText,
   topicMetaPath,
-  isV2TopicFilePath,
+  isTopicFilePath,
   type TopicPathParts,
-  type WorkspaceSchemaVersion,
-} from "./format-v2.js";
+} from "./format.js";
 export {
   groupWorkspaceFiles,
-  expectedTopicMetaPath,
   type GroupedWorkspaceFiles,
   type TopicGroup,
 } from "./workspace.js";

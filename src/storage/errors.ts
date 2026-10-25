@@ -62,24 +62,3 @@ export function isErrnoCode(error: unknown, code: string): boolean {
     (error as NodeJS.ErrnoException).code === code
   );
 }
-
-export function asStorageError(error: unknown, fallbackMessage: string): StorageError {
-  if (error instanceof StorageError) return error;
-  return new StorageError("WRITE_FAILED", fallbackMessage, { cause: error });
-}
-
-export function diagnosticFromError(error: unknown, path?: string): StorageDiagnostic {
-  const storageError =
-    error instanceof StorageError
-      ? error
-      : new StorageError("WRITE_FAILED", error instanceof Error ? error.message : String(error), {
-          cause: error,
-        });
-  const diagnostic: StorageDiagnostic = {
-    code: storageError.code,
-    message: storageError.message,
-  };
-  if (path !== undefined) return { ...diagnostic, path };
-  if (storageError.path !== undefined) return { ...diagnostic, path: storageError.path };
-  return diagnostic;
-}

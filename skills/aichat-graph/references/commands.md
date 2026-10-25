@@ -44,16 +44,7 @@
 
 ## 在线写入
 
-**格式边界（先看这条）**
-
-| 工作区 | 读取 | 低摩擦写入 | 受控写入 | 转换 |
-| --- | --- | --- | --- | --- |
-| `schemaVersion: 2`（新默认） | 全部只读命令 | `edit` 片段／追加、`branch`、`next`、`connect`、`rearrange`、`important`、`create-root` 可用；隔离主题库可 `create-topic` | `check`／`apply` 亦可 | — |
-| `schemaVersion: 1`（兼容） | 全部只读命令 | **不可用**（`branch`／`next`／`connect`／`rearrange`／`important`／`create-root`／`create-topic` 只面向格式 2；`edit` 仅接受整篇 `--body*`，片段／追加会 409） | `check`／`apply` 兼容 | 只在用户明确要求时 `migrate` 隔离生成新目录，**不自动迁移** |
-
-格式由 `topics` 或 `validate` 输出里的 `schemaVersion` 给出，不要假设。"V1 能读"不等于"低摩擦写入口可用"。
-
-**命令（格式 2）** — 均需要该工作区的 `serve`：
+**当前格式**：一节点一份 Markdown、每个主题独立根（`schemaVersion: 2`, `topicMode: isolated`）。不再支持旧格式 1 或 shared 跨主题图。以下写入命令均需要该工作区的 `serve`：
 
 | 命令 | 必需 | 说明 |
 | --- | --- | --- |
@@ -61,12 +52,12 @@
 | `branch --from-ref <ref> --title <t> --description <why>` | 正文来源之一 | 横向旁支；默认同主题、右侧、proposed、order 由服务取 max+10 |
 | `next --from-ref <ref> --title <t> --description <why>` | 正文来源之一 | 纵向后继；`flow: next`，不带 side／order；来源已有 next 时 409，不插队 |
 | `connect --ref <ref> --description <why>` | `--description` | 结构字段全可选：`--from-ref`／`--flow`／`--side`／`--order`；只改描述也合法 |
-| `rearrange --input <spec.json>` | 至少一条 edit | 一次表达多条最终入边；工具在同一事务里安全排序，见[整体整理与重连](#整体整理与重连格式-2) |
+| `rearrange --input <spec.json>` | 至少一条 edit | 一次表达多条最终入边；工具在同一事务里安全排序，见[整体整理与重连](#整体整理与重连) |
 | `important (--node <id> \| --ref <ref>) (--on \| --off)` | 二选一 | 设置／取消重要标记；`--node` 先做真实在线读取，`--ref` 保留读取时的冲突检查 |
-| `create-root --topic-title <t> --title <t>` | 正文来源之一 | 仅格式 2 的空工作区；主题与根卡一次创建 |
-| `create-topic --topic-title <t> [--directory <目录名>] [--title <首节点标题>]` | 正文来源之一 | 在格式 2 隔离主题库中创建新主题与独立 root；首节点标题默认主题名，目录为可选自命名单层目录 |
-| `check --input <json>` | — | 只验证底层变更集合，不写盘（V1／V2 共用联合 schema） |
-| `apply --input <json>` | — | 提交底层变更集合（V1／V2 共用联合 schema） |
+| `create-root --topic-title <t> --title <t>` | 正文来源之一 | 仅空工作区；主题与根卡一次创建 |
+| `create-topic --topic-title <t> [--directory <目录名>] [--title <首节点标题>]` | 正文来源之一 | 在当前主题库中创建新主题与独立 root；首节点标题默认主题名，目录为可选自命名单层目录 |
+| `check --input <json>` | — | 只验证当前变更集合，不写盘 |
+| `apply --input <json>` | — | 提交当前变更集合（需带真实旧哈希） |
 | `status <requestId>` | — | 查询状态；unknown 不证明成功或失败 |
 
 正文来源写法：`--body "短文本"`、`--body-file <路径>`、`--body-stdin`；追加用 `--append-file`，局部替换用 `--replace-file`（`[{old,new}]` 或 `{replace:[{old,new}]}`，`old` 必须非空且唯一匹配）。
@@ -81,9 +72,9 @@ node "<aichat-cli>" create-topic --topic-title 'LeNet 学习' --directory 'lenet
 
 不自行生成 nodeId、路径、顺序、哈希或 requestId。托管提交已包含候选结构校验；核对返回结果即可，不要求每次再运行全图 `validate`。直接编辑源文件后、出现结构诊断或怀疑损坏时再校验。同一批修改只选托管提交或直接编辑。
 
-用户明确要求记录新主题时可用 `create-topic`，不必先把整个工作区清空，也不把现有主题的 root 接到新主题。`--directory` 是单层目录名，不是任意路径；不自行创建目录或写元数据来绕过命令。旧 shared 库不自动切换主题模式；创建能力以实际 CLI 的帮助和诊断为准。
+用户明确要求记录新主题时可用 `create-topic`，不必先把整个工作区清空，也不把现有主题的 root 接到新主题。`--directory` 是单层目录名，不是任意路径；不自行创建目录或写元数据来绕过命令。创建能力以实际 CLI 的帮助和诊断为准。
 
-## 整体整理与重连（格式 2）
+## 整体整理与重连
 
 整理可以拆分、合并、移动和重连，不必只原位追加或一路向后生长。已有节点的整体重排用 `rearrange` 一次表达最终入边，不再靠多次临时旁支和重读拼顺序：
 
@@ -146,18 +137,9 @@ node "<aichat-cli>" edit --ref "<实际读取凭据>" --append-file "<补充正�
 
 | 命令 | 说明 |
 | --- | --- |
-| `init <path> [--name n] [--format 1\|2]` | 新工作区；默认格式 2；目标已存在则拒绝 |
+| `init <path> [--name n]` | 新工作区；目标已存在则拒绝 |
 | `serve --workspace <path> [--port n]` | 默认 127.0.0.1:4317；端口占用明确失败 |
 | `whoami` | 核对描述文件、服务与磁盘身份 |
-
-## 迁移
-
-| 命令 | 说明 |
-| --- | --- |
-| `migrate --source <v1> --destination <new> --preview` | 只计算、不写盘；只输出路径／字节／哈希与缺失 description |
-| `migrate --source <v1> --destination <new> [--descriptions <json>]` | 目标必须不存在；发布前自检并全图校验 |
-
-迁移始终隔离生成**新目录**：源保持只读，不原位置换，也不在你未明确要求时发生。缺失 `description` 时会拒绝发布并列出 nodeId，由维护者读源后补齐——不要用空话占位。
 
 ## 退出码
 
@@ -171,6 +153,8 @@ node "<aichat-cli>" edit --ref "<实际读取凭据>" --append-file "<补充正�
 | 6 | 422 校验失败，或离线校验不通过 |
 | 7 | 服务不可达、描述文件陈旧、身份不符、启动失败 |
 | 8 | 写入结果未知：先 status 与重读，不盲目重发 |
+| 9 | 服务返回非标准错误体、端点缺失等 HTTP 错误；按 stderr 的 message/details 处理 |
+| 10 | 未预期的内部错误；保留 stderr 的上下文 |
 | 11 | 找不到节点／主题／文件 |
 
 错误统一为 stderr 上的 `{ ok: false, error: { code, message, details?, diagnostics? } }`。

@@ -1,12 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSnapshot } from './data/snapshot.js';
 import {
   leftPanelOpenFor,
-  loadReadingState,
   navCollapsedNodeIds,
   navFolderExpanded,
-  pruneReadingState,
-  saveReadingState,
   setLeftPanelOpen,
   switchReadingTopic,
   toggleLeftPanel,
@@ -14,6 +11,7 @@ import {
   toggleNavNode,
   type ReadingState,
 } from './data/readingState.js';
+import { useReadingSession } from './data/useReadingSession.js';
 import { useDetails } from './data/details.js';
 import { buildGraphView, scopeGraphToTopic } from './graph/viewModel.js';
 import { useLayoutEngine } from './graph/layoutBridge.js';
@@ -26,9 +24,11 @@ import { recentNodeIds } from './lib/recent.js';
 import { importanceOf, useImportance } from './lib/importance.js';
 import { Sidebar } from './components/Sidebar.js';
 import { DetailPanel, type DetailTab } from './components/DetailPanel.js';
-import { GraphCanvas, findAnchorNodeId } from './components/GraphCanvas.js';
+import { GraphCanvas } from './components/GraphCanvas.js';
+import { findAnchorNodeId } from './graph/flowEdges.js';
 import { EmptyState } from './components/States.js';
 import { ExportPanel } from './components/ExportPanel.js';
+import { AppBanners, AppFooter, AppHeader, type AppStatus } from './components/AppChrome.js';
 import type { GraphNode, GraphResponse } from '../shared/protocol.js';
 
 const DETAIL_MIN = 300;
@@ -48,7 +48,8 @@ export function App(): React.JSX.Element {
   const sourceGraph = snapshot.graph;
   const workspaceId = snapshot.workspace?.workspaceId ?? sourceGraph?.workspaceId ?? null;
 
-  const [reading, setReading] = useState<ReadingState | null>(null);
+  // Local reading state is per workspace and pruned against the current graph.
+  const { reading, setReading } = useReadingSession(workspaceId, sourceGraph);
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<DetailTab>('node');
   const [fitSignal, setFitSignal] = useState(0);
@@ -61,20 +62,6 @@ export function App(): React.JSX.Element {
    * dropped as soon as the graph already reports the same value.
    */
   const [nodeOverrides, setNodeOverrides] = useState<Record<string, GraphNode>>({});
-
-  // Local reading state is per workspace and pruned against the current graph.
-  useEffect(() => {
-    if (workspaceId === null) return;
-    setReading(loadReadingState(workspaceId));
-  }, [workspaceId]);
-
-  useEffect(() => {
-    if (workspaceId === null || reading === null || sourceGraph === null) return;
-    const pruned = pruneReadingState(reading, sourceGraph);
-    saveReadingState(workspaceId, pruned);
-    // Covers panel, tree fold and per-topic records, not just selection/collapse.
-    if (JSON.stringify(pruned) !== JSON.stringify(reading)) setReading(pruned);
-  }, [workspaceId, reading, sourceGraph]);
 
   const graph = useMemo<GraphResponse | null>(() => {
     if (sourceGraph === null) return null;
@@ -124,29 +111,6 @@ export function App(): React.JSX.Element {
     () => (topicGraph === null || view === null ? null : findAnchorNodeId(view, reading?.selectedNodeId ?? null, topicGraph)),
     [topicGraph, view, reading?.selectedNodeId],
   );
-
-  // Capture the anchor's screen rect before the new geometry is applied. The
-  // layout result arrives asynchronously, so at this point the DOM still shows
-  // the previous positions and the rect is the one we must preserve.
-  const [anchorScreen, setAnchorScreen] = useState<{ x: number; y: number } | null>(null);
-  const capturedKey = useRef<string | null>(null);
-  useLayoutEffect(() => {
-    const key = view?.structureKey ?? null;
-    if (key === null || key === capturedKey.current) {
-      if (key !== null) return;
-      capturedKey.current = null;
-      setAnchorScreen(null);
-      return;
-    }
-    capturedKey.current = key;
-    if (anchorNodeId === null) {
-      setAnchorScreen(null);
-      return;
-    }
-    const element = document.querySelector<HTMLElement>('.react-flow__node[data-id="' + CSS.escape(anchorNodeId) + '"]');
-    const cardRect = element?.getBoundingClientRect();
-    setAnchorScreen(cardRect !== undefined && cardRect.width > 0 ? { x: cardRect.x, y: cardRect.y } : null);
-  }, [view?.structureKey, anchorNodeId]);
 
   const layoutState = useGraphLayout(view, engineSlot);
   const effectiveTopicId = graph?.topics.some((topic) => topic.id === currentTopicId) ? currentTopicId : null;
@@ -347,7 +311,7 @@ export function App(): React.JSX.Element {
   }
 
   const results = searchGraph(topicGraph ?? scopeGraphToTopic(graph, null), query);
-  const status = snapshot.error !== null
+  const status: AppStatus = snapshot.error !== null
     ? { tone: 'bad', text: '刷新失败' }
     : graph.stale
       ? { tone: 'warn', text: '上一份有效内容' }
@@ -359,57 +323,24 @@ export function App(): React.JSX.Element {
 
   return (
     <div className="app">
-      <header className="app-header">
-        <div className="app-header__brand">
-          <span className="app-header__title">AIchat-graph</span>
-          <span className="app-header__workspace">{snapshot.workspace?.name ?? graph.workspaceId}</span>
-          <button type="button" className="app-header__topic" onClick={openLeft} title={(selectedTopic?.title ?? '选择主题') + ' · 打开主题目录'}>
-            {selectedTopic?.title ?? '选择主题'} ▾
-          </button>
-        </div>
-        <span className="app-header__spacer" />
-        <div className="app-header__meta">
-          <span>图 r{graph.revision}</span>
-          {topicGraph?.activeNode != null ? (
-            <button
-              type="button"
-              onClick={() => { selectNode(topicGraph.activeNode as string); }}
-              title="定位当前讨论节点"
-            >
-              当前讨论
-            </button>
-          ) : null}
-          <button type="button" disabled={selectedTopic === null} onClick={() => { update({ collapsedNodeIds: [] }); setFitSignal((value) => value + 1); }} title="展开并适配当前主题">查看全部</button>
-          <button type="button" disabled={selectedTopic === null} onClick={copyPrompt}>{copied ? '已复制' : '复制给 Agent'}</button>
-          <button
-            type="button"
-            aria-pressed={leftOpen}
-            aria-controls="nav-panel"
-            onClick={toggleLeft}
-            title="主题目录"
-          >
-            {leftOpen ? '收起目录' : '主题目录'}
-          </button>
-          <button
-            type="button"
-            aria-pressed={detailOpen}
-            aria-controls="detail-panel"
-            onClick={toggleRight}
-            title="详情面板"
-          >
-            {detailOpen ? '收起详情' : '打开详情'}
-          </button>
-          <button
-            type="button"
-            aria-pressed={exportOpen}
-            aria-controls="export-panel"
-            onClick={() => { setExportOpen((value) => !value); }}
-            title="导出为独立 HTML"
-          >
-            {exportOpen ? '收起导出' : '导出'}
-          </button>
-        </div>
-      </header>
+      <AppHeader
+        workspaceName={snapshot.workspace?.name ?? graph.workspaceId}
+        graphRevision={graph.revision}
+        selectedTopicTitle={selectedTopic?.title ?? null}
+        activeNodeId={topicGraph?.activeNode ?? null}
+        topicSelected={selectedTopic !== null}
+        leftOpen={leftOpen}
+        detailOpen={detailOpen}
+        exportOpen={exportOpen}
+        copied={copied}
+        onOpenLeft={openLeft}
+        onSelectNode={selectNode}
+        onResetView={() => { update({ collapsedNodeIds: [] }); setFitSignal((value) => value + 1); }}
+        onCopyPrompt={copyPrompt}
+        onToggleLeft={toggleLeft}
+        onToggleRight={toggleRight}
+        onToggleExport={() => { setExportOpen((value) => !value); }}
+      />
 
       {exportOpen ? (
         <ExportPanel
@@ -420,20 +351,11 @@ export function App(): React.JSX.Element {
           onClose={() => { setExportOpen(false); }}
         />
       ) : null}
-      {graph.stale ? (
-        <div className="banner banner--stale" role="status">
-          <span className="banner__text">
-            <strong>显示上一份有效内容。</strong> 磁盘上的源文件当前不合法或无法读取，图与详情来自同一份有效快照，不是当前磁盘事实。
-          </span>
-          <button type="button" onClick={() => { snapshot.refresh(); }}>重新检查</button>
-        </div>
-      ) : null}
-      {snapshot.error !== null ? (
-        <div className="banner banner--error" role="alert">
-          <span className="banner__text">刷新失败：{snapshot.error.message}（保留当前阅读内容）</span>
-          <button type="button" onClick={() => { snapshot.refresh(); }}>重试</button>
-        </div>
-      ) : null}
+      <AppBanners
+        stale={graph.stale}
+        error={snapshot.error}
+        onRefresh={() => { snapshot.refresh(); }}
+      />
 
       <div
         className="app-main"
@@ -477,7 +399,6 @@ export function App(): React.JSX.Element {
           ) : (
             <GraphCanvas
               key={selectedTopic.id}
-              graph={topicGraph ?? graph}
               view={view ?? buildGraphView(topicGraph ?? graph, collapsedSet, currentTopicId)}
               layout={layoutState.result?.structureVersion === view?.structureKey ? layoutState.result : null}
               layoutStatus={layoutState.status}
@@ -491,7 +412,6 @@ export function App(): React.JSX.Element {
               fitSignal={fitSignal}
               savedViewport={reading?.viewport ?? null}
               anchorNodeId={anchorNodeId}
-              anchorScreen={anchorScreen}
               recentNodeIds={recent}
             />
           )}
@@ -549,18 +469,14 @@ export function App(): React.JSX.Element {
         ) : null}
       </div>
 
-      <footer className="app-status">
-        <span className={'dot dot--' + status.tone} aria-hidden="true" />
-        <span role="status">{status.text}</span>
-        <span>{String(topicGraph?.nodes.length ?? 0)} 节点 · 当前主题 / 全库 {String(graph.topics.length)} 主题</span>
-        {(graph.topicMode ?? snapshot.workspace?.topicMode ?? 'shared') === 'shared' ? <span title="旧主题可能有跨主题来路；当前仅显示所选主题，源关系未改写。">共享图兼容（未迁移）</span> : null}
-        {layoutState.result !== null ? (
-          <span>{String(Object.keys(layoutState.result.positions).length)} 可见</span>
-        ) : null}
-        <span className="app-status__spacer" />
-        <span>实例 {graph.instanceId.slice(0, 8)} · r{graph.revision}</span>
-        <a href="/api/diagnostics" target="_blank" rel="noreferrer">诊断</a>
-      </footer>
+      <AppFooter
+        status={status}
+        topicNodeCount={topicGraph?.nodes.length ?? 0}
+        topicCount={graph.topics.length}
+        visibleCount={layoutState.result !== null ? Object.keys(layoutState.result.positions).length : null}
+        instanceId={graph.instanceId}
+        revision={graph.revision}
+      />
     </div>
   );
 }

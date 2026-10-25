@@ -1,11 +1,12 @@
 /**
  * CLI 的只读工作区视图：真实磁盘扫描 + core 统一分组解析。
  *
- * - 格式判断与主题分组只经 core.parseWorkspaceDocuments（V1 单文件主题／V2 一节点一份），
+ * - 主题分组只经 core.parseWorkspaceDocuments（当前格式：一节点一份 Markdown），
  *   CLI 不按目录自行猜测，也不维护第二套解析器；
  * - 文件哈希、字节数与文本都取自 storage 的同一次扫描，不把合成文本配真实哈希；
- * - V2 的节点正文版本是节点自己的文件哈希，不是 topic.md 的哈希。
+ * - 节点正文版本是节点自己的文件哈希，不是 topic.md 的哈希。
  */
+import path from "node:path";
 import {
   parseWorkspaceDocuments,
   type Diagnostic,
@@ -15,21 +16,31 @@ import {
   type WorkspaceMeta,
 } from "../core/index.js";
 import {
-  readWorkspaceFile,
   readWorkspaceFiles,
   resolveWorkspaceRoot,
-  StorageError,
   type WorkspaceFile,
   type WorkspaceFiles,
 } from "../storage/index.js";
+import type { ParsedArgs } from "./args.js";
+import type { CliContext } from "./context.js";
 import { CliError, EXIT_CODES } from "./errors.js";
+
+/**
+ * 解析 --workspace；省略时使用当前目录，与生成的 AGENTS.md 里
+ * "aichat read --topic <id>／aichat validate" 的简短写法一致。
+ */
+export async function workspaceRoot(parsed: ParsedArgs, ctx: CliContext): Promise<string> {
+  const requested = parsed.values.get("workspace");
+  const target = requested === undefined ? ctx.cwd : path.resolve(ctx.cwd, requested);
+  return resolveWorkspaceRoot(target);
+}
 
 export interface WorkspaceSnapshot {
   readonly root: string;
   readonly files: WorkspaceFiles;
   /** workspace.json 的严格解析结果；不合法时为 null。 */
   readonly workspace: WorkspaceMeta | null;
-  readonly schemaVersion: 1 | 2 | null;
+  readonly schemaVersion: 2 | null;
   readonly ok: boolean;
   readonly topics: readonly TopicEntry[];
   readonly graph: WorkspaceGraph | null;
@@ -43,14 +54,14 @@ export interface WorkspaceSnapshot {
 
 export interface NodeEntry {
   readonly node: ParsedNode;
-  /** 节点真实源文件：V2 为节点文件，V1 为所属主题文件。 */
+  /** 节点真实源文件（节点自己的 Markdown 文件）。 */
   readonly path: string;
   readonly file: WorkspaceFile;
 }
 
 export interface TopicEntry {
   readonly topic: ParsedTopic;
-  /** 主题入口文件：V2 的 topic.md／V1 的主题文件。 */
+  /** 主题入口文件：topic.md。 */
   readonly path: string;
   readonly dir: string | null;
   readonly sourcePaths: readonly string[];
@@ -144,13 +155,6 @@ export function findTopicById(snapshot: WorkspaceSnapshot, topicId: string): Top
   return snapshot.topics.filter((entry) => entry.topic.topicId === topicId);
 }
 
-export function findTopicByDir(snapshot: WorkspaceSnapshot, dir: string): TopicEntry | undefined {
-  const normalized = normalizePath(dir).replace(/^topics\//, "").replace(/\/$/, "");
-  return snapshot.topics.find(
-    (entry) => entry.dir === normalized || entry.path === normalizePath(dir),
-  );
-}
-
 export function findNode(
   snapshot: WorkspaceSnapshot,
   nodeId: string,
@@ -162,62 +166,13 @@ export function findNode(
   return undefined;
 }
 
-/** 按真实源路径找到节点（V2 节点文件／V1 主题文件内的节点）。 */
-export function findNodeBySourcePath(
-  snapshot: WorkspaceSnapshot,
-  requested: string,
-): { topic: TopicEntry; entry: NodeEntry } | undefined {
-  const normalized = normalizePath(requested);
-  for (const topic of snapshot.topics) {
-    const entry = topic.nodes.find((item) => item.path === normalized);
-    if (entry) return { topic, entry };
-  }
-  return undefined;
-}
-
-/** 按路径找到主题入口（topic.md／V1 主题文件）。 */
+/** 按路径找到主题入口（topic.md）。 */
 export function findTopicByPath(
   snapshot: WorkspaceSnapshot,
   requested: string,
 ): TopicEntry | undefined {
   const normalized = normalizePath(requested);
   return snapshot.topics.find((entry) => entry.path === normalized);
-}
-
-/** 读取一个真实磁盘文件；路径必须是工作区相对 POSIX 路径。 */
-export async function readDiskFile(root: string, relativePath: string): Promise<WorkspaceFile> {
-  if (
-    relativePath.startsWith("/") ||
-    relativePath.startsWith("\\") ||
-    /^[A-Za-z]:/.test(relativePath)
-  ) {
-    throw new CliError(
-      "PATH_OUTSIDE_WORKSPACE",
-      `只接受工作区相对路径: ${relativePath}`,
-      EXIT_CODES.usage,
-      { details: { path: relativePath } },
-    );
-  }
-  try {
-    return await readWorkspaceFile(root, relativePath);
-  } catch (error) {
-    if (error instanceof StorageError && error.code === "INVALID_ARGUMENT") {
-      throw new CliError("NOT_FOUND", `文件不存在: ${relativePath}`, EXIT_CODES.notFound, {
-        details: { path: relativePath },
-        cause: error,
-      });
-    }
-    throw error;
-  }
-}
-
-export function fileFacts(file: WorkspaceFile) {
-  return {
-    path: file.path,
-    absolutePath: file.absolutePath,
-    sha256: file.sha256,
-    byteLength: file.byteLength,
-  };
 }
 
 /** 主题入口文件（不是节点文件）。 */
@@ -282,11 +237,8 @@ export function describeNode(
     flow: node.flow,
     from: node.from,
     important: node.important,
-    ...(node.description !== undefined
-      ? { description: node.description }
-      : node.label !== undefined
-        ? { label: node.label }
-        : {}),
+    // 连接文字只读 description；没有就省略。
+    ...(node.description !== undefined ? { description: node.description } : {}),
     path: entry.path,
     fileHash: entry.file.sha256,
   };

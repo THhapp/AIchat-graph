@@ -9,17 +9,13 @@ import type { SearchField, SearchHit } from "../shared/protocol.js";
 
 export const INDEX_FORMAT = 1 as const;
 
-/** 构建索引时的主题来源；raw 与 fileHash 必须来自同一份扫描结果。 */
+/** 构建索引时的主题来源；fileHash 必须来自同一份扫描结果。 */
 export interface IndexTopicSource {
   readonly topicId: string;
-  readonly title: string;
   readonly path: string;
-  /** 主题入口文件（V2 为 topic.md）的原始字节哈希。 */
+  /** 主题入口文件（topic.md）的原始字节哈希。 */
   readonly fileHash: string;
-  readonly raw: string;
   readonly nodes: readonly ParsedNode[];
-  /** 可选：主题格式。缺省按 1 处理，现有调用无需改动。 */
-  readonly schemaVersion?: 1 | 2 | undefined;
   /** 可选：该主题全部真实源文件；缺省为 [path]。 */
   readonly sourcePaths?: readonly string[] | undefined;
   /** 可选：源路径 → 原始字节哈希；缺省只用 { path: fileHash }。 */
@@ -37,20 +33,19 @@ export interface IndexSource {
 export interface ManifestNode {
   readonly id: string;
   readonly topicId: string;
-  /** 主题入口路径（V2 为 topic.md）。 */
+  /** 主题入口路径（topic.md）。 */
   readonly topicPath: string;
-  /** 节点真实来源文件：V1 等于 topicPath，V2 为该节点自己的文件。 */
+  /** 节点真实来源文件（该节点自己的 Markdown）。 */
   readonly sourcePath: string;
   readonly title: string;
   readonly summary: string;
-  /** 格式 2 的来源说明；格式 1 缺省。 */
+  /** 连接来源的说明；root 节点缺省。 */
   readonly description?: string | undefined;
   readonly state: string;
   readonly flow: string;
   readonly from: string | null;
   readonly side?: string | undefined;
   readonly order?: number | undefined;
-  readonly label?: string | undefined;
   /** 派生展示编号，不用于引用。 */
   readonly number: string;
   readonly nextId: string | null;
@@ -110,9 +105,17 @@ export interface SearchIndex {
   readonly documents: readonly SearchDocument[];
 }
 
+/** 一次检索的结果窗口；totalHits 是排序后的全部命中数。 */
 export interface SearchOutcome {
   readonly hits: SearchHit[];
+  readonly totalHits: number;
   readonly truncated: boolean;
+}
+
+/** searchDocuments 的窗口选项；缺省 limit 返回 offset 之后的全部命中。 */
+export interface SearchDocumentsOptions {
+  readonly limit?: number | undefined;
+  readonly offset?: number | undefined;
 }
 
 /** 索引构建结果；manifest 可写缓存，search 只留在进程内。 */

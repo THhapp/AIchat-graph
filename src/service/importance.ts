@@ -1,13 +1,13 @@
 /**
  * POST /api/importance：翻转一张卡片的 important 元数据。
  *
- * 只做一件事：把 { topicId, nodeId, important } 编成一次格式 2 的 setImportance 操作，
- * 交回现有队列 → prepareChangesV2 → commitFiles → 快照发布链路；不直接改文件，
+ * 只做一件事：把 { topicId, nodeId, important } 编成一次 setImportance 操作，
+ * 交回现有队列 → prepareChanges → commitFiles → 快照发布链路；不直接改文件，
  * 也不复制候选逻辑。expectedHash 提供时按读取时的字节哈希校验，失配即 412。
  */
 import { randomUUID } from "node:crypto";
 import { sha256Bytes } from "../storage/index.js";
-import type { V2ChangeRequest } from "../storage/index.js";
+import type { ChangeRequest } from "../storage/index.js";
 import type { ImportanceRequest, ImportanceResponse } from "../shared/protocol.js";
 import { applyChanges } from "./changes.js";
 import { ServiceError } from "./errors.js";
@@ -26,15 +26,6 @@ export async function setNodeImportance(
   request: ImportanceRequest,
 ): Promise<ImportanceResponse> {
   const snapshot = runtime.current.data;
-  if (snapshot.schemaVersion !== 2) {
-    // 格式 1 没有独立节点文件，也不提供重要性的写入口（读侧恒为 false）。
-    throw new ServiceError(
-      409,
-      "OPERATION_CONFLICT",
-      "重要标记只支持格式 2 工作区（一节点一份 Markdown）；格式 1 不提供该写入口",
-      { details: { schemaVersion: snapshot.schemaVersion } },
-    );
-  }
   const node = snapshot.graph.nodes.find((entry) => entry.id === request.nodeId);
   if (node === undefined || node.topicId !== request.topicId) {
     throw nodeMissing({ topicId: request.topicId, nodeId: request.nodeId });
@@ -64,7 +55,7 @@ export async function setNodeImportance(
     return { ...runtime.snapshotVersion(), ok: true, node: toGraphNode(node) };
   }
 
-  const changeRequest: V2ChangeRequest = {
+  const changeRequest: ChangeRequest = {
     workspaceId: runtime.workspaceId,
     requestId: randomUUID(),
     expectedFiles: { [file.path]: file.fileHash },

@@ -22,7 +22,7 @@ import {
 import type { Diagnostic, LastChange, TopicExportStatus } from "../shared/protocol.js";
 import { loadCacheIdentity, saveCache } from "./cache.js";
 import { ServiceError, serviceErrorFromUnknown, wireDiagnostic } from "./errors.js";
-import { readLastChanges, writeLastChanges } from "./lastChange.js";
+import { readLastChanges, writeLastChanges } from "./last-changes.js";
 import { readSnapshot } from "./load.js";
 import { SerialQueue } from "./queue.js";
 import {
@@ -188,8 +188,6 @@ export class WorkspaceRuntime {
       const loaded = await readSnapshot(rootReal);
       let workspaceId: string;
       let name: string;
-      let schemaVersion: 1 | 2 = 2;
-      let topicMode: "isolated" | "shared" = "shared";
       let data: SnapshotData;
       let stale: boolean;
       let diagnostics: readonly Diagnostic[];
@@ -198,8 +196,6 @@ export class WorkspaceRuntime {
       if (loaded.files !== null) {
         workspaceId = loaded.files.workspace.workspaceId;
         name = loaded.files.workspace.name;
-        schemaVersion = loaded.files.workspace.schemaVersion;
-        topicMode = loaded.files.workspace.topicMode ?? "shared";
       } else {
         const cachedIdentity = await loadCacheIdentity(rootReal);
         if (cachedIdentity === null) {
@@ -212,8 +208,6 @@ export class WorkspaceRuntime {
         }
         workspaceId = cachedIdentity.workspaceId;
         name = cachedIdentity.name;
-        schemaVersion = cachedIdentity.schemaVersion;
-        topicMode = cachedIdentity.topicMode ?? "shared";
         identityFromCache = true;
       }
 
@@ -223,7 +217,7 @@ export class WorkspaceRuntime {
         diagnostics = loaded.outcome.diagnostics;
       } else {
         diagnostics = loaded.outcome.diagnostics;
-        data = emptySnapshot(workspaceId, name, schemaVersion, topicMode);
+        data = emptySnapshot(workspaceId, name);
         stale = true;
       }
 
@@ -245,14 +239,10 @@ export class WorkspaceRuntime {
       runtime.releaseLock = releaseLock;
       lockState.runtime = runtime;
       runtime.systemDiagnostics.push(...systemDiagnostics);
-      // 每个主题各自保留最近一批内容修改；v1 单批记录按当前快照的主题归属拆分。
-      const topicByNodeId = new Map(
-        data.graph.nodes.map((node) => [node.id, node.topicId] as const),
+      // 每个主题各自保留最近一批内容修改。
+      runtime.lastChanges = await readLastChanges(rootReal).catch(
+        () => ({} as Record<string, LastChange>),
       );
-      runtime.lastChanges = await readLastChanges(
-        rootReal,
-        (nodeId) => topicByNodeId.get(nodeId) ?? null,
-      ).catch(() => ({} as Record<string, LastChange>));
       if (identityFromCache) {
         // 身份都来自缓存时不能安全写入：没有可核对的工作区身份源文件。
         runtime.writable = false;

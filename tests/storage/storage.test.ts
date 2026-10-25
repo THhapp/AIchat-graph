@@ -34,8 +34,7 @@ afterEach(async () => {
 async function newWorkspace(): Promise<string> {
   const parent = await newParent();
   const root = path.join(parent, "workspace");
-  // 事务／扫描用例基于格式 1 主题文件；默认格式 2 由 changes-v2 用例覆盖。
-  await initWorkspace({ root, name: "storage-test", schemaVersion: 1 });
+  await initWorkspace({ root, name: "storage-test" });
   return root;
 }
 
@@ -117,7 +116,7 @@ describe("路径约束", () => {
     expect(() => normalizeRelativePath("C:/temp/x.md")).toThrow(StorageError);
     expect(() => normalizeRelativePath("/abs.md")).toThrow(StorageError);
     expect(() => normalizeRelativePath("topics//x.md")).toThrow(StorageError);
-    expect(() => normalizeRelativePath("topics/CON.md")).toThrow(StorageError);
+    expect(() => normalizeRelativePath("topics/主题/CON.md")).toThrow(StorageError);
     expect(normalizeRelativePath("topics/子目录/记录.md")).toBe("topics/子目录/记录.md");
   });
 
@@ -169,9 +168,13 @@ describe("初始化与读取", () => {
     expect(agents).toContain("aichat apply");
     expect(agents).toContain("一个节点一份 Markdown");
     expect(agents).toContain("description");
-    expect(agents).not.toContain("<!-- node:n_00000000000000000000000000000002 -->");
+    expect(agents).not.toContain("<!-- node:");
     expect(agents).toContain(".aichat/");
-    expect(agents.split("\n").length).toBeLessThan(60);
+    // 检查必要小节与真实命令，不绑定整体行数。
+    expect(agents).toContain("## 主题绑定");
+    expect(agents).toContain("## 维护方式");
+    expect(agents).toContain("## 命令");
+    expect(agents).toContain("aichat create-topic");
     const snapshot = await readWorkspaceFiles(root);
     expect(snapshot.topics).toHaveLength(0);
     expect(snapshot.workspace.activeNode).toBeNull();
@@ -182,8 +185,8 @@ describe("初始化与读取", () => {
 
   it("读取主题文件原文、原始字节哈希与 CRLF 信息", async () => {
     const root = await newWorkspace();
-    const content = "---\r\nschemaVersion: 1\r\n---\r\n\r\n## 标题\r\n\r\n正文\r\n";
-    await commitAndFinalize(root, [{ path: "topics/crlf.md", content, expectedSha256: null }]);
+    const content = "---\r\nnodeId: n_00000000000000000000000000000001\r\ntitle: 标题\r\nstate: proposed\r\nfrom: null\r\nflow: root\r\n---\r\n\r\n正文\r\n";
+    await commitAndFinalize(root, [{ path: "topics/主题/crlf.md", content, expectedSha256: null }]);
     const snapshot = await readWorkspaceFiles(root);
     const file = snapshot.topics[0];
     expect(file?.text).toBe(content);
@@ -196,8 +199,8 @@ describe("初始化与读取", () => {
 describe("提交与冲突", () => {
   it("过期 hash 拒绝写入，新文件冲突拒绝覆盖", async () => {
     const root = await newWorkspace();
-    const topicPath = "topics/topic.md";
-    const content = "---\nschemaVersion: 1\n---\n\n## T\n\nB\n";
+    const topicPath = "topics/主题/topic.md";
+    const content = "---\nnodeId: n_00000000000000000000000000000001\ntitle: T\nstate: proposed\nfrom: null\nflow: root\n---\n\nB\n";
     await commitAndFinalize(root, [{ path: topicPath, content, expectedSha256: null }]);
 
     await expect(
@@ -219,7 +222,7 @@ describe("提交与冲突", () => {
 
   it("replace 提交不残留临时文件且内容完整", async () => {
     const root = await newWorkspace();
-    const target = "topics/atomic.md";
+    const target = "topics/主题/atomic.md";
     await commitAndFinalize(root, [{ path: target, content: "第一版\n", expectedSha256: null }]);
     const result = await commitFiles({
       root,
@@ -229,13 +232,13 @@ describe("提交与冲突", () => {
     expect(await readText(root, target)).toBe("第二版\n");
     const entries = await fs.readdir(path.join(root, "topics"));
     expect(entries.filter((name) => name.endsWith(".tmp"))).toHaveLength(0);
-    expect(entries).toEqual(["atomic.md"]);
+    expect(entries).toEqual(["主题"]);
   });
 
   it("跨文件中途失败时回滚已写文件并清理日志", async () => {
     const root = await newWorkspace();
-    const first = "topics/a.md";
-    const second = "topics/b.md";
+    const first = "topics/主题/a.md";
+    const second = "topics/主题/b.md";
     const firstBefore = "a\n";
     const secondBefore = "b\n";
     await commitAndFinalize(root, [{ path: first, content: firstBefore, expectedSha256: null }]);
@@ -267,7 +270,7 @@ describe("提交与冲突", () => {
 
   it("提交成功后保留 committed 日志，刷新后才清理", async () => {
     const root = await newWorkspace();
-    const target = "topics/committed.md";
+    const target = "topics/主题/committed.md";
     const result = await commitFiles({
       root,
       files: [{ path: target, content: "committed\n", expectedSha256: null }],
@@ -290,7 +293,7 @@ describe("提交与冲突", () => {
 describe("事务恢复", () => {
   it("无关外部字节阻止恢复，保留日志且不覆盖", async () => {
     const root = await newWorkspace();
-    const target = "topics/conflict.md";
+    const target = "topics/主题/conflict.md";
     const transactionDir = await writePreparedJournal(root, "20260101T000000Z-conflict", {
       target,
       before: "original\n",
@@ -313,7 +316,7 @@ describe("事务恢复", () => {
 
   it("prepared 事务在 after 状态按 before 回滚", async () => {
     const root = await newWorkspace();
-    const target = "topics/rollback.md";
+    const target = "topics/主题/rollback.md";
     await commitAndFinalize(root, [
       { path: target, content: "original\n", expectedSha256: null },
     ]);
@@ -332,7 +335,7 @@ describe("事务恢复", () => {
 
   it("recovered prepared 事务中新建文件被外部创建时保留日志", async () => {
     const root = await newWorkspace();
-    const target = "topics/newfile.md";
+    const target = "topics/主题/newfile.md";
     await writePreparedJournal(root, "20260101T000002Z-newfile", {
       target,
       before: null,
@@ -346,7 +349,7 @@ describe("事务恢复", () => {
 
   it("显式删除空主题文件：写入前核 hash、写后核不存在、恢复需 before 回滚", async () => {
     const root = await newWorkspace();
-    const target = "topics/empty.md";
+    const target = "topics/主题/empty.md";
     await commitAndFinalize(root, [{ path: target, content: "内容\n", expectedSha256: null }]);
     const currentHash = sha("内容\n");
 
@@ -374,7 +377,7 @@ describe("事务恢复", () => {
 
   it("删除时要求前置 hash，且拒绝删除不存在文件", async () => {
     const root = await newWorkspace();
-    const target = "topics/never.md";
+    const target = "topics/主题/never.md";
     await expect(
       commitFiles({ root, files: [{ path: target, content: null, expectedSha256: null }] }),
     ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
@@ -385,11 +388,11 @@ describe("事务恢复", () => {
 
   it("prepared 删除完成后按 before 恢复内容", async () => {
     const root = await newWorkspace();
-    const target = "topics/deleted.md";
+    const target = "topics/主题/deleted.md";
     await commitAndFinalize(root, [{ path: target, content: "before\n", expectedSha256: null }]);
     const transactionId = "20260101T000004Z-delete";
     const transactionDir = path.join(root, ...TRANSACTIONS_DIR.split("/"), transactionId);
-    const beforeFile = path.join(transactionDir, "before", "topics", "deleted.md");
+    const beforeFile = path.join(transactionDir, "before", ...target.split("/"));
     await fs.mkdir(path.dirname(beforeFile), { recursive: true });
     await fs.writeFile(beforeFile, "before\n", "utf8");
     await fs.writeFile(
@@ -422,7 +425,7 @@ describe("事务恢复", () => {
 
   it("已提交新建文件被外部删除时保留日志并报告冲突", async () => {
     const root = await newWorkspace();
-    const target = "topics/vanish.md";
+    const target = "topics/主题/vanish.md";
     const result = await commitFiles({
       root,
       files: [{ path: target, content: "kept\n", expectedSha256: null }],
@@ -436,7 +439,7 @@ describe("事务恢复", () => {
 
   it("已提交删除后外部又新建同路径文件时不清理日志", async () => {
     const root = await newWorkspace();
-    const target = "topics/racy.md";
+    const target = "topics/主题/racy.md";
     await commitAndFinalize(root, [{ path: target, content: "gone\n", expectedSha256: null }]);
     const result = await commitFiles({
       root,
@@ -449,7 +452,7 @@ describe("事务恢复", () => {
     expect(await fs.stat(path.join(root, ...TRANSACTIONS_DIR.split("/"), result.transactionId))).toBeTruthy();
   });
 
-  it("workspace.json 未知字段与不支持的版本被拒绝，1 与 2 都被接受", async () => {
+  it("workspace.json 未知字段与不支持的版本被拒绝，只接受 2", async () => {
     const root = await newWorkspace();
     const workspacePath = path.join(root, "workspace.json");
     const original = JSON.parse(await fs.readFile(workspacePath, "utf8")) as Record<string, unknown>;
@@ -460,25 +463,28 @@ describe("事务恢复", () => {
     );
     await expect(readWorkspaceFiles(root)).rejects.toMatchObject({ code: "WORKSPACE_INVALID" });
 
-    // 支持读取格式 1 与 2；未知／更高版本必须在扫描阶段就拒绝，不能猜一个格式。
+    // 当前只支持格式 2；旧版与更高版本都必须在扫描阶段明确拒绝，不能猜一个格式。
     await fs.writeFile(workspacePath, JSON.stringify({ ...original, schemaVersion: 2 }), "utf8");
     await expect(readWorkspaceFiles(root)).resolves.toMatchObject({
-      workspace: { schemaVersion: 2 },
+      workspace: { schemaVersion: 2, topicMode: "isolated" },
     });
+    await fs.writeFile(workspacePath, JSON.stringify({ ...original, schemaVersion: 1 }), "utf8");
+    await expect(readWorkspaceFiles(root)).rejects.toMatchObject({ code: "WORKSPACE_INVALID" });
     await fs.writeFile(workspacePath, JSON.stringify({ ...original, schemaVersion: 3 }), "utf8");
     await expect(readWorkspaceFiles(root)).rejects.toMatchObject({ code: "WORKSPACE_INVALID" });
   });
 
   it("拒绝无效 UTF-8 而不产生替换字符", async () => {
     const root = await newWorkspace();
-    const target = "topics/bad.md";
+    const target = "topics/主题/bad.md";
+    await fs.mkdir(path.dirname(path.join(root, ...target.split("/"))), { recursive: true });
     await fs.writeFile(path.join(root, ...target.split("/")), Buffer.from([0xff, 0xfe, 0x00]), "binary" as never);
     await expect(readWorkspaceFiles(root)).rejects.toMatchObject({ code: "WORKSPACE_INVALID" });
   });
 
   it("prepared 缺少 before 数据时停止恢复且不改文件", async () => {
     const root = await newWorkspace();
-    const target = "topics/nobefore.md";
+    const target = "topics/主题/nobefore.md";
     await commitAndFinalize(root, [{ path: target, content: "keep\n", expectedSha256: null }]);
     const transactionId = "20260101T000005Z-nobefore";
     const transactionDir = path.join(root, ...TRANSACTIONS_DIR.split("/"), transactionId);
@@ -512,7 +518,7 @@ describe("事务恢复", () => {
 
   it("staged 日志但源文件已出现 after 字节时保留停写，不按 after 回滚", async () => {
     const root = await newWorkspace();
-    const target = "topics/staged-race.md";
+    const target = "topics/主题/staged-race.md";
     await commitAndFinalize(root, [{ path: target, content: "before\n", expectedSha256: null }]);
     const transactionId = "20260101T000006Z-staged-race";
     const transactionDir = path.join(root, ...TRANSACTIONS_DIR.split("/"), transactionId);
@@ -612,7 +618,7 @@ describe("事务恢复", () => {
 
   it("事务目录被换为指向外部的 junction：recover 停写、commit 拒写、证据不变", async () => {
     const root = await newWorkspace();
-    const target = "topics/junction.md";
+    const target = "topics/主题/junction.md";
     await commitAndFinalize(root, [{ path: target, content: "B\n", expectedSha256: null }]);
 
     const transactionId = "20260101T000009Z-junction";

@@ -5,16 +5,13 @@ import { StorageError, isErrnoCode } from "./errors.js";
 import { sha256Bytes } from "./hash.js";
 import { parseWorkspaceInfo } from "./workspace.js";
 import { normalizeRelativePath } from "./paths.js";
-import { DEFAULT_WORKSPACE_SCHEMA_VERSION, WORKSPACE_FILENAME, TOPICS_DIR } from "./format-v2.js";
-import type { WorkspaceSchemaVersion } from "./format-v2.js";
+import { WORKSPACE_FILENAME, TOPICS_DIR } from "./format.js";
 
 export interface InitWorkspaceOptions {
   /** 新建工作区的目标目录；必须不存在。 */
   root: string;
   /** 工作区显示名，默认取目录名。 */
   name?: string;
-  /** 写入的工作区格式；新工作区默认 2，1 仅为兼容旧测试与显式要求。 */
-  schemaVersion?: WorkspaceSchemaVersion;
   /** 固定 ID 仅用于测试或迁移；默认随机生成。 */
   workspaceId?: string;
   /** 覆盖默认入口说明（测试用，不对外暴露为产品配置）。 */
@@ -73,7 +70,7 @@ function buildAgentsMarkdown(name: string): string {
     "",
     "## 主题绑定",
     "",
-    "- 新格式 2 工作区采用 isolated：每个主题有自己的 root，禁止跨主题结构连线。旧库未声明 topicMode 时沿用 shared，不自动转换。",
+    "- 工作区固定采用 isolated：每个主题有自己的 root，禁止跨主题结构连线。",
     "- 先用 aichat topics 按用户给出的名称或续谈提示解析并绑定 topicId；重名或目标不明才询问，后续沿用绑定。",
     "- 前端打开主题只是阅读状态，不代表其他 Agent 对话的目标；不要猜测全局 activeTopic。",
     "- 新主题用 aichat create-topic --topic-title <名称> [--directory <一级目录>] --body-file <文件>，原子创建主题和独立起点。",
@@ -151,12 +148,10 @@ export async function initWorkspace(
   }
   const workspaceId = options.workspaceId ?? `w_${randomUUID().replace(/-/g, "")}`;
   const name = options.name ?? targetName;
-  // 新工作区默认格式 2；格式 1 只用于显式兼容旧数据。
-  const schemaVersion = options.schemaVersion ?? DEFAULT_WORKSPACE_SCHEMA_VERSION;
   const workspaceJson = `${JSON.stringify(
     {
-      schemaVersion,
-      topicMode: schemaVersion === 2 ? "isolated" : "shared",
+      schemaVersion: 2,
+      topicMode: "isolated",
       workspaceId,
       name,
       activeNode: null,
@@ -190,7 +185,7 @@ export async function initWorkspace(
     // 发布前自检：骨架必须能被同一读取路径解析，避免发布半成品。
     const stagedWorkspace = await fs.readFile(path.join(staging, WORKSPACE_FILENAME), "utf8");
     const stagedInfo = parseWorkspaceInfo(stagedWorkspace);
-    if (stagedInfo.workspaceId !== workspaceId || stagedInfo.schemaVersion !== schemaVersion) {
+    if (stagedInfo.workspaceId !== workspaceId || stagedInfo.schemaVersion !== 2) {
       throw new StorageError("INIT_FAILED", "初始化自检失败：工作区身份或格式不一致");
     }
     // 发布：rename 不会覆盖已存在目录，目标被并发创建时安全失败。

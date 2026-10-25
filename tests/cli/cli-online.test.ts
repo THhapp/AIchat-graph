@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { promises as fs } from "node:fs";
-import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { initWorkspace } from "../../src/storage/index.js";
@@ -167,7 +166,7 @@ describe("在线连接：descriptor 与身份核对", () => {
       pid: process.pid,
     });
     const replaced = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       workspaceId: "w_replaced_identity",
       name: "online-test",
       activeNode: null,
@@ -398,6 +397,65 @@ describe("check / apply 传输", () => {
     expect(body.error.diagnostics[0].code).toBe("GRAPH_CYCLE");
   });
 
+  it("写端点 404（缺失／无标准错误体）明确 SERVICE_HTTP_ERROR，不当作节点不存在", async () => {
+    const { root, workspaceId } = await newWorkspace();
+    const { fetchImpl } = fakeFetch({
+      workspaceId,
+      rootPath: root,
+      respond: () => ({ status: 404, body: { message: "no route" } }),
+    });
+    await writeDescriptor(root, {
+      url: "http://127.0.0.1:4400",
+      rootPath: root,
+      workspaceId,
+      instanceId: "inst-1",
+      pid: process.pid,
+    });
+    const result = await main(
+      ["apply", "--input", await writeRequest(root, baseRequest(workspaceId)), "--workspace", root],
+      { fetchImpl },
+    );
+    expect(result.exitCode).toBe(9);
+    const body = JSON.parse(result.stderr);
+    expect(body.error.code).toBe("SERVICE_HTTP_ERROR");
+    expect(body.error.message).toContain("404");
+    expect(body.httpStatus).toBe(404);
+  });
+
+  it("服务端明确返回 workspace 身份错误时映射为退出码 3，而非一律 409→5", async () => {
+    const { root, workspaceId } = await newWorkspace();
+    const { fetchImpl } = fakeFetch({
+      workspaceId,
+      rootPath: root,
+      respond: () => ({
+        status: 409,
+        body: {
+          error: {
+            code: "WORKSPACE_MISMATCH",
+            message: "请求的 workspaceId 与服务不一致",
+            details: { requestWorkspaceId: "w_other", serviceWorkspaceId: workspaceId },
+          },
+        },
+      }),
+    });
+    await writeDescriptor(root, {
+      url: "http://127.0.0.1:4400",
+      rootPath: root,
+      workspaceId,
+      instanceId: "inst-1",
+      pid: process.pid,
+    });
+    const result = await main(
+      ["check", "--input", await writeRequest(root, baseRequest(workspaceId)), "--workspace", root],
+      { fetchImpl },
+    );
+    expect(result.exitCode).toBe(3);
+    const body = JSON.parse(result.stderr);
+    expect(body.error.code).toBe("WORKSPACE_MISMATCH");
+    expect(body.error.message).toContain("workspaceId");
+    expect(body.httpStatus).toBe(409);
+  });
+
   it("apply 断线时不重放，查询状态仍未知则明确 UNKNOWN", async () => {
     const { root, workspaceId } = await newWorkspace();
     const { fetchImpl, requests } = fakeFetch({
@@ -559,19 +617,7 @@ describe("serve", () => {
     expect(body.error.message).toContain("端口被占用");
   });
 
-  // 服务模块落地后此用例自动跳过（改为真实服务联调，不在单元测试里开服）。
-  it.skipIf(existsSync(path.join(process.cwd(), "src", "service", "index.ts")))(
-    "未提供替身且服务模块缺失时以 SERVICE_UNAVAILABLE 失败（不谎报启动成功）",
-    async () => {
-    const { root } = await newWorkspace();
-    const result = await main(["serve", "--workspace", root, "--port", "4502"]);
-    expect(result.exitCode).toBe(7);
-    const body = JSON.parse(result.stderr);
-    expect(body.error.code).toBe("SERVICE_UNAVAILABLE");
-    expect(result.stdout).toBe("");
-    },
-  );
-
+  // 服务模块已落地，未提供替身时的旧缺省分支不再可达，因此不在单元测试里开服联调。
   it("--port 非法时在执行 startService 之前失败", async () => {
     const { root } = await newWorkspace();
     let called = false;

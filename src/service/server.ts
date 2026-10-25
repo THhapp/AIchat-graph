@@ -27,7 +27,7 @@ import type {
   Diagnostic,
 } from "../shared/protocol.js";
 import { applyChanges, applyAgentChange, checkChanges } from "./changes.js";
-import { parseAgentReadQuery, readAgentNode } from "./agent.js";
+import { parseAgentReadQuery, readAgentNode } from "./agent/read.js";
 import { setNodeImportance } from "./importance.js";
 import type { ExportCoordinator as ExportCoordinatorType } from "./export.js";
 import { ServiceError, serviceErrorFromUnknown } from "./errors.js";

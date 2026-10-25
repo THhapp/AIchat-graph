@@ -11,20 +11,24 @@ const running: Array<{ stop(): Promise<void> }> = [];
 
 const NODE = "n_" + "a".repeat(32);
 const TOPIC_ID = "t_" + "b".repeat(32);
-const TOPIC_PATH = "topics/topic.md";
+const DIR = "恢复";
+const TOPIC_PATH = "topics/" + DIR + "/topic.md";
+const NODE_PATH = "topics/" + DIR + "/" + NODE + ".md";
 const TOPIC_TEXT = [
   "---",
-  "schemaVersion: 1",
   "topicId: " + TOPIC_ID,
   "title: 恢复样例",
-  "nodes:",
-  "  " + NODE + ":",
-  "    from: null",
-  "    flow: root",
-  "    state: agreed",
   "---",
   "",
-  "## 首卡 <!-- node:" + NODE + " -->",
+].join("\n");
+const NODE_TEXT = [
+  "---",
+  "nodeId: " + NODE,
+  "title: 首卡",
+  "state: agreed",
+  "from: null",
+  "flow: root",
+  "---",
   "",
   "恢复后的正文。",
   "",
@@ -46,8 +50,11 @@ async function newWorkspace(): Promise<string> {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), "aichat-recovery-"));
   temporaryRoots.push(parent);
   const root = path.join(parent, "workspace");
-  await initWorkspace({ root, name: "recovery", schemaVersion: 1 });
+  await initWorkspace({ root, name: "recovery" });
+  const topicDir = path.join(root, "topics", DIR);
+  await fs.mkdir(topicDir, { recursive: true });
   await fs.writeFile(path.join(root, ...TOPIC_PATH.split("/")), TOPIC_TEXT, "utf8");
+  await fs.writeFile(path.join(root, ...NODE_PATH.split("/")), NODE_TEXT, "utf8");
   return fs.realpath(root);
 }
 
@@ -76,12 +83,12 @@ describe("committed 日志的启动核对", () => {
         requestId: "8f8fad5b-d9cb-469f-a165-70867728950e",
         files: [
           {
-            path: TOPIC_PATH,
+            path: NODE_PATH,
             existedBefore: true,
             beforeSha256: sha256Bytes(beforeText),
             beforeBytes: Buffer.byteLength(beforeText),
-            afterSha256: sha256Bytes(TOPIC_TEXT),
-            afterBytes: Buffer.byteLength(TOPIC_TEXT),
+            afterSha256: sha256Bytes(NODE_TEXT),
+            afterBytes: Buffer.byteLength(NODE_TEXT),
           },
         ],
       }),
@@ -106,8 +113,8 @@ describe("committed 日志的启动核对", () => {
     const transactionId = "20260101T000000Z-recoverybbbb";
     const dir = path.join(root, ".aichat", "runtime", "transactions", transactionId);
     await fs.mkdir(path.join(dir, "after"), { recursive: true });
-    const broken = "---\nschemaVersion: 1\n";
-    await fs.writeFile(path.join(root, ...TOPIC_PATH.split("/")), broken, "utf8");
+    const broken = "---\nnodeId: 坏节点\n---\n";
+    await fs.writeFile(path.join(root, ...NODE_PATH.split("/")), broken, "utf8");
     await fs.writeFile(
       path.join(dir, "journal.json"),
       JSON.stringify({
@@ -117,7 +124,7 @@ describe("committed 日志的启动核对", () => {
         createdAt: "2026-01-01T00:00:00.000Z",
         files: [
           {
-            path: TOPIC_PATH,
+            path: NODE_PATH,
             existedBefore: true,
             beforeSha256: sha256Bytes("old"),
             beforeBytes: 3,
@@ -148,12 +155,12 @@ describe("committed 日志的启动核对", () => {
       body: JSON.stringify({
         workspaceId: handle.workspaceId,
         requestId: "9f8fad5b-d9cb-469f-a165-70867728950e",
-        expectedFiles: { [TOPIC_PATH]: sha256Bytes(broken) },
+        expectedFiles: { [NODE_PATH]: sha256Bytes(broken) },
         operations: [{ op: "updateNode", nodeId: NODE, body: "不应写入" }],
       }),
     });
     expect(apply.status).toBe(409);
     expect(((await apply.json()) as { error: { code: string } }).error.code).toBe("WRITE_DISABLED");
-    expect(await fs.readFile(path.join(root, ...TOPIC_PATH.split("/")), "utf8")).toBe(broken);
+    expect(await fs.readFile(path.join(root, ...NODE_PATH.split("/")), "utf8")).toBe(broken);
   });
 });

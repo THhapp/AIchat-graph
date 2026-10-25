@@ -14,29 +14,42 @@ const running: Array<{ stop(): Promise<void> }> = [];
 const NODE_ROOT = "n_00000000000000000000000000000001";
 const NODE_SECOND = "n_00000000000000000000000000000002";
 const TOPIC_ID = "t_00000000000000000000000000000001";
-const TOPIC_PATH = "topics/topic.md";
+const DIR = "条目";
+const TOPIC_META_PATH = "topics/" + DIR + "/topic.md";
+const ROOT_PATH = "topics/" + DIR + "/" + NODE_ROOT + ".md";
+const SECOND_PATH = "topics/" + DIR + "/" + NODE_SECOND + ".md";
+const TOPIC_PATH = TOPIC_META_PATH;
 
 const TOPIC_TEXT = [
   "---",
-  "schemaVersion: 1",
   "topicId: " + TOPIC_ID,
   "title: 条目整理",
-  "nodes:",
-  "  " + NODE_ROOT + ":",
-  "    from: null",
-  "    flow: root",
-  "    state: agreed",
-  "  " + NODE_SECOND + ":",
-  "    from: " + NODE_ROOT,
-  "    flow: next",
-  "    state: proposed",
   "---",
   "",
-  "## 记录的目的 <!-- node:" + NODE_ROOT + " -->",
+].join("\n");
+
+const ROOT_TEXT = [
+  "---",
+  "nodeId: " + NODE_ROOT,
+  "title: 记录的目的",
+  "state: agreed",
+  "from: null",
+  "flow: root",
+  "---",
   "",
   "保留有用的思路来路和关键转折。",
   "",
-  "## 原位维护 <!-- node:" + NODE_SECOND + " -->",
+].join("\n");
+
+const SECOND_TEXT = [
+  "---",
+  "nodeId: " + NODE_SECOND,
+  "title: 原位维护",
+  "state: proposed",
+  "from: " + NODE_ROOT,
+  "flow: next",
+  "description: 先记录目的，再说明维护方式",
+  "---",
   "",
   "默认更新现有内容，不按聊天轮次新增副本。",
   "",
@@ -48,10 +61,13 @@ async function newWorkspace(options: { withTopic?: boolean } = {}): Promise<stri
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), "aichat-service-"));
   temporaryRoots.push(parent);
   const root = path.join(parent, "workspace");
-  // 这些用例保留格式 1（一个主题文件内多卡片）的兼容路径；新工作区默认格式 2。
-  await initWorkspace({ root, name: "service-test", schemaVersion: 1 });
+  await initWorkspace({ root, name: "service-test" });
   if (options.withTopic === true) {
-    await fs.writeFile(path.join(root, "topics", "topic.md"), TOPIC_TEXT, "utf8");
+    const topicDir = path.join(root, "topics", DIR);
+    await fs.mkdir(topicDir, { recursive: true });
+    await fs.writeFile(path.join(topicDir, "topic.md"), TOPIC_TEXT, "utf8");
+    await fs.writeFile(path.join(topicDir, NODE_ROOT + ".md"), ROOT_TEXT, "utf8");
+    await fs.writeFile(path.join(topicDir, NODE_SECOND + ".md"), SECOND_TEXT, "utf8");
   }
   return fs.realpath(root);
 }
@@ -151,8 +167,8 @@ describe("只读接口", () => {
       await request(runtime, 4399, "/api/nodes/" + NODE_ROOT + version)
     ).json()) as Record<string, unknown>;
     expect(detail["body"]).toContain("保留有用的思路来路");
-    expect(detail["fileHash"]).toBe(graph.topics[0]?.fileHash);
-    expect(detail["path"]).toBe(TOPIC_PATH);
+    expect(detail["fileHash"]).toBe(await fileHash(root, ROOT_PATH));
+    expect(detail["path"]).toBe(ROOT_PATH);
 
     const topic = (await (
       await request(runtime, 4399, "/api/topics/" + TOPIC_ID + version)
@@ -282,7 +298,7 @@ describe("变更检查与提交", () => {
     return {
       workspaceId,
       requestId,
-      expectedFiles: { [TOPIC_PATH]: expectedHash },
+      expectedFiles: { [ROOT_PATH]: expectedHash },
       operations: [{ op: "updateNode", nodeId: NODE_ROOT, body }],
     };
   }
@@ -306,7 +322,7 @@ describe("变更检查与提交", () => {
     const root = await newWorkspace({ withTopic: true });
     const runtime = await makeRuntime(root);
     runtime.port = 4399;
-    const before = await fileHash(root, TOPIC_PATH);
+    const before = await fileHash(root, ROOT_PATH);
 
     const check = await post(
       runtime,
@@ -319,8 +335,8 @@ describe("变更检查与提交", () => {
       files: Array<{ path: string; nextSha256: string }>;
     };
     expect(checkBody.dryRun).toBe(true);
-    expect(checkBody.files.map((file) => file.path)).toEqual([TOPIC_PATH]);
-    expect(await fileHash(root, TOPIC_PATH)).toBe(before);
+    expect(checkBody.files.map((file) => file.path)).toEqual([ROOT_PATH]);
+    expect(await fileHash(root, ROOT_PATH)).toBe(before);
 
     const requestId = "1f8fad5b-d9cb-469f-a165-70867728950e";
     const payload = updateRequest(runtime.workspaceId, requestId, before, "新的正文。");
@@ -335,8 +351,8 @@ describe("变更检查与提交", () => {
     expect(appliedBody.state).toBe("committed");
     expect(appliedBody.revision).toBe(2);
     expect(appliedBody.journalCleaned).toBe(true);
-    expect(appliedBody.touchedFiles[0]?.path).toBe(TOPIC_PATH);
-    const afterFirst = await fileHash(root, TOPIC_PATH);
+    expect(appliedBody.touchedFiles[0]?.path).toBe(ROOT_PATH);
+    const afterFirst = await fileHash(root, ROOT_PATH);
     expect(afterFirst).toBe(appliedBody.touchedFiles[0]?.afterSha256);
 
     // 同 requestId 同请求体：返回原结果，不重复写、不重复增版本。
@@ -345,7 +361,7 @@ describe("变更检查与提交", () => {
     const replayBody = (await replay.json()) as { replayed?: boolean; revision: number };
     expect(replayBody.replayed).toBe(true);
     expect(replayBody.revision).toBe(2);
-    expect(await fileHash(root, TOPIC_PATH)).toBe(afterFirst);
+    expect(await fileHash(root, ROOT_PATH)).toBe(afterFirst);
 
     // 同 requestId 不同请求体：409，不执行新请求。
     const conflict = await post(
@@ -357,21 +373,21 @@ describe("变更检查与提交", () => {
     expect(((await conflict.json()) as { error: { code: string } }).error.code).toBe(
       "OPERATION_CONFLICT",
     );
-    expect(await fileHash(root, TOPIC_PATH)).toBe(afterFirst);
+    expect(await fileHash(root, ROOT_PATH)).toBe(afterFirst);
 
     // 详情与新快照一致。
-    const topic = (await (
-      await request(runtime, 4399, "/api/topics/" + TOPIC_ID)
-    ).json()) as { raw: string; fileHash: string };
-    expect(topic.raw).toContain("新的正文。");
-    expect(topic.fileHash).toBe(afterFirst);
+    const detail = (await (
+      await request(runtime, 4399, "/api/nodes/" + NODE_ROOT)
+    ).json()) as { body: string; fileHash: string };
+    expect(detail.body).toContain("新的正文。");
+    expect(detail.fileHash).toBe(afterFirst);
   });
 
   it("过期 hash 返回 412，不覆盖磁盘", async () => {
     const root = await newWorkspace({ withTopic: true });
     const runtime = await makeRuntime(root);
     runtime.port = 4399;
-    const before = await fileHash(root, TOPIC_PATH);
+    const before = await fileHash(root, ROOT_PATH);
     const result = await post(
       runtime,
       "/api/changes",
@@ -381,15 +397,15 @@ describe("变更检查与提交", () => {
     expect(((await result.json()) as { error: { code: string } }).error.code).toBe(
       "VERSION_CONFLICT",
     );
-    expect(await fileHash(root, TOPIC_PATH)).toBe(before);
-    expect(await fs.readFile(path.join(root, ...TOPIC_PATH.split("/")), "utf8")).toBe(TOPIC_TEXT);
+    expect(await fileHash(root, ROOT_PATH)).toBe(before);
+    expect(await fs.readFile(path.join(root, ...ROOT_PATH.split("/")), "utf8")).toBe(ROOT_TEXT);
   });
 
   it("no-op 变更不提交、不增 revision", async () => {
     const root = await newWorkspace({ withTopic: true });
     const runtime = await makeRuntime(root);
     runtime.port = 4399;
-    const before = await fileHash(root, TOPIC_PATH);
+    const before = await fileHash(root, ROOT_PATH);
     const result = await post(
       runtime,
       "/api/changes",
@@ -405,7 +421,7 @@ describe("变更检查与提交", () => {
     expect(body.state).toBe("noop");
     expect(body.revision).toBe(1);
     expect(body.touchedFiles).toEqual([]);
-    expect(await fileHash(root, TOPIC_PATH)).toBe(before);
+    expect(await fileHash(root, ROOT_PATH)).toBe(before);
   });
 });
 
@@ -418,7 +434,7 @@ describe("外部坏文件与有效快照", () => {
       await request(runtime, 4399, "/api/graph")
     ).json()) as { revision: number; instanceId: string; topics: Array<{ fileHash: string }> };
 
-    const broken = "---\nschemaVersion: 1\n";
+    const broken = "---\ntitle: 坏文件\n---\n";
     await fs.writeFile(path.join(root, ...TOPIC_PATH.split("/")), broken, "utf8");
     const reloaded = await runtime.reloadFromDisk();
     expect(reloaded.ok).toBe(false);
@@ -586,7 +602,7 @@ describe("丢锁与状态细节", () => {
     const root = await newWorkspace({ withTopic: true });
     const runtime = await makeRuntime(root);
     runtime.port = 4399;
-    const before = await fileHash(root, TOPIC_PATH);
+    const before = await fileHash(root, ROOT_PATH);
     runtime.disableWrites("WRITER_LOCK_COMPROMISED", "测试：写锁失效");
     const response = await request(runtime, 4399, "/api/changes", {
       method: "POST",
@@ -594,7 +610,7 @@ describe("丢锁与状态细节", () => {
       body: JSON.stringify({
         workspaceId: runtime.workspaceId,
         requestId: "6f8fad5b-d9cb-469f-a165-70867728950e",
-        expectedFiles: { [TOPIC_PATH]: before },
+        expectedFiles: { [ROOT_PATH]: before },
         operations: [{ op: "updateNode", nodeId: NODE_ROOT, body: "不应写入" }],
       }),
     });
@@ -602,7 +618,7 @@ describe("丢锁与状态细节", () => {
     expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
       "WRITE_DISABLED",
     );
-    expect(await fileHash(root, TOPIC_PATH)).toBe(before);
+    expect(await fileHash(root, ROOT_PATH)).toBe(before);
     const diagnostics = (await (
       await request(runtime, 4399, "/api/diagnostics")
     ).json()) as { diagnostics: Array<{ code: string }> };
@@ -650,8 +666,8 @@ describe("监听与端口", () => {
     };
     expect(graph.revision).toBe(1);
 
-    const edited = TOPIC_TEXT.replace("保留有用的思路来路和关键转折。", "外部编辑后的正文。");
-    await fs.writeFile(path.join(root, ...TOPIC_PATH.split("/")), edited, "utf8");
+    const edited = ROOT_TEXT.replace("保留有用的思路来路和关键转折。", "外部编辑后的正文。");
+    await fs.writeFile(path.join(root, ...ROOT_PATH.split("/")), edited, "utf8");
     const published = await nextSnapshot();
     expect(published.revision).toBe(2);
     expect(published.changedNodeIds).toEqual([NODE_ROOT]);
@@ -670,11 +686,11 @@ describe("监听与端口", () => {
     expect(detail.body).toContain("外部编辑后的正文。");
 
     // 托管写入同一个文件后，watcher 重读不应再发布一次（内容指纹相同）。
-    const hashNow = await fileHash(root, TOPIC_PATH);
+    const hashNow = await fileHash(root, SECOND_PATH);
     const payload = JSON.stringify({
       workspaceId: handle.workspaceId,
       requestId: "7f8fad5b-d9cb-469f-a165-70867728950e",
-      expectedFiles: { [TOPIC_PATH]: hashNow },
+      expectedFiles: { [SECOND_PATH]: hashNow },
       operations: [{ op: "updateNode", nodeId: NODE_SECOND, body: "托管写入正文。" }],
     });
     const applied = await fetch(handle.url + "/api/changes", {

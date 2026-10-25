@@ -1,4 +1,4 @@
-import { Component, StrictMode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Component, StrictMode, useCallback, useEffect, useMemo, useState } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { GraphNode, GraphResponse, OfflineTopicDocument } from '../../shared/protocol.js';
@@ -7,11 +7,10 @@ import { CARD_BASE_HEIGHT, CARD_WIDTH, LAYOUT_HORIZONTAL_GAP, LAYOUT_VERTICAL_GA
 import { computeLayout } from '../layout/index.js';
 import type { LayoutResult } from '../layout/types.js';
 import { searchGraph } from '../lib/search.js';
+import { copyText as writeClipboard } from '../lib/clipboard.js';
 import { GraphCanvas } from '../components/GraphCanvas.js';
 import { DetailPanel } from '../components/DetailPanel.js';
 import { Sidebar } from '../components/Sidebar.js';
-import { StateChip, flowLabel } from '../components/display.js';
-import { MarkdownBody } from '../components/MarkdownBody.js';
 import { bodyById, readEmbeddedDocument, toGraphResponse, OfflineDocumentError } from './document.js';
 import '../styles/tokens.css';
 import '../styles/base.css';
@@ -90,8 +89,6 @@ function OfflineReader(): React.JSX.Element {
   const [fitSignal, setFitSignal] = useState(FIT_SIGNAL_NONE);
   const [savedViewport] = useState<null>(null);
   const [copied, setCopied] = useState(false);
-  const capturedKey = useRef<string | null>(null);
-  const [anchorScreen, setAnchorScreen] = useState<{ x: number; y: number } | null>(null);
 
   const graph = state?.graph ?? null;
   const bodies = state?.bodies ?? new Map<string, string>();
@@ -133,21 +130,6 @@ function OfflineReader(): React.JSX.Element {
     if (view.visibleIds.has(selectedNodeId)) return selectedNodeId;
     return null;
   }, [view, selectedNodeId]);
-
-  useLayoutEffect(() => {
-    const key = view?.structureKey ?? null;
-    if (key === null || key === capturedKey.current) {
-      if (key !== null) return;
-      capturedKey.current = null;
-      setAnchorScreen(null);
-      return;
-    }
-    capturedKey.current = key;
-    if (anchorNodeId === null) { setAnchorScreen(null); return; }
-    const element = window.document.querySelector<HTMLElement>('.react-flow__node[data-id="' + CSS.escape(anchorNodeId) + '"]');
-    const rect = element?.getBoundingClientRect();
-    setAnchorScreen(rect !== undefined && rect.width > 0 ? { x: rect.x, y: rect.y } : null);
-  }, [view?.structureKey, anchorNodeId]);
 
   const selectedNode: GraphNode | null = graph !== null && selectedNodeId !== null
     ? graph.nodes.find((node) => node.id === selectedNodeId) ?? null
@@ -213,13 +195,14 @@ function OfflineReader(): React.JSX.Element {
   }, []);
 
   const copyText = useCallback((text: string) => {
-    const done = (): void => {
-      setCopied(true);
-      window.setTimeout(() => { setCopied(false); }, 2000);
-    };
-    if (navigator.clipboard !== undefined) {
-      navigator.clipboard.writeText(text).then(done, () => { setCopied(false); });
-    }
+    writeClipboard(
+      text,
+      () => {
+        setCopied(true);
+        window.setTimeout(() => { setCopied(false); }, 2000);
+      },
+      () => { setCopied(false); },
+    );
   }, []);
 
   if (error !== null) {
@@ -322,7 +305,6 @@ function OfflineReader(): React.JSX.Element {
 
         <main className="canvas-host" id="main-content">
           <GraphCanvas
-            graph={graph}
             view={view}
             layout={layout}
             layoutStatus={layout === null ? 'error' : 'ready'}
@@ -336,7 +318,6 @@ function OfflineReader(): React.JSX.Element {
             fitSignal={fitSignal}
             savedViewport={savedViewport}
             anchorNodeId={anchorNodeId}
-            anchorScreen={anchorScreen}
           />
         </main>
 
@@ -400,5 +381,3 @@ if (container !== null) {
     </StrictMode>,
   );
 }
-
-export { OfflineReader, StateChip, flowLabel, MarkdownBody };

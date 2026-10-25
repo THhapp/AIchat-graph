@@ -8,7 +8,9 @@
  * - 默认输出 JSON；--text 为人类摘要。未知命令／标志：stderr 用法 + 非零退出。
  */
 import { pathToFileURL } from "node:url";
-import { runInit, runRead, runSearch, runServe, runTopics, runValidate } from "./commands.js";
+import { runSearch } from "./search-command.js";
+import { runRead } from "./read-command.js";
+import { runInit, runServe, runTopics, runValidate } from "./workspace-commands.js";
 import {
   runBranch,
   runConnect,
@@ -20,7 +22,6 @@ import {
   runRearrange,
 } from "./agent-commands.js";
 import { runCheckOrApply, runStatus, runWhoami } from "./changes-commands.js";
-import { runMigrate } from "./migrate.js";
 import { defaultIo, type CliContext } from "./context.js";
 import { CliError, errorEnvelope, EXIT_CODES, UsageError } from "./errors.js";
 import { emitErrorJson, emitText } from "./output.js";
@@ -38,7 +39,7 @@ export {
   SERVICE_DESCRIPTOR_PATH,
   DEFAULT_PORT,
 } from "./service-client.js";
-export { validateChangeRequestShape, readChangeRequestFile } from "./changes.js";
+export { validateChangeRequestShape, readChangeRequestFile } from "./change-input.js";
 
 export interface RunResult {
   readonly exitCode: number;
@@ -52,7 +53,9 @@ export interface RunResult {
  */
 export async function main(
   argv: readonly string[],
-  context: Partial<Pick<CliContext, "cwd" | "startService" | "shutdownSignal" | "fetchImpl">> = {},
+  context: Partial<
+    Pick<CliContext, "cwd" | "startService" | "shutdownSignal" | "fetchImpl" | "stdin">
+  > = {},
 ): Promise<RunResult> {
   let stdout = "";
   let stderr = "";
@@ -71,6 +74,7 @@ export async function main(
     ...(context.startService ? { startService: context.startService } : {}),
     ...(context.shutdownSignal ? { shutdownSignal: context.shutdownSignal } : {}),
     ...(context.fetchImpl ? { fetchImpl: context.fetchImpl } : {}),
+    ...(context.stdin ? { stdin: context.stdin } : {}),
   };
 
   const command = argv[0];
@@ -143,9 +147,6 @@ export async function main(
         break;
       case "create-root":
         exitCode = await runCreateRoot(rest, ctx);
-        break;
-      case "migrate":
-        exitCode = await runMigrate(rest, ctx);
         break;
       default:
         throw new UsageError(`未知命令 ${command}`);

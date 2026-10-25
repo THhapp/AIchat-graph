@@ -58,15 +58,12 @@ export interface GraphNode {
    */
   important: boolean;
   /**
-   * Why this node connects to its source (format 2). Format 1 workspaces may still
-   * carry a short display label here; treat label as compatibility, description as truth.
+   * Why this node connects to its source; the only connection text.
    */
   description?: string;
-  /** Legacy format-1 edge label; never written by format-2 tools. */
-  label?: string;
   /**
-   * Real source file of this node (format 2: the node's own Markdown; format 1:
-   * the topic file). Lets readers resolve relative links in the node body.
+   * Real source file of this node (its own Markdown). Lets readers resolve
+   * relative links in the node body.
    */
   sourcePath?: string;
 }
@@ -74,11 +71,11 @@ export interface GraphNode {
 export interface GraphTopic {
   id: string;
   title: string;
-  /** Workspace-relative path of the topic file (format 2: the topic.md metadata file). */
+  /** Workspace-relative path of the topic metadata file (topic.md). */
   path: string;
   /** Nodes of this topic in the effective snapshot; reading order comes from topic detail. */
   nodeIds: string[];
-  /** SHA-256 of the declared topic file bytes (format 2: topic.md). */
+  /** SHA-256 of the declared topic metadata file bytes (topic.md). */
   fileHash: string;
   /**
    * SHA-256 over every real source file of this topic (metadata + node files).
@@ -105,7 +102,6 @@ export interface Diagnostic {
 
 /** GET /api/workspace */
 export interface WorkspaceResponse extends SnapshotVersion {
-  topicMode?: 'isolated' | 'shared';
   agentEntry?: { cliPath: string; skillPath: string };
   workspaceId: string;
   name: string;
@@ -129,7 +125,6 @@ export interface LastChange {
 
 /** GET /api/graph */
 export interface GraphResponse extends SnapshotVersion {
-  topicMode?: 'isolated' | 'shared';
   workspaceId: string;
   activeNode: string | null;
   stale: boolean;
@@ -289,8 +284,14 @@ export interface AgentReadRange {
   unit: 'utf16';
 }
 
-/** Optional section locator; line numbers are 1-based within the node body. */
+/**
+ * Optional section locator; start/end are UTF-16 offsets into the node body.
+ * `index` is this heading's 0-based position among all headings in the body
+ * (fenced code is not a heading), not the same-title match index accepted by
+ * the read query's `section-index` parameter.
+ */
 export interface AgentSection {
+  /** 0-based order of this heading among all headings in the node body. */
   index: number;
   title: string;
   level: number;
@@ -329,10 +330,10 @@ export interface AgentNodeReadResponse extends SnapshotVersion {
   bodyOmitted?: boolean;
   range: AgentReadRange;
   truncated: boolean;
-  /** Real source file of this node (format 2: the node's own Markdown). */
+  /** Real source file of this node (its own Markdown). */
   path: string;
   fileHash: string;
-  /** Topic metadata file (format 2: topic.md). */
+  /** Topic metadata file (topic.md). */
   topicPath: string;
   editRef: AgentEditRef;
   /** The last section containing range.start, when headings exist. */
@@ -479,7 +480,6 @@ export interface AgentChangeResponse extends SnapshotVersion {
   action: AgentChangeAction['action'];
   state: 'committed' | 'noop' | 'committed_refresh_pending';
   created: AgentCreatedIds;
-  affectedNodeIds: string[];
   changedNodeIds: string[];
   touchedFiles: Array<{
     path: string;

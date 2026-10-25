@@ -15,23 +15,6 @@ import {
   type SearchIndex,
 } from "./types.js";
 
-/** manifest 结构校验的最小集合；缓存损坏时返回 null 由调用方重建。 */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function isIndexManifest(value: unknown, workspaceId: string): value is IndexManifest {
-  if (!isRecord(value)) return false;
-  if (value["format"] !== INDEX_FORMAT) return false;
-  if (value["workspaceId"] !== workspaceId) return false;
-  if (typeof value["generatedAt"] !== "string") return false;
-  if (!isRecord(value["fileHashes"])) return false;
-  if (!Array.isArray(value["topics"]) || !Array.isArray(value["nodes"])) return false;
-  if (!Array.isArray(value["links"]) || !Array.isArray(value["roots"])) return false;
-  if (!isRecord(value["backlinks"])) return false;
-  return true;
-}
-
 function manifestNodeOf(graph: WorkspaceGraph): ManifestNode[] {
   return graph.nodes.map((node) => ({
     id: node.id,
@@ -46,7 +29,6 @@ function manifestNodeOf(graph: WorkspaceGraph): ManifestNode[] {
     from: node.from,
     ...(node.side !== undefined ? { side: node.side } : {}),
     ...(node.order !== undefined ? { order: node.order } : {}),
-    ...(node.label !== undefined ? { label: node.label } : {}),
     number: node.number,
     nextId: node.nextId,
     branchIds: node.branchIds,
@@ -125,7 +107,7 @@ export function buildIndex(source: IndexSource): BuiltIndex {
     nodes: manifestNodeOf(graph),
     links,
     backlinks,
-    roots: [...(graph.rootIds ?? (graph.rootId === null ? [] : [graph.rootId]))],
+    roots: [...graph.rootIds],
   };
 
   const search: SearchIndex = {
