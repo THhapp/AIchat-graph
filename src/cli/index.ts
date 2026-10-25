@@ -15,7 +15,9 @@ import {
   runCreateRoot,
   runCreateTopic,
   runEdit,
+  runImportant,
   runNext,
+  runRearrange,
 } from "./agent-commands.js";
 import { runCheckOrApply, runStatus, runWhoami } from "./changes-commands.js";
 import { runMigrate } from "./migrate.js";
@@ -129,6 +131,12 @@ export async function main(
         break;
       case "connect":
         exitCode = await runConnect(rest, ctx);
+        break;
+      case "rearrange":
+        exitCode = await runRearrange(rest, ctx);
+        break;
+      case "important":
+        exitCode = await runImportant(rest, ctx);
         break;
       case "create-topic":
         exitCode = await runCreateTopic(rest, ctx);

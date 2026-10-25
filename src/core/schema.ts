@@ -62,6 +62,11 @@ export const v2NodeHeaderSchema = z.strictObject({
   side: branchSideSchema.optional(),
   order: z.int().optional(),
   summary: z.string().trim().min(1).optional(),
+  /**
+   * 重要标记：只表示"值得关注"，不参与编号、连接与排序。
+   * 缺省即未标记；写入 false 时不落字段，因此既有文件保持原样。
+   */
+  important: z.boolean().optional(),
 });
 
 /** workspace.json 的身份与讨论焦点；activeNode 不是用户选中卡片。 */

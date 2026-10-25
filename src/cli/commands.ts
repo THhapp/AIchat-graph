@@ -11,13 +11,20 @@ import type { CliContext, ServiceHandleLike, StartServiceLike } from "./context.
 import { CliError, EXIT_CODES, UsageError } from "./errors.js";
 import { emitJson, emitText } from "./output.js";
 import { DEFAULT_PORT, resolveServiceForWorkspace } from "./service-client.js";
-import { readAgentNode } from "./agent-client.js";
-import { normalizeLength, sliceBody, locateSection } from "./text.js";
+import type { ResolvedService } from "./service-client.js";
+import { readAgentNode, type AgentReadOptions } from "./agent-client.js";
+import type { AgentEditRef, AgentNodeReadResponse } from "../shared/protocol.js";
+import {
+  DEFAULT_READ_LENGTH,
+  normalizeLength,
+  sliceBody,
+  locateSection,
+  MAX_READ_SEGMENT,
+} from "./text.js";
 import { briefUsage } from "./usage.js";
 import {
   describeNode,
   describeTopic,
-  fileFacts,
   findNode,
   findTopicById,
   findTopicByPath,
@@ -229,7 +236,7 @@ export async function runTopics(args: readonly string[], ctx: CliContext): Promi
   const mode = parseOutputMode(parsed);
   const root = await workspaceRoot(parsed, ctx);
   const snapshot = await loadWorkspace(root);
-  const topics = snapshot.topics.map((entry) => describeTopic(snapshot, entry));
+  const topics = snapshot.topics.map((entry) => describeTopic(entry));
   const payload = {
     ok: snapshot.ok,
     command: "topics",
@@ -238,7 +245,6 @@ export async function runTopics(args: readonly string[], ctx: CliContext): Promi
     schemaVersion: snapshot.schemaVersion,
     topicMode: snapshot.workspace?.topicMode ?? "shared",
     workspace: snapshot.workspace,
-    workspaceFile: fileFacts(snapshot.files.workspaceFile),
     topics,
     topicCount: topics.length,
     diagnostics: snapshot.diagnostics,
@@ -249,7 +255,7 @@ export async function runTopics(args: readonly string[], ctx: CliContext): Promi
   ];
   for (const topic of topics) {
     lines.push(`  ${topic.topicId}  ${topic.title}  dir=${topic.dir ?? "-"}  nodes=${topic.nodeCount}`);
-    lines.push(`    entry ${topic.path}  ${topic.sha256 ?? ""}`);
+    lines.push(`    entry ${topic.path}`);
   }
   for (const diagnostic of snapshot.diagnostics) {
     lines.push(`  [${diagnostic.code}] ${diagnostic.topicPath ?? ""} ${diagnostic.message}`);
@@ -397,6 +403,7 @@ const TOPIC_OPTION = [
   { name: "full", boolean: true },
   { name: "section" },
   { name: "section-index" },
+  { name: "meta", boolean: true },
   { name: "offline", boolean: true },
   ...OUTPUT_OPTIONS,
 ] as const;
@@ -407,13 +414,36 @@ function parseOffset(raw: string | undefined, label: string): number | undefined
   return Number(raw);
 }
 
+/**
+ * 读取片段长度：0 与超上限都是参数错误，并在错误里给出有效范围。
+ * 在线与离线共用这一处，避免 normalizeLength 的 RangeError 漏成 INTERNAL。
+ */
+function parseReadLength(raw: string | undefined): number | undefined {
+  const value = parseOffset(raw, "--length");
+  if (value === undefined) return undefined;
+  if (value < 1 || value > MAX_READ_SEGMENT) {
+    throw invalidArgument(`--length 必须在 1-${MAX_READ_SEGMENT} 之间，收到 ${value}`, {
+      min: 1,
+      max: MAX_READ_SEGMENT,
+    });
+  }
+  return normalizeLength(value);
+}
+
 interface ReadWindow {
   readonly text: string;
   readonly range: { start: number; end: number; total: number; unit: "utf16" };
   readonly truncated: boolean;
 }
 
-function windowForBody(body: string, parsed: ParsedArgs): ReadWindow {
+/** 多卡默认预算：整次正文总量与单卡默认上限（UTF-16）。 */
+const READ_TOTAL_BUDGET = 12_000;
+
+function windowForBody(
+  body: string,
+  parsed: ParsedArgs,
+  defaultLength?: number,
+): ReadWindow {
   try {
     const sectionTitle = parsed.values.get("section");
     let start = parseOffset(parsed.values.get("start"), "--start");
@@ -422,10 +452,8 @@ function windowForBody(body: string, parsed: ParsedArgs): ReadWindow {
       const section = locateSection(body, sectionTitle, sectionIndex);
       start = section.start;
     }
-    const length =
-      parsed.values.get("length") === undefined
-        ? undefined
-        : normalizeLength(parseOffset(parsed.values.get("length"), "--length"));
+    // 多卡预算时把每卡默认长度作为 --length 的缺省值；显式 --length 优先。
+    const length = parseReadLength(parsed.values.get("length")) ?? defaultLength;
     return sliceBody(body, {
       ...(start !== undefined ? { start } : {}),
       ...(length !== undefined ? { length } : {}),
@@ -439,58 +467,111 @@ function windowForBody(body: string, parsed: ParsedArgs): ReadWindow {
   }
 }
 
-interface OnlineReadResult {
-  readonly online: true;
-  readonly payload: Record<string, unknown>;
-}
-
 /**
- * 尝试用在线服务读取节点（可获得 editRef）。服务不可用或凭据不适用时
- * 明确返回原因，由调用方决定是否回退到磁盘读取；绝不伪造在线凭据。
+ * 把一次 read 的切片参数整理成在线请求参数，只解析一次。
+ * meta 与切片／章节参数的冲突已在 runRead 层拒绝。
  */
-async function tryOnlineNodeRead(
-  root: string,
-  nodeId: string,
-  parsed: ParsedArgs,
-  ctx: CliContext,
-): Promise<OnlineReadResult | { online: false; reason: string; code: string }> {
-  let service;
-  try {
-    service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
-  } catch (error) {
-    if (error instanceof CliError) {
-      return { online: false, reason: error.message, code: error.code };
-    }
-    throw error;
-  }
+function nodeReadOptions(parsed: ParsedArgs, defaultLength?: number): AgentReadOptions {
   const start = parseOffset(parsed.values.get("start"), "--start");
-  const length =
-    parsed.values.get("length") === undefined
+  const explicitLength = parseReadLength(parsed.values.get("length"));
+  const length = explicitLength ?? defaultLength;
+  const section = parsed.values.get("section");
+  const sectionIndex =
+    section === undefined
       ? undefined
-      : normalizeLength(parseOffset(parsed.values.get("length"), "--length"));
-  const response = await readAgentNode(
-    service,
-    nodeId,
-    {
-      ...(start !== undefined ? { start } : {}),
-      ...(length !== undefined ? { length } : {}),
-      full: parsed.values.has("full"),
-    },
-    ctx.fetchImpl ?? fetch,
-  );
-  return { online: true, payload: response as unknown as Record<string, unknown> };
+      : parseOffset(parsed.values.get("section-index"), "--section-index");
+  return {
+    ...(start !== undefined ? { start } : {}),
+    ...(length !== undefined ? { length } : {}),
+    ...(parsed.values.has("full") ? { full: true } : {}),
+    ...(parsed.values.has("meta") ? { meta: true } : {}),
+    ...(section !== undefined ? { section } : {}),
+    ...(sectionIndex !== undefined ? { sectionIndex } : {}),
+  };
 }
 
-function nodeReadPayload(
-  topic: TopicEntry,
-  entry: NodeEntry,
-  window: ReadWindow,
-) {
+/** 每个节点项：在线与离线完全同一形状，不再摊平节点字段。 */
+interface ReadItem {
+  readonly source: "online" | "disk";
+  readonly node: Record<string, unknown>;
+  readonly body: string;
+  readonly bodyOmitted?: true;
+  readonly range: ReadWindow["range"];
+  readonly truncated: boolean;
+  readonly path: string;
+  readonly fileHash: string;
+  readonly editRef: AgentEditRef | null;
+}
+
+function onlineReadItem(response: AgentNodeReadResponse): ReadItem {
   return {
-    ...describeNode(topic, entry),
+    source: "online",
+    node: response.node as unknown as Record<string, unknown>,
+    body: response.body,
+    ...(response.bodyOmitted === true ? { bodyOmitted: true as const } : {}),
+    range: response.range,
+    truncated: response.truncated,
+    path: response.path,
+    fileHash: response.fileHash,
+    editRef: response.editRef,
+  };
+}
+
+/** 离线节点：number 来自有效图的 id→编号映射；图无效时为 null。 */
+function offlineNodeView(
+  entry: NodeEntry,
+  numberById: ReadonlyMap<string, string>,
+): Record<string, unknown> {
+  const { node } = entry;
+  return {
+    id: node.id,
+    topicId: node.topicId,
+    title: node.title,
+    summary: node.summary,
+    number: numberById.get(node.id) ?? null,
+    from: node.from,
+    flow: node.flow,
+    state: node.state,
+    important: node.important,
+    ...(node.description !== undefined ? { description: node.description } : {}),
+    ...(node.side !== undefined ? { side: node.side } : {}),
+    ...(node.order !== undefined ? { order: node.order } : {}),
+    ...(node.label !== undefined ? { label: node.label } : {}),
+    sourcePath: entry.path,
+  };
+}
+
+function offlineReadItem(
+  entry: NodeEntry,
+  parsed: ParsedArgs,
+  numberById: ReadonlyMap<string, string>,
+  defaultLength: number | undefined,
+): ReadItem {
+  const node = offlineNodeView(entry, numberById);
+  const body = entry.node.body;
+  if (parsed.values.has("meta")) {
+    return {
+      source: "disk",
+      node,
+      body: "",
+      bodyOmitted: true,
+      range: { start: 0, end: 0, total: body.length, unit: "utf16" },
+      truncated: false,
+      path: entry.path,
+      fileHash: entry.file.sha256,
+      editRef: null,
+    };
+  }
+  const window = windowForBody(body, parsed, defaultLength);
+  return {
+    source: "disk",
+    node,
     body: window.text,
     range: window.range,
     truncated: window.truncated,
+    path: entry.path,
+    fileHash: entry.file.sha256,
+    editRef: null,
   };
 }
 
@@ -509,6 +590,25 @@ export async function runRead(args: readonly string[], ctx: CliContext): Promise
   }
   if (nodeIds.length === 0 && positional === undefined && topicOption === undefined) {
     throw new UsageError("缺少要读取的主题或节点\n\n" + briefUsage("read"));
+  }
+  if (parsed.values.has("meta")) {
+    const conflicts = ["start", "length", "full", "section", "section-index"].filter((name) =>
+      parsed.values.has(name),
+    );
+    if (conflicts.length > 0) {
+      throw new UsageError(
+        "--meta 不能与 " + conflicts.map((name) => "--" + name).join("／") +
+          " 同时使用；meta 读取不含正文",
+      );
+    }
+    if (nodeIds.length === 0) {
+      throw new UsageError("--meta 只能与 --node 一起使用");
+    }
+  }
+  // 在线服务会拒绝单独出现的 section-index；CLI 在发请求前统一拒绝，
+  // 保证 --node 与主题读取、在线与离线的行为一致。
+  if (parsed.values.has("section-index") && parsed.values.get("section") === undefined) {
+    throw new UsageError("--section-index 必须与 --section 一起使用");
   }
 
   const snapshot = await loadWorkspace(root);
@@ -561,19 +661,21 @@ export async function runRead(args: readonly string[], ctx: CliContext): Promise
     root: snapshot.root,
     schemaVersion: snapshot.schemaVersion,
     topicMode: snapshot.workspace?.topicMode ?? "shared",
-    topic: describeTopic(snapshot, topic),
-    ...(entryFile ? { file: fileFacts(entryFile) } : {}),
+    topic: describeTopic(topic),
     // 节点清单：标题、摘要、状态、连接与真实源文件，不含正文。
-    nodes: topic.nodes.map((entry) => describeNode(topic, entry)),
+    nodes: topic.nodes.map((entry) => describeNode(entry, snapshot.nodeNumbers)),
     ...(textSegment
       ? { text: textSegment.text, range: textSegment.range, truncated: textSegment.truncated }
       : { textOmitted: "默认不返回主题文件正文；用 read --node 取卡片正文，或加 --full／--start／--length" }),
   };
   const lines = [
     `topic ${topic.topic.topicId} ${topic.topic.title} (schemaVersion ${topic.topic.schemaVersion})`,
-    `entry ${topic.path}${entryFile ? "  sha256 " + entryFile.sha256 : ""}`,
+    `entry ${topic.path}`,
     `${topic.nodes.length} node(s):`,
-    ...topic.nodes.map((entry) => `  ${entry.node.id}  ${entry.path}  ${entry.node.title}`),
+    ...topic.nodes.map((entry) => {
+      const view = describeNode(entry, snapshot.nodeNumbers);
+      return `  ${view.number ?? "-"}  ${view.id}  ${view.path}  ${view.title}`;
+    }),
   ];
   if (textSegment) lines.push("", textSegment.text);
   emit(ctx, mode, payload, lines);
@@ -587,24 +689,60 @@ async function readNodes(
   ctx: CliContext,
   mode: "json" | "text",
 ): Promise<number> {
-  const results: Record<string, unknown>[] = [];
-  const missing: string[] = [];
+  // 多卡预算只在“未显式选择切片方式”时生效；单卡仍用默认 4000。
+  const budgetApplies =
+    nodeIds.length > 1 &&
+    !parsed.values.has("length") &&
+    !parsed.values.has("full") &&
+    !parsed.values.has("meta") &&
+    !parsed.values.has("section");
+  const perNodeLength = budgetApplies
+    ? Math.max(1, Math.min(DEFAULT_READ_LENGTH, Math.floor(READ_TOTAL_BUDGET / nodeIds.length)))
+    : undefined;
+  const readOptions = nodeReadOptions(parsed, perNodeLength);
+  const fetchImpl = ctx.fetchImpl ?? fetch;
+  const numberById = snapshot.nodeNumbers;
+
   const forceOffline = parsed.values.has("offline");
+  let service: ResolvedService | null = null;
+  let unavailable: { code: string; reason: string } | null = forceOffline
+    ? { code: "OFFLINE_REQUESTED", reason: "--offline 指定只读磁盘" }
+    : null;
+  if (!forceOffline) {
+    try {
+      // 服务只解析并核对一次身份，后续节点复用同一实例。
+      service = await resolveServiceForWorkspace(snapshot.root, fetchImpl);
+    } catch (error) {
+      // 不可达／未运行／身份不适用（退出码 7）才整次回退磁盘；
+      // 其他错误照常抛出，不静默改写为离线结果。
+      if (error instanceof CliError && error.exitCode === EXIT_CODES.service) {
+        unavailable = { code: error.code, reason: error.message };
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  const results: ReadItem[] = [];
+  const missing: string[] = [];
+  let revision: number | undefined;
   for (const nodeId of nodeIds) {
-    const online = forceOffline
-      ? { online: false as const, code: "OFFLINE_REQUESTED", reason: "--offline 指定只读磁盘" }
-      : await tryOnlineNodeRead(snapshot.root, nodeId, parsed, ctx).catch((error: unknown) => {
-          // 服务端明确错误不该静默吞掉；只有“连不上／身份不匹配”才回退本地读。
-          if (error instanceof CliError && error.exitCode === EXIT_CODES.service) {
-            return { online: false as const, code: error.code, reason: error.message };
-          }
+    let online: AgentNodeReadResponse | undefined;
+    if (service !== null && unavailable === null) {
+      try {
+        online = await readAgentNode(service, nodeId, readOptions, fetchImpl);
+      } catch (error) {
+        // 循环中途服务变得不可达：剩余节点读磁盘，已读到的在线项保持原样。
+        if (error instanceof CliError && error.code === "SERVICE_UNREACHABLE") {
+          unavailable = { code: error.code, reason: error.message };
+        } else {
           throw error;
-        });
-    if (online.online) {
-      results.push({
-        source: "online",
-        ...online.payload,
-      });
+        }
+      }
+    }
+    if (online !== undefined) {
+      revision ??= online.revision;
+      results.push(onlineReadItem(online));
       continue;
     }
     const found = findNode(snapshot, nodeId);
@@ -612,37 +750,50 @@ async function readNodes(
       missing.push(nodeId);
       continue;
     }
-    const window = windowForBody(found.entry.node.body, parsed);
-    results.push({
-      ...nodeReadPayload(found.topic, found.entry, window),
-      source: "disk",
-      schemaVersion: snapshot.schemaVersion,
-      topicMode: snapshot.workspace?.topicMode ?? "shared",
-      online: { available: false, code: online.code, reason: online.reason },
-      file: fileFacts(found.entry.file),
-    });
+    results.push(offlineReadItem(found.entry, parsed, numberById, perNodeLength));
   }
   if (missing.length > 0) {
     throw new CliError("NODE_NOT_FOUND", `找不到节点: ${missing.join(", ")}`, EXIT_CODES.notFound, {
       details: { nodeIds: missing, diagnostics: snapshot.diagnostics.slice(0, 20) },
     });
   }
+  const online =
+    service !== null && unavailable === null && revision !== undefined
+      ? {
+          available: true as const,
+          instanceId: service.identity.instanceId,
+          revision,
+          workspaceId: service.identity.workspaceId,
+        }
+      : {
+          available: false as const,
+          code: unavailable?.code ?? "SERVICE_UNAVAILABLE",
+          reason: unavailable?.reason ?? "服务不可用，已全部读取磁盘",
+        };
   const payload = {
     ok: true,
     command: "read",
     root: snapshot.root,
+    online,
+    ...(budgetApplies
+      ? { budget: { total: READ_TOTAL_BUDGET, perNode: perNodeLength, nodes: nodeIds.length } }
+      : {}),
     nodes: results,
   };
   const lines: string[] = [];
-  for (const item of results) {
-    const node = item["node"] as Record<string, unknown> | undefined;
-    const title = (node?.["title"] ?? item["title"]) as string | undefined;
-    const id = (node?.["id"] ?? item["id"]) as string | undefined;
-    const range = item["range"] as { start: number; end: number; total: number } | undefined;
+  if (budgetApplies) {
     lines.push(
-      `# ${title ?? ""} (${id ?? ""}) ${item["source"]} ${range ? `[${range.start},${range.end})/${range.total}` : ""}`,
+      `budget ${READ_TOTAL_BUDGET} chars / ${nodeIds.length} nodes, ${perNodeLength} per node`,
     );
-    lines.push(String(item["body"] ?? ""));
+  }
+  for (const item of results) {
+    const node = item.node;
+    const range = item.range;
+    lines.push(
+      `# ${String(node["title"] ?? "")} (${String(node["id"] ?? "")}) ${item.source} [${range.start},${range.end})/${range.total}`,
+    );
+    if (item.bodyOmitted) lines.push(`（仅元数据，总长 ${range.total}）`);
+    else lines.push(item.body);
     lines.push("");
   }
   emit(ctx, mode, payload, lines);
@@ -665,7 +816,7 @@ export async function runValidate(args: readonly string[], ctx: CliContext): Pro
     schemaVersion: snapshot.schemaVersion,
     topicMode: snapshot.workspace?.topicMode ?? "shared",
     workspace: snapshot.workspace,
-    topics: snapshot.topics.map((entry) => describeTopic(snapshot, entry)),
+    topics: snapshot.topics.map((entry) => describeTopic(entry)),
     storageDiagnostics: snapshot.files.diagnostics,
     diagnostics: validation.diagnostics,
     graphSkipped: validation.graphSkipped,
@@ -688,6 +839,7 @@ export async function runValidate(args: readonly string[], ctx: CliContext): Pro
             from: node.from,
             flow: node.flow,
             state: node.state,
+            important: node.important,
             ...(node.description !== undefined ? { description: node.description } : {}),
             ...(node.side !== undefined ? { side: node.side } : {}),
             ...(node.order !== undefined ? { order: node.order } : {}),

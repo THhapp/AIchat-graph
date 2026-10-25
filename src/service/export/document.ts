@@ -56,6 +56,7 @@ function basicNode(node: TopicSnapshot["nodes"][number]): GraphNode {
     from: node.from,
     flow: node.flow,
     state: node.state,
+    important: node.important,
     ...(node.description !== undefined ? { description: node.description } : {}),
     ...(node.side !== undefined ? { side: node.side } : {}),
     ...(node.order !== undefined ? { order: node.order } : {}),

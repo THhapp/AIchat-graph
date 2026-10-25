@@ -79,6 +79,8 @@ export function toGraphResponse(doc: OfflineTopicDocument): GraphResponse {
       from: node.from,
       flow: node.flow,
       state: node.state,
+      // Frozen export: the flag is whatever the exported snapshot said.
+      important: node.important === true,
       ...(node.side !== undefined ? { side: node.side } : {}),
       ...(node.order !== undefined ? { order: node.order } : {}),
       ...(node.description !== undefined ? { description: node.description } : {}),

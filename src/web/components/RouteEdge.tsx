@@ -58,17 +58,22 @@ export interface EdgeLabelBox {
  *
  * What the text is allowed to interrupt, and what it never touches: the shared
  * horizontal run of a trunk is never broken by a label — every label hangs
- * below it. A label can only cut a vertical segment it sits on, and that is
- * always this relationship's own run (its drop to the card, or — for the
- * innermost member — the exit riser it shares with the trunk at the near end).
- * Accepted as-is: a reader still sees where each line goes, while moving the
- * label off that run would either break the "label rides its own line" rule or
- * push the box onto a card.
+ * below it. A label can only cut a segment the branch itself owns: its drop to
+ * the card, its own exclusive entry run when the anchor sits on the target-side
+ * horizontal stub, or its own stretch of that stub. For the innermost member of
+ * a trunk group the anchor is no longer the shared exit riser (the old
+ * "vertical midpoint of the shared run"); layout now puts it on the horizontal
+ * run entering the card, so the board rides its own entry run and can no longer
+ * read as a caption for the whole trunk. Accepted as-is: a reader still sees
+ * where each line goes, while moving the label off that run would either break
+ * the "label rides its own line" rule or push the box onto a card.
  *
- * Horizontally the box is centred on `labelAnchor.x`. The layout puts that
- * anchor on the gap centre — the trunk drop line and the single-branch channel
- * both rise through the middle of the gap — so centring keeps the vertical run
- * passing through the middle of the board instead of clipping its edge. One
+ * Horizontally the box is centred on `labelAnchor.x`. For most branches layout
+ * puts that anchor on the gap centre — the trunk drop line and the single-branch
+ * channel both rise through the middle of the gap — so centring keeps the
+ * vertical run passing through the middle of the board instead of clipping its
+ * edge. When the anchor sits on an entry run (innermost member of a trunk
+ * group), the same rule pulls the board toward the card it enters. One
  * defensive bound remains: the board must not cross the card edge the branch
  * enters (a right-side branch stops at the target card's left edge, a left-side
  * branch at its right edge); if it ever would, it is pushed back against the

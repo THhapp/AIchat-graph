@@ -1,17 +1,35 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSnapshot } from './data/snapshot.js';
-import { loadReadingState, pruneReadingState, saveReadingState, switchReadingTopic, type ReadingState } from './data/readingState.js';
+import {
+  leftPanelOpenFor,
+  loadReadingState,
+  navCollapsedNodeIds,
+  navFolderExpanded,
+  pruneReadingState,
+  saveReadingState,
+  setLeftPanelOpen,
+  switchReadingTopic,
+  toggleLeftPanel,
+  toggleNavFolder,
+  toggleNavNode,
+  type ReadingState,
+} from './data/readingState.js';
 import { useDetails } from './data/details.js';
 import { buildGraphView, scopeGraphToTopic } from './graph/viewModel.js';
 import { useLayoutEngine } from './graph/layoutBridge.js';
 import { useGraphLayout } from './graph/useGraphLayout.js';
 import { searchGraph } from './lib/search.js';
 import { buildContinuationPrompt } from './lib/prompt.js';
+import { buildLocateText } from './lib/locate.js';
+import { copyText } from './lib/clipboard.js';
+import { recentNodeIds } from './lib/recent.js';
+import { importanceOf, useImportance } from './lib/importance.js';
 import { Sidebar } from './components/Sidebar.js';
 import { DetailPanel, type DetailTab } from './components/DetailPanel.js';
 import { GraphCanvas, findAnchorNodeId } from './components/GraphCanvas.js';
 import { EmptyState } from './components/States.js';
 import { ExportPanel } from './components/ExportPanel.js';
+import type { GraphNode, GraphResponse } from '../shared/protocol.js';
 
 const DETAIL_MIN = 300;
 const DETAIL_MAX = 680;
@@ -27,15 +45,22 @@ function columnTemplate(leftOpen: boolean, detailOpen: boolean, detailWidth: num
 export function App(): React.JSX.Element {
   const snapshot = useSnapshot();
   const engineSlot = useLayoutEngine();
-  const graph = snapshot.graph;
-  const workspaceId = snapshot.workspace?.workspaceId ?? graph?.workspaceId ?? null;
+  const sourceGraph = snapshot.graph;
+  const workspaceId = snapshot.workspace?.workspaceId ?? sourceGraph?.workspaceId ?? null;
 
   const [reading, setReading] = useState<ReadingState | null>(null);
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<DetailTab>('node');
   const [fitSignal, setFitSignal] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [locateCopied, setLocateCopied] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  /**
+   * The last accepted importance write, applied on top of the snapshot until the
+   * service's own snapshot catches up. Never a source of truth: entries are
+   * dropped as soon as the graph already reports the same value.
+   */
+  const [nodeOverrides, setNodeOverrides] = useState<Record<string, GraphNode>>({});
 
   // Local reading state is per workspace and pruned against the current graph.
   useEffect(() => {
@@ -44,15 +69,38 @@ export function App(): React.JSX.Element {
   }, [workspaceId]);
 
   useEffect(() => {
-    if (workspaceId === null || reading === null || graph === null) return;
-    const pruned = pruneReadingState(reading, graph);
+    if (workspaceId === null || reading === null || sourceGraph === null) return;
+    const pruned = pruneReadingState(reading, sourceGraph);
     saveReadingState(workspaceId, pruned);
-    const changed =
-      pruned.selectedNodeId !== reading.selectedNodeId ||
-      pruned.topicFilter !== reading.topicFilter ||
-      pruned.collapsedNodeIds.length !== reading.collapsedNodeIds.length;
-    if (changed) setReading(pruned);
-  }, [workspaceId, reading, graph]);
+    // Covers panel, tree fold and per-topic records, not just selection/collapse.
+    if (JSON.stringify(pruned) !== JSON.stringify(reading)) setReading(pruned);
+  }, [workspaceId, reading, sourceGraph]);
+
+  const graph = useMemo<GraphResponse | null>(() => {
+    if (sourceGraph === null) return null;
+    const ids = Object.keys(nodeOverrides);
+    if (ids.length === 0) return sourceGraph;
+    return { ...sourceGraph, nodes: sourceGraph.nodes.map((node) => nodeOverrides[node.id] ?? node) };
+  }, [sourceGraph, nodeOverrides]);
+
+  // An override is only needed until the refreshed graph says the same thing.
+  useEffect(() => {
+    if (sourceGraph === null) return;
+    setNodeOverrides((current) => {
+      const ids = Object.keys(current);
+      if (ids.length === 0) return current;
+      const next = { ...current };
+      let changed = false;
+      for (const id of ids) {
+        const fresh = sourceGraph.nodes.find((node) => node.id === id);
+        if (fresh === undefined || importanceOf(fresh) === importanceOf(current[id])) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [sourceGraph]);
 
   const update = useCallback((patch: Partial<ReadingState>) => {
     setReading((current) => (current === null ? current : { ...current, ...patch }));
@@ -60,8 +108,9 @@ export function App(): React.JSX.Element {
 
   const closeDetail = useCallback(() => { update({ rightPanelOpen: false }); }, [update]);
 
-  // Both panels start closed and are toggled independently.
-  const leftOpen = reading?.leftPanelOpen ?? false;
+  // Both panels start closed and are toggled independently. The directory fold is
+  // remembered per topic; the detail panel is a session-level choice.
+  const leftOpen = reading === null ? false : leftPanelOpenFor(reading);
   const detailOpen = reading?.rightPanelOpen ?? false;
 
   const collapsedSet = useMemo(() => new Set(reading?.collapsedNodeIds ?? []), [reading]);
@@ -117,8 +166,47 @@ export function App(): React.JSX.Element {
     snapshot.refresh,
   );
 
+  // Decoration only: derived from the graph and the current topic, so folding,
+  // zooming and selecting can never make it appear or disappear.
+  const recent = useMemo(() => recentNodeIds(graph, effectiveTopicId), [graph, effectiveTopicId]);
+
+  const navCollapsedSet = useMemo(
+    () => new Set(reading === null ? [] : navCollapsedNodeIds(reading.navTree, currentTopicId ?? '')),
+    [reading, currentTopicId],
+  );
+  const expandedTopicIds = useMemo(() => {
+    const set = new Set<string>();
+    if (graph === null || reading === null) return set;
+    for (const topic of graph.topics) {
+      if (navFolderExpanded(reading.navTree, topic.id, currentTopicId)) set.add(topic.id);
+    }
+    return set;
+  }, [graph, reading, currentTopicId]);
+
+  /** Directory folds are local reading state; they never collapse the graph. */
+  const toggleTopicFolder = useCallback((topicId: string) => {
+    setReading((current) => (current === null ? current : toggleNavFolder(current, topicId, current.topicFilter)));
+  }, []);
+  const toggleNavNodeId = useCallback((nodeId: string) => {
+    const node = graph?.nodes.find((candidate) => candidate.id === nodeId);
+    if (node === undefined) return;
+    setReading((current) => (current === null ? current : toggleNavNode(current, node.topicId, nodeId)));
+  }, [graph]);
+
+  const importance = useImportance({
+    node: selectedNode,
+    expectedHash: details.nodeDetail !== null && details.nodeDetail.node.id === selectedNode?.id
+      ? details.nodeDetail.fileHash
+      : null,
+    onApplied: (node) => { setNodeOverrides((current) => ({ ...current, [node.id]: node })); },
+    onRefresh: snapshot.refresh,
+  });
+
   const toggleLeft = useCallback(() => {
-    setReading((current) => (current === null ? current : { ...current, leftPanelOpen: !current.leftPanelOpen }));
+    setReading((current) => (current === null ? current : toggleLeftPanel(current)));
+  }, []);
+  const openLeft = useCallback(() => {
+    setReading((current) => (current === null ? current : setLeftPanelOpen(current, true)));
   }, []);
   const toggleRight = useCallback(() => {
     setReading((current) => (current === null ? current : { ...current, rightPanelOpen: !current.rightPanelOpen }));
@@ -186,28 +274,32 @@ export function App(): React.JSX.Element {
       topic,
       node: selectedNode,
     });
-    const done = (): void => {
-      setCopied(true);
-      window.setTimeout(() => { setCopied(false); }, 2000);
-    };
-    const fallback = (): void => {
-      const area = document.createElement('textarea');
-      area.value = text;
-      area.setAttribute('readonly', '');
-      area.style.position = 'fixed';
-      area.style.opacity = '0';
-      document.body.appendChild(area);
-      area.select();
-      const ok = document.execCommand('copy');
-      document.body.removeChild(area);
-      if (ok) done();
-      else setCopied(false);
-    };
-    if (navigator.clipboard !== undefined) {
-      navigator.clipboard.writeText(text).then(done, () => { fallback(); });
-    } else {
-      fallback();
-    }
+    copyText(
+      text,
+      () => {
+        setCopied(true);
+        window.setTimeout(() => { setCopied(false); }, 2000);
+      },
+      () => { setCopied(false); },
+    );
+  }, [graph, snapshot.workspace, selectedNode, selectedTopic]);
+
+  /**
+   * The locator is built from the card currently on screen: IDs, real paths and
+   * the service's own entry paths. No body text and no other topic's content.
+   */
+  const copyLocate = useCallback(() => {
+    if (graph === null || selectedNode === null) return;
+    const topic = selectedTopic ?? graph.topics.find((item) => item.id === selectedNode.topicId) ?? null;
+    const text = buildLocateText({ workspace: snapshot.workspace, graph, topic, node: selectedNode });
+    copyText(
+      text,
+      () => {
+        setLocateCopied(true);
+        window.setTimeout(() => { setLocateCopied(false); }, 2000);
+      },
+      () => { setLocateCopied(false); },
+    );
   }, [graph, snapshot.workspace, selectedNode, selectedTopic]);
 
   const detailWidth = reading?.detailWidth ?? 380;
@@ -271,7 +363,7 @@ export function App(): React.JSX.Element {
         <div className="app-header__brand">
           <span className="app-header__title">AIchat-graph</span>
           <span className="app-header__workspace">{snapshot.workspace?.name ?? graph.workspaceId}</span>
-          <button type="button" className="app-header__topic" onClick={() => { update({ leftPanelOpen: true }); }} title={(selectedTopic?.title ?? '选择主题') + ' · 打开主题目录'}>
+          <button type="button" className="app-header__topic" onClick={openLeft} title={(selectedTopic?.title ?? '选择主题') + ' · 打开主题目录'}>
             {selectedTopic?.title ?? '选择主题'} ▾
           </button>
         </div>
@@ -356,16 +448,18 @@ export function App(): React.JSX.Element {
           query={query}
           onQueryChange={setQuery}
           results={results}
-          collapsed={collapsedSet}
+          navCollapsed={navCollapsedSet}
+          expandedTopicIds={expandedTopicIds}
+          onToggleNavNode={toggleNavNodeId}
+          onToggleTopicFolder={toggleTopicFolder}
           activeNodeId={graph.activeNode}
           selectedNodeId={reading?.selectedNodeId ?? null}
           topicFilter={reading?.topicFilter ?? null}
           onSelectNode={selectNode}
           onOpenTopic={openTopic}
-          onToggleCollapse={toggleCollapse}
           onTopicFilter={(id) => { update({ topicFilter: id }); }}
           onSelectTopicPath={openTopicByPath}
-          onClose={() => { update({ leftPanelOpen: false }); }}
+          onClose={() => { setReading((current) => (current === null ? current : setLeftPanelOpen(current, false))); }}
           directoryMode
           onCopyTopic={copyPrompt}
           copied={copied}
@@ -378,7 +472,7 @@ export function App(): React.JSX.Element {
             <div className="canvas-host__empty"><div className="state-block">
               <h3>选择一个主题开始阅读</h3>
               <p>每个主题有独立的讨论图。打开主题目录选择；新主题由外部 Agent 创建。</p>
-              <button type="button" onClick={() => { update({ leftPanelOpen: true }); }}>打开主题目录</button>
+              <button type="button" onClick={openLeft}>打开主题目录</button>
             </div></div>
           ) : (
             <GraphCanvas
@@ -398,6 +492,7 @@ export function App(): React.JSX.Element {
               savedViewport={reading?.viewport ?? null}
               anchorNodeId={anchorNodeId}
               anchorScreen={anchorScreen}
+              recentNodeIds={recent}
             />
           )}
         </main>
@@ -440,6 +535,13 @@ export function App(): React.JSX.Element {
               onOpenTopic={openTopicByPath}
               onCopyContinuation={copyPrompt}
               copied={copied}
+              onCopyLocate={copyLocate}
+              locateCopied={locateCopied}
+              importanceBusy={importance.busy}
+              importanceError={importance.error}
+              {...(selectedNode !== null
+                ? { important: importanceOf(selectedNode), onToggleImportant: (next: boolean) => { importance.set(next); } }
+                : {})}
               resolvePathToNode={(path) => graph.nodes.find((candidate) => candidate.sourcePath === path)?.id ?? null}
               onOpenNode={(id) => { selectNodeAndOpen(id); }}
             />

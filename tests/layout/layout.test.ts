@@ -119,6 +119,42 @@ function route(result: LayoutResult, id: string) {
   return found;
 }
 
+/** 两条正交折线之间被重复描画的段（同一直线上有正长度重叠），用于查"两条线重合"。 */
+function sharedSegments(a: LayoutPoint[], b: LayoutPoint[]): string[] {
+  const segments = (points: LayoutPoint[]) => {
+    const list: { left: number; right: number; top: number; bottom: number }[] = [];
+    for (let index = 1; index < points.length; index += 1) {
+      const p = points[index - 1];
+      const q = points[index];
+      if (p === undefined || q === undefined) continue;
+      list.push({
+        left: Math.min(p.x, q.x),
+        right: Math.max(p.x, q.x),
+        top: Math.min(p.y, q.y),
+        bottom: Math.max(p.y, q.y),
+      });
+    }
+    return list;
+  };
+  const found: string[] = [];
+  for (const one of segments(a)) {
+    for (const other of segments(b)) {
+      const bothHorizontal = one.bottom - one.top < 0.01 && other.bottom - other.top < 0.01;
+      const bothVertical = one.right - one.left < 0.01 && other.right - other.left < 0.01;
+      if (bothHorizontal && Math.abs(one.top - other.top) < 0.01) {
+        if (Math.min(one.right, other.right) - Math.max(one.left, other.left) > 0.01) {
+          found.push('horizontal@' + String(one.top));
+        }
+      } else if (bothVertical && Math.abs(one.left - other.left) < 0.01) {
+        if (Math.min(one.bottom, other.bottom) - Math.max(one.top, other.top) > 0.01) {
+          found.push('vertical@' + String(one.left));
+        }
+      }
+    }
+  }
+  return found;
+}
+
 describe('computeLayout', () => {
   it('keeps 06 -> 07 as the global next and places 06-03 on a side column', () => {
     const result = layout(f01);
@@ -268,23 +304,78 @@ describe('computeLayout', () => {
     expect(back.side).toBe('left');
     const b = position(result, 'b');
     const bBack = position(result, 'b-back');
-    // 入口侧成员落在下一条带上，与源不同高：只走一次 Z 形短折，没有干线、没有 join。
+    // 入口侧成员与出口侧成员共用 head 下方那一条带：入口侧只走一次 Z 形短折，没有干线、没有 join。
     expect(result.branchTrunks.some((item) => item.id === 'b~left')).toBe(false);
     expect(back.join).toBeUndefined();
+    // 入口侧出线从卡片底边分出：父节点连进来的横线在卡片中心行，若也从那里横出就会与它重合。
     expect(back.points).toEqual([
-      { x: b.x, y: b.y + H / 2 },
-      { x: b.x - HG / 2, y: b.y + H / 2 },
+      { x: b.x, y: b.y + H },
+      { x: b.x - HG / 2, y: b.y + H },
       { x: b.x - HG / 2, y: bBack.y + H / 2 },
       { x: bBack.x + W, y: bBack.y + H / 2 },
     ]);
 
-    // 回头的左枝必须避开 b 的入口行，否则父节点的横线会穿过它；
-    // 它属于 b 的入口侧，因此固定落在 b 的 next 行（rowY[1]）这条带上，而非与 b 同带。
-    // 下移 48 = 本条带自己的 24（b 是分支节点，块内各带都下移）+ 24（rowY[1] 随下移后的本行簇一起推进）。
-    expect(position(result, 'b-back').y).toBe(b.y + H + VG + 48);
+    // 回头的左枝不能落在 b 的入口行（父节点横线正好在那条带的中心行上，会穿卡），
+    // 所以两侧子分支一起落在 b 下方那一条带（rowY[1]，b 是分支节点再下移 24）。
+    // 下移 24 = 本条带自己的层级提示；出口侧不再单独占 b 自己那一行。
+    expect(position(result, 'b-back').y).toBe(b.y + H + VG + 24);
     expect(position(result, 'b-back').y).not.toBe(b.y);
-    // 出口侧的兄弟也在 b 自己的块里，整条带下移 24，不再与 b 同高。
-    expect(position(result, 'b-far').y).toBe(b.y + 24);
+    // 同级的左右两侧横向读作并列：同一带、同一 y。
+    expect(position(result, 'b-far').y).toBe(position(result, 'b-back').y);
+  });
+
+  it('puts both sides of a branch on one child band and separates the entry line from the exit line', () => {
+    const result = layout([
+      node('r', null, 'root'),
+      node('br', 'r', 'branch', { side: 'right', order: 10, label: '右支的说明' }),
+      node('bl', 'br', 'branch', { side: 'left', order: 10 }),
+      node('br2', 'br', 'branch', { side: 'right', order: 20 }),
+    ]);
+    const br = position(result, 'br');
+    const bl = position(result, 'bl');
+    const br2 = position(result, 'br2');
+
+    // 同级两个方向横向读作并列：同一带、同一 y，整条带落在父卡下方。
+    expect(bl.y).toBe(br2.y);
+    expect(bl.y).toBeGreaterThanOrEqual(br.y + H);
+    // 左右各在自己一侧。
+    expect(bl.x + W).toBeLessThan(br.x);
+    expect(br2.x).toBeGreaterThan(br.x + W);
+
+    const into = route(result, 'r->br');
+    const out = route(result, 'br->bl');
+    // 进入父卡：父卡朝向来源那一侧的中心行；从父卡分出：左支从父卡底边分出。
+    expect(into.points[into.points.length - 1]).toEqual({ x: br.x, y: br.y + H / 2 });
+    expect(out.points[0]).toEqual({ x: br.x, y: br.y + H });
+    // 两条线不重合：没有任何一截被画两遍。
+    expect(sharedSegments(into.points, out.points)).toEqual([]);
+    expect(overlaps(result)).toEqual([]);
+    expect(penetrated(result)).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('moves the whole child band with its shared trunk, still leaving from the bottom edge', () => {
+    const result = layout([
+      node('r', null, 'root'),
+      node('br', 'r', 'branch', { side: 'right', order: 10 }),
+      node('bl1', 'br', 'branch', { side: 'left', order: 10 }),
+      node('bl2', 'br', 'branch', { side: 'left', order: 20 }),
+      node('br1', 'br', 'branch', { side: 'right', order: 30 }),
+    ]);
+    const br = position(result, 'br');
+    // 两侧三个同级成员在同一条带上。
+    const bands = new Set(['bl1', 'bl2', 'br1'].map((id) => position(result, id).y));
+    expect(bands.size).toBe(1);
+    expect(position(result, 'bl1').y).toBeGreaterThan(br.y + H);
+
+    // 多条入口侧成员共用干线，出口同样落在父卡底边，且不与进入父卡的线重合。
+    const trunk = result.branchTrunks.find((item) => item.id === 'br~left');
+    if (trunk === undefined) throw new Error('missing trunk br~left');
+    expect(trunk.points[0]).toEqual({ x: br.x, y: br.y + H });
+    expect(sharedSegments(route(result, 'r->br').points, trunk.points)).toEqual([]);
+    expect(overlaps(result)).toEqual([]);
+    expect(penetrated(result)).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
   });
 
   it('keeps a branch-of-branch inner column clear of a longer main spine', () => {

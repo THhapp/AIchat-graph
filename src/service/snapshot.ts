@@ -253,6 +253,7 @@ export function toGraphNode(node: WorkspaceGraph["nodes"][number]): GraphNode {
     from: node.from,
     flow: node.flow as NodeFlow,
     state: node.state as NodeState,
+    important: node.important,
     ...described,
     ...(node.side !== undefined ? { side: node.side as BranchSide } : {}),
     ...(node.order !== undefined ? { order: node.order } : {}),
@@ -295,6 +296,7 @@ function nodeSignature(node: ParsedNode): string {
     node.description ?? null,
     node.side ?? null,
     node.order ?? null,
+    node.important,
     node.label ?? null,
   ]);
 }

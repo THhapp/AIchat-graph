@@ -210,6 +210,35 @@ function decodeEntities(value: string): string {
     .replace(/&amp;/g, '&');
 }
 
+/**
+ * 节点里影响呈现的字段必须显式取值。
+ *
+ * 内容指纹对整个 nodes 数组做稳定序列化，而 stableStringify 会省略 undefined：
+ * 一旦组装文档时漏掉 `important`，成品 HTML 里就没有这个标记，指纹也不会变，
+ * 于是"重要标记改了、已绑定的离线 HTML 却仍是旧值"这种不一致会静默存在。
+ * 这里把它变成显式错误，让漏字段在导出时立刻暴露，而不是悄悄产出过期成品。
+ */
+function validateNodes(value: unknown, field: string): void {
+  if (!Array.isArray(value)) {
+    throw new ExportError('EXPORT_DOCUMENT_INVALID', 'document.' + field + ' 必须是数组');
+  }
+  for (const node of value) {
+    if (typeof node !== 'object' || node === null || Array.isArray(node)) {
+      throw new ExportError('EXPORT_DOCUMENT_INVALID', 'document.' + field + ' 的每个节点必须是对象');
+    }
+    const record = node as Record<string, unknown>;
+    if (typeof record.id !== 'string' || record.id.length === 0) {
+      throw new ExportError('EXPORT_DOCUMENT_INVALID', 'document.' + field + ' 的每个节点必须有非空 id');
+    }
+    if (typeof record.important !== 'boolean') {
+      throw new ExportError(
+        'EXPORT_DOCUMENT_INVALID',
+        '节点 ' + record.id + ' 的 important 必须是显式布尔值（缺省会从内容指纹中消失，重要标记变化将无法触发重新导出）',
+      );
+    }
+  }
+}
+
 function validateDocument(document: ExportDocumentLike): ExportDocumentLike {
   if (typeof document !== 'object' || document === null) {
     throw new ExportError('EXPORT_DOCUMENT_INVALID', 'document 必须是对象');
@@ -232,6 +261,8 @@ function validateDocument(document: ExportDocumentLike): ExportDocumentLike {
   if (typeof document.topic.title !== 'string') {
     throw new ExportError('EXPORT_DOCUMENT_INVALID', 'document.topic.title 必须是字符串');
   }
+  validateNodes(document.nodes, 'nodes');
+  validateNodes(document.boundaryNodes, 'boundaryNodes');
   const resources: unknown = document.resources;
   if (resources !== undefined && resources !== null) {
     if (typeof resources !== 'object' || Array.isArray(resources)) {

@@ -10,10 +10,10 @@ const reader = await readReaderAssets({ directory: 'dist/offline' });
 const body = '第一段：按主题归档。\n\n- 列表一\n- 列表二\n\n| 列 | 值 |\n| --- | --- |\n| 甲 | 1 |\n\n行内公式 $a^2+b^2=c^2$。\n\n$$\n\\frac{1}{2} + \\frac{1}{3} = \\frac{5}{6}\n$$\n\n[外部链接](https://example.com) 与 [跨主题](记录的分寸.md)\n';
 
 const nodes = [
-  { id: 'n1', topicId: 't1', title: '根卡', summary: '摘要一', number: '01', from: null, flow: 'root', state: 'agreed', body, path: 'topics/a.md', fileHash: 'f1' },
-  { id: 'n2', topicId: 't1', title: '纵向二', summary: '摘要二', number: '02', from: 'n1', flow: 'next', state: 'agreed', body: '正文二', path: 'topics/a.md', fileHash: 'f1', description: '为什么要接着讨论这条' },
-  { id: 'n3', topicId: 't1', title: '右枝', summary: '摘要三', number: '01-01', from: 'n1', flow: 'branch', side: 'right', order: 10, state: 'proposed', body: '正文三', path: 'topics/a.md', fileHash: 'f1' },
-  { id: 'n4', topicId: 't1', title: '左枝', summary: '摘要四', number: '01-02', from: 'n1', flow: 'branch', side: 'left', order: 20, state: 'reference', body: '正文四', path: 'topics/a.md', fileHash: 'f1' },
+  { id: 'n1', topicId: 't1', title: '根卡', summary: '摘要一', number: '01', from: null, flow: 'root', state: 'agreed', important: false, body, path: 'topics/a.md', fileHash: 'f1' },
+  { id: 'n2', topicId: 't1', title: '纵向二', summary: '摘要二', number: '02', from: 'n1', flow: 'next', state: 'agreed', important: false, body: '正文二', path: 'topics/a.md', fileHash: 'f1', description: '为什么要接着讨论这条' },
+  { id: 'n3', topicId: 't1', title: '右枝', summary: '摘要三', number: '01-01', from: 'n1', flow: 'branch', side: 'right', order: 10, state: 'proposed', important: false, body: '正文三', path: 'topics/a.md', fileHash: 'f1' },
+  { id: 'n4', topicId: 't1', title: '左枝', summary: '摘要四', number: '01-02', from: 'n1', flow: 'branch', side: 'left', order: 20, state: 'reference', important: false, body: '正文四', path: 'topics/a.md', fileHash: 'f1' },
 ];
 
 const document = {

@@ -334,6 +334,7 @@ describe("格式 2 候选：局部修改与结构", () => {
     expect(text).toContain("from: " + otherRoot);
     expect(text).toContain("改挂到另一分支后重新说明理由");
     expect(ok.changedNodeIds).toEqual([CHILD_ID]);
+    expect(ok.contentNodeIds).toEqual([CHILD_ID]);
     void files;
   });
 
@@ -387,6 +388,98 @@ describe("格式 2 候选：局部修改与结构", () => {
     expect(moved.path).toBe("topics/协作方式/" + BRANCH_ID + ".md");
     expect(moved.content).toContain("nodeId: " + BRANCH_ID);
     expect(moved.content).toContain("from: " + ROOT_ID);
+  });
+});
+
+describe("格式 2 内容节点：只记录最终真实写盘", () => {
+  it("同批改正文再恢复原值：不写文件，也不计入最近内容更新", async () => {
+    const { files } = await newV2Workspace({ 协作方式: BASE_TOPIC });
+    const changes = prepareChangesV2(
+      files,
+      request(files, [
+        { op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "根节点正文。", new: "临时正文。" }] },
+        { op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "临时正文。", new: "根节点正文。" }] },
+      ]),
+    );
+    expect(changes.files).toEqual([]);
+    expect(changes.changedNodeIds).toEqual([ROOT_ID]);
+    expect(changes.contentNodeIds).toEqual([]);
+  });
+
+  it("setImportance 与另一节点真实正文修改同批：只记录真实改写的节点", async () => {
+    const { files } = await newV2Workspace({ 协作方式: BASE_TOPIC });
+    const changes = prepareChangesV2(
+      files,
+      request(files, [
+        { op: "setImportance", nodeId: ROOT_ID, important: true },
+        {
+          op: "patchNode",
+          nodeId: CHILD_ID,
+          replace: [{ old: "子节点正文。", new: "改写后的子节点正文。" }],
+        },
+      ]),
+    );
+    expect(changes.files.map((file) => file.path).sort()).toEqual(
+      ["topics/协作方式/" + ROOT_ID + ".md", "topics/协作方式/" + CHILD_ID + ".md"].sort(),
+    );
+    expect(changes.changedNodeIds).toEqual([ROOT_ID, CHILD_ID]);
+    expect(changes.contentNodeIds).toEqual([CHILD_ID]);
+  });
+
+  it("updateConnection 值不变不写入：只记录另一节点的真实正文修改", async () => {
+    const { files } = await newV2Workspace({ 协作方式: BASE_TOPIC });
+    const changes = prepareChangesV2(
+      files,
+      request(files, [
+        {
+          op: "updateConnection",
+          nodeId: CHILD_ID,
+          from: ROOT_ID,
+          flow: "next",
+          description: "从根节点继续",
+        },
+        { op: "patchNode", nodeId: ROOT_ID, replace: [{ old: "根节点正文。", new: "改写后的根节点正文。" }] },
+      ]),
+    );
+    expect(changes.files.map((file) => file.path)).toEqual(["topics/协作方式/" + ROOT_ID + ".md"]);
+    expect(changes.changedNodeIds).toEqual([CHILD_ID, ROOT_ID]);
+    expect(changes.contentNodeIds).toEqual([ROOT_ID]);
+  });
+
+  it("同批新建节点计入，删除真叶不计入", async () => {
+    const { files } = await newV2Workspace({ 协作方式: BASE_TOPIC });
+    const newId = "n_00000000000000000000000000000008";
+    const changes = prepareChangesV2(
+      files,
+      request(
+        files,
+        [
+          {
+            op: "createNode",
+            nodeId: newId,
+            topicId: TOPIC_ID,
+            title: "新节点",
+            body: "新节点正文。",
+            from: ROOT_ID,
+            flow: "branch",
+            state: "proposed",
+            description: "从根节点展开的新分支",
+            side: "right",
+          },
+          { op: "removeLeaf", nodeId: CHILD_ID },
+        ],
+        { ["topics/协作方式/" + newId + ".md"]: null },
+      ),
+    );
+    expect(changes.files.map((file) => file.path).sort()).toEqual(
+      ["topics/协作方式/" + CHILD_ID + ".md", "topics/协作方式/" + newId + ".md"].sort(),
+    );
+    expect(changes.files.find((file) => file.path.endsWith(CHILD_ID + ".md"))?.content).toBeNull();
+    expect(changes.files.find((file) => file.path.endsWith(newId + ".md"))?.content).toContain(
+      "新节点正文。",
+    );
+    expect(changes.changedNodeIds).toEqual([newId, CHILD_ID]);
+    expect(changes.contentNodeIds).toEqual([newId]);
   });
 });
 

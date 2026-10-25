@@ -21,6 +21,16 @@ export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const exportTargetRequestSchema = z.strictObject({
   path: z.string().min(1).nullable(),
 });
+/**
+ * 重要标记：只允许 id 与这一项元数据；expectedHash 可选，给出时按旧哈希校验。
+ * 未知字段一律拒绝，避免这里被当成第二个正文编辑器。
+ */
+const importanceRequestSchema = z.strictObject({
+  topicId: z.string().regex(/^t_[0-9a-f]{32}$/),
+  nodeId: z.string().regex(/^n_[0-9a-f]{32}$/),
+  important: z.boolean(),
+  expectedHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+});
 
 /** 对外错误：内部未知错误不回显栈。 */
 export function badRequest(message: string, details?: unknown): ServiceError {
@@ -210,6 +220,48 @@ export async function readExportTargetRequest(c: Context): Promise<{ path: strin
       diagnostics: validated.error.issues.map((issue) =>
         wireDiagnostic("EXPORT_REQUEST_INVALID", issue.path.join(".") + ": " + issue.message),
       ),
+    });
+  }
+  return validated.data;
+}
+
+/**
+ * 重要标记请求：本机客户端头 + application/json + 严格字段。
+ * 只翻转一项元数据；任何其他字段（尤其正文）都会在这一层被拒绝。
+ */
+export async function readImportanceRequest(
+  c: Context,
+): Promise<{ topicId: string; nodeId: string; important: boolean; expectedHash?: string | undefined }> {
+  assertClientHeader(c);
+  const contentType = (c.req.header("content-type") ?? "").toLowerCase();
+  if (!contentType.startsWith("application/json")) {
+    throw new ServiceError(415, "UNSUPPORTED_MEDIA_TYPE", "写请求必须使用 application/json", {});
+  }
+  const rawText = await c.req.text();
+  if (Buffer.byteLength(rawText, "utf8") > MAX_BODY_BYTES) {
+    throw new ServiceError(413, "PAYLOAD_TOO_LARGE", "请求体超过上限", {
+      details: { maxBytes: MAX_BODY_BYTES },
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (error) {
+    throw badRequest("请求体不是合法 JSON: " + (error instanceof Error ? error.message : String(error)));
+  }
+  assertNoPrototypeKeys(parsed);
+  const validated = importanceRequestSchema.safeParse(parsed);
+  if (!validated.success) {
+    throw new ServiceError(400, "BAD_REQUEST", "重要标记请求结构不合法", {
+      diagnostics: validated.error.issues.map((issue) =>
+        wireDiagnostic("IMPORTANCE_REQUEST_INVALID", issue.path.join(".") + ": " + issue.message),
+      ),
+      details: {
+        issues: validated.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      },
     });
   }
   return validated.data;

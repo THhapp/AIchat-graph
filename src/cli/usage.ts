@@ -8,8 +8,11 @@ export const USAGE = [
   "  search <query> --workspace <path> [--topic <topicId>] [--limit <n>] [--page <n>]",
   "                                              搜索标题／摘要／正文（默认 10 项，最多 100）",
   "  read <topicId|relative-path> --workspace <path>",
-  "  read --node <id> [--node <id> ...] [--start <n>] [--length <n>|--full]",
-  "                                              真实磁盘正文；默认 4000 UTF-16，--full 取全文",
+  "  read --node <id> [--node <id> ...] [--start <n>] [--length <n>|--full] [--meta]",
+  "  read --node <id> ... --section <标题> [--section-index <n>]",
+  "                                              默认单卡 4000 UTF-16；多卡受整次总量预算约束，",
+  "                                              显式 --length／--full 覆盖；--section 在线／离线一致",
+  "                                              --meta 只取元数据与 editRef，不返回正文",
   "  validate --workspace <path>                 校验磁盘结构与全图",
   "",
   "Write (online, needs a running serve for this workspace):",
@@ -19,6 +22,10 @@ export const USAGE = [
   "  next --from-ref <ref> --title <t> --description <d> (--body-file <f>|--body-stdin|--body <b>)",
   "                                              纵向后继；来源已有 next 时明确 409，不挤掉旧主线",
   "  connect --ref <ref> --description <d> [--from-ref <ref>] [--flow ...] [--side ...] [--order <n>]",
+  "  rearrange (--input <spec.json>|--input-stdin) --workspace <path>",
+  "                                              一次提交多处最终入边；服务端同批安全排序",
+  "  important (--ref <ref>|--node <id>) (--on|--off)",
+  "                                              设置／取消重要标记，不再手写 apply JSON",
   "  create-topic --topic-title <t> [--directory <name>] [--title <t>] (--body-file <f>|--body-stdin|--body <b>)",
   "                                              isolated 模式创建主题和独立起点；目录碰撞拒绝",
   "  create-root --topic-title <t> --title <t> (--body-file <f>|--body-stdin|--body <b>)",
@@ -78,6 +85,12 @@ export const COMMAND_USAGE: Record<string, string> = {
     "aichat connect --ref <editRef> --description <why>",
     "                [--from-ref <editRef>] [--flow root|next|branch] [--side left|right] [--order <n>]",
   ].join("\n"),
+  rearrange: [
+    "aichat rearrange (--input <spec.json>|--input-stdin) --workspace <path> [--json|--text]",
+    '                  spec: {"edits":[{"ref":"...","fromRef":"...","flow":"next|branch","description":"..."}]}',
+  ].join("\n"),
+  important:
+    "aichat important (--ref <editRef>|--node <nodeId>) (--on|--off) [--workspace <path>] [--json|--text]",
   "create-topic": "aichat create-topic --topic-title <t> [--directory <单层目录>] [--title <t>] (--body-file <f>|--body-stdin|--body <b>) [--state ...] [--workspace <path>]",
   "create-root": [
     "aichat create-root --topic-title <t> --title <t>",
@@ -105,6 +118,6 @@ export function briefUsage(command: string | undefined): string {
   if (command && COMMAND_USAGE[command]) return "Usage: " + COMMAND_USAGE[command];
   return (
     "Usage: aichat <command> [options]\n" +
-    "Commands: init serve topics search read validate edit branch next connect create-root create-topic migrate check apply status whoami"
+    "Commands: init serve topics search read validate edit branch next connect rearrange important create-root create-topic migrate check apply status whoami"
   );
 }

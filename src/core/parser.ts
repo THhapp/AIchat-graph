@@ -54,6 +54,8 @@ export interface ParsedNode {
   readonly description?: string | undefined;
   readonly side?: NodeMeta["side"] | undefined;
   readonly order?: number | undefined;
+  /** 重要标记；格式 1 没有该字段的写入口，读侧恒为 false。 */
+  readonly important: boolean;
   /** 仅格式 1 的兼容字段；格式 2 用 description。 */
   readonly label?: string | undefined;
   /** 均为原始字符串的 UTF-16 offset，左闭右开，可直接 text.slice。 */
@@ -511,6 +513,7 @@ export function parseTopicDocument(text: string, options: ParseTopicOptions = {}
       ...(meta.side !== undefined ? { side: meta.side } : {}),
       ...(meta.order !== undefined ? { order: meta.order } : {}),
       ...(meta.label !== undefined ? { label: meta.label } : {}),
+      important: false,
       ranges: {
         node: card.nodeRange,
         heading: card.heading.headingRange,

@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { main as runCli } from "../../src/cli/index.js";
 import { loadWorkspace } from "../../src/cli/workspace.js";
 import { initWorkspace } from "../../src/storage/index.js";
+import { locateSection } from "../../src/core/index.js";
 import { startService } from "../../src/service/index.js";
 
 const temporaryRoots: string[] = [];
@@ -939,5 +940,441 @@ describe("editRef 与读取后源变化", () => {
     expect(await fs.readFile(path.join(root, "topics", DIR, NEXT_NODE + ".md"), "utf8")).toContain(
       "无关发布后追加。",
     );
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * rearrange / setImportance / meta 与 section 读取
+ * ------------------------------------------------------------------ */
+
+const CHAIN_TOPIC_ID = "t_" + "e".repeat(32);
+const CHAIN_DIR = "链条";
+const LINK_A = "n_" + "a".repeat(32);
+const LINK_B = "n_" + "b".repeat(32);
+const LINK_C = "n_" + "c".repeat(32);
+const LINK_D = "n_" + "d".repeat(32);
+
+/** A→B→C→D（全部 next，A 为 root）的合成工作区。 */
+async function newChainWorkspace(): Promise<string> {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "aichat-agent-chain-"));
+  temporaryRoots.push(parent);
+  const root = path.join(parent, "workspace");
+  await initWorkspace({ root, name: "chain-test" });
+  const topicDir = path.join(root, "topics", CHAIN_DIR);
+  await fs.mkdir(topicDir, { recursive: true });
+  await fs.writeFile(
+    path.join(topicDir, "topic.md"),
+    "---\ntopicId: " + CHAIN_TOPIC_ID + "\ntitle: 链条\n---\n",
+    "utf8",
+  );
+  const nodes = [
+    { id: LINK_A, title: "起点", from: null, flow: "root" as const, description: undefined, body: "A 的正文。" },
+    { id: LINK_B, title: "第二张", from: LINK_A, flow: "next" as const, description: "一到二", body: "B 的正文。" },
+    { id: LINK_C, title: "第三张", from: LINK_B, flow: "next" as const, description: "二到三", body: "C 的正文。" },
+    { id: LINK_D, title: "第四张", from: LINK_C, flow: "next" as const, description: "三到四", body: "D 的正文。" },
+  ];
+  for (const node of nodes) {
+    await fs.writeFile(
+      path.join(topicDir, node.id + ".md"),
+      nodeFile({
+        nodeId: node.id,
+        title: node.title,
+        state: "agreed",
+        from: node.from,
+        flow: node.flow,
+        ...(node.description !== undefined ? { description: node.description } : {}),
+        body: node.body,
+      }),
+      "utf8",
+    );
+  }
+  return fs.realpath(root);
+}
+
+interface ChainGraph {
+  instanceId: string;
+  revision: number;
+  nodes: Array<{
+    id: string;
+    number: string;
+    from: string | null;
+    flow: string;
+    description?: string;
+  }>;
+}
+
+async function chainGraph(url: string): Promise<ChainGraph> {
+  return (await (await fetch(url + "/api/graph")).json()) as ChainGraph;
+}
+
+async function chainRef(url: string, nodeId: string): Promise<string> {
+  const response = await fetch(url + "/api/agent/nodes/" + nodeId + "?meta=true");
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as { body: string; editRef: { ref: string } };
+  expect(body.body).toBe("");
+  return body.editRef.ref;
+}
+
+async function postRearrange(
+  url: string,
+  workspaceId: string,
+  requestId: string,
+  edits: unknown[],
+): Promise<Response> {
+  return fetch(url + "/api/agent/changes", {
+    method: "POST",
+    headers: agentHeaders(),
+    body: JSON.stringify({
+      workspaceId,
+      requestId,
+      action: { action: "rearrange", edits },
+    }),
+  });
+}
+
+describe("rearrange：一次表达最终入边", () => {
+  it("A→B→C→D 一次改为 A→C→B→D，并可凭返回的 editRefs 改回", async () => {
+    const root = await newChainWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+
+    const refs = {
+      a: await chainRef(handle.url, LINK_A),
+      b: await chainRef(handle.url, LINK_B),
+      c: await chainRef(handle.url, LINK_C),
+      d: await chainRef(handle.url, LINK_D),
+    };
+    const first = await postRearrange(handle.url, handle.workspaceId, randomUUID(), [
+      { editRef: refs.c, fromRef: refs.a, flow: "next", description: "从一到三（新）" },
+      { editRef: refs.b, fromRef: refs.c, flow: "next", description: "从三到二（新）" },
+      { editRef: refs.d, fromRef: refs.b, flow: "next", description: "从二到四（新）" },
+    ]);
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as {
+      state: string;
+      action: string;
+      created: { nodeIds: string[]; paths: string[] };
+      changedNodeIds: string[];
+      editRef: { ref: string; nodeId: string } | null;
+      editRefs?: Record<string, { ref: string; nodeId: string }>;
+    };
+    expect(firstBody.state).toBe("committed");
+    expect(firstBody.action).toBe("rearrange");
+    // 多节点操作不签发单节点兼容 editRef，凭据只通过 editRefs 提供。
+    expect(firstBody.editRef).toBeNull();
+    expect(firstBody.created.nodeIds).toEqual([]);
+    expect(firstBody.created.paths).toEqual([]);
+    expect(Object.keys(firstBody.editRefs ?? {}).sort()).toEqual(
+      [LINK_B, LINK_C, LINK_D].sort(),
+    );
+    expect(firstBody.editRefs?.[LINK_C]?.nodeId).toBe(LINK_C);
+    expect(firstBody.editRefs?.[LINK_C]?.ref).toMatch(/^er_/);
+
+    const graph = await chainGraph(handle.url);
+    const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
+    expect(byId[LINK_A]?.number).toBe("01");
+    expect(byId[LINK_C]?.number).toBe("02");
+    expect(byId[LINK_B]?.number).toBe("03");
+    expect(byId[LINK_D]?.number).toBe("04");
+    expect(byId[LINK_C]?.from).toBe(LINK_A);
+    expect(byId[LINK_B]?.from).toBe(LINK_C);
+    expect(byId[LINK_D]?.from).toBe(LINK_B);
+    for (const id of [LINK_B, LINK_C, LINK_D]) expect(byId[id]?.flow).toBe("next");
+
+    // 中间"腾空"只在内存：最终文件只有最终说明，没有临时 branch 痕迹。
+    for (const [id, description] of [
+      [LINK_C, "从一到三（新）"],
+      [LINK_B, "从三到二（新）"],
+      [LINK_D, "从二到四（新）"],
+    ] as const) {
+      const text = await fs.readFile(path.join(root, "topics", CHAIN_DIR, id + ".md"), "utf8");
+      expect(text).toContain("description: " + description);
+      expect(text).not.toContain("flow: branch");
+      for (const legacy of ["一到二", "二到三", "三到四"]) {
+        expect(text).not.toContain(legacy);
+      }
+    }
+
+    // 用响应里的 fresh refs 直接改回，不重新读取。
+    const fresh = firstBody.editRefs as Record<string, { ref: string }>;
+    const back = await postRearrange(handle.url, handle.workspaceId, randomUUID(), [
+      { editRef: fresh[LINK_B]!.ref, fromRef: refs.a, flow: "next", description: "一到二" },
+      { editRef: fresh[LINK_C]!.ref, fromRef: fresh[LINK_B]!.ref, flow: "next", description: "二到三" },
+      { editRef: fresh[LINK_D]!.ref, fromRef: fresh[LINK_C]!.ref, flow: "next", description: "三到四" },
+    ]);
+    expect(back.status).toBe(200);
+    const restored = await chainGraph(handle.url);
+    const restoredById = Object.fromEntries(restored.nodes.map((node) => [node.id, node]));
+    expect(restoredById[LINK_A]?.number).toBe("01");
+    expect(restoredById[LINK_B]?.number).toBe("02");
+    expect(restoredById[LINK_C]?.number).toBe("03");
+    expect(restoredById[LINK_D]?.number).toBe("04");
+    expect(restoredById[LINK_B]?.from).toBe(LINK_A);
+    expect(restoredById[LINK_C]?.from).toBe(LINK_B);
+    expect(restoredById[LINK_D]?.from).toBe(LINK_C);
+  });
+
+  it("未把占用 next 的旧后继纳入 edits → 409，且源文件字节不变", async () => {
+    const root = await newChainWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const paths = [LINK_A, LINK_B, LINK_C, LINK_D].map((id) =>
+      path.join(root, "topics", CHAIN_DIR, id + ".md"),
+    );
+    const before = await Promise.all(paths.map((file) => fs.readFile(file)));
+
+    const response = await postRearrange(handle.url, handle.workspaceId, randomUUID(), [
+      {
+        editRef: await chainRef(handle.url, LINK_C),
+        fromRef: await chainRef(handle.url, LINK_A),
+        flow: "next",
+        description: "只想把 C 接到 A",
+      },
+    ]);
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "OPERATION_CONFLICT",
+    );
+    const after = await Promise.all(paths.map((file) => fs.readFile(file)));
+    for (const [index, bytes] of after.entries()) expect(bytes).toEqual(before[index]);
+  });
+
+  it("读取后源文件被外部改动 → 412，磁盘不被旧凭据覆盖", async () => {
+    const root = await newChainWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const cRef = await chainRef(handle.url, LINK_C);
+    const aRef = await chainRef(handle.url, LINK_A);
+    const cPath = path.join(root, "topics", CHAIN_DIR, LINK_C + ".md");
+    const external = (await fs.readFile(cPath, "utf8")) + "\n外部追加。\n";
+    await fs.writeFile(cPath, external, "utf8");
+    const externalBytes = await fs.readFile(cPath);
+
+    const response = await postRearrange(handle.url, handle.workspaceId, randomUUID(), [
+      { editRef: cRef, fromRef: aRef, flow: "next", description: "过期凭据不应写入" },
+    ]);
+    expect(response.status).toBe(412);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "VERSION_CONFLICT",
+    );
+    expect(await fs.readFile(cPath)).toEqual(externalBytes);
+  });
+
+  it("同一 requestId 与同一请求体重放：replayed 且最终图不变", async () => {
+    const root = await newChainWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const refs = {
+      a: await chainRef(handle.url, LINK_A),
+      b: await chainRef(handle.url, LINK_B),
+      c: await chainRef(handle.url, LINK_C),
+      d: await chainRef(handle.url, LINK_D),
+    };
+    const edits = [
+      { editRef: refs.c, fromRef: refs.a, flow: "next", description: "一到三" },
+      { editRef: refs.b, fromRef: refs.c, flow: "next", description: "三到二" },
+      { editRef: refs.d, fromRef: refs.b, flow: "next", description: "二到四" },
+    ];
+    const requestId = randomUUID();
+    const first = await postRearrange(handle.url, handle.workspaceId, requestId, edits);
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { revision: number; state: string };
+    const afterFirst = await chainGraph(handle.url);
+
+    const replay = await postRearrange(handle.url, handle.workspaceId, requestId, edits);
+    expect(replay.status).toBe(200);
+    const replayBody = (await replay.json()) as { revision: number; replayed?: boolean };
+    expect(replayBody.replayed).toBe(true);
+    expect(replayBody.revision).toBe(firstBody.revision);
+    expect(await chainGraph(handle.url)).toEqual(afterFirst);
+  });
+
+  it("最终结构成环 → 422，且源文件不变", async () => {
+    const root = await newChainWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const bPath = path.join(root, "topics", CHAIN_DIR, LINK_B + ".md");
+    const cPath = path.join(root, "topics", CHAIN_DIR, LINK_C + ".md");
+    const dPath = path.join(root, "topics", CHAIN_DIR, LINK_D + ".md");
+    const before = [
+      await fs.readFile(bPath),
+      await fs.readFile(cPath),
+      await fs.readFile(dPath),
+    ];
+    const aRef = await chainRef(handle.url, LINK_A);
+    const bRef = await chainRef(handle.url, LINK_B);
+    const cRef = await chainRef(handle.url, LINK_C);
+    const dRef = await chainRef(handle.url, LINK_D);
+
+    // B 改接到 C；D 让出 C 的 next 槽位，最终 B→C→B 成环。
+    const response = await postRearrange(handle.url, handle.workspaceId, randomUUID(), [
+      {
+        editRef: bRef,
+        fromRef: cRef,
+        flow: "next",
+        description: "形成环的连接",
+      },
+      {
+        editRef: dRef,
+        fromRef: aRef,
+        flow: "branch",
+        side: "left",
+        order: 10,
+        description: "D 改挂到 A 的旁支",
+      },
+    ]);
+    expect(response.status).toBe(422);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "VALIDATION_FAILED",
+    );
+    expect(await fs.readFile(bPath)).toEqual(before[0]);
+    expect(await fs.readFile(cPath)).toEqual(before[1]);
+    expect(await fs.readFile(dPath)).toEqual(before[2]);
+  });
+});
+
+describe("服务读取契约：meta 与 section", () => {
+  it("meta 无正文但有 editRef，range.total 是真实正文长度；冲突参数 400", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+
+    const full = (await (
+      await fetch(handle.url + "/api/agent/nodes/" + NEXT_NODE + "?full=true")
+    ).json()) as { body: string; fileHash: string };
+    const metaResponse = await fetch(
+      handle.url + "/api/agent/nodes/" + NEXT_NODE + "?meta=true",
+    );
+    expect(metaResponse.status).toBe(200);
+    const meta = (await metaResponse.json()) as {
+      body: string;
+      bodyOmitted?: boolean;
+      truncated: boolean;
+      range: { start: number; end: number; total: number; unit: string };
+      section: unknown;
+      fileHash: string;
+      editRef: { ref: string; nodeId: string; path: string };
+    };
+    expect(meta.body).toBe("");
+    expect(meta.bodyOmitted).toBe(true);
+    expect(meta.truncated).toBe(false);
+    expect(meta.range).toEqual({
+      start: 0,
+      end: 0,
+      total: full.body.length,
+      unit: "utf16",
+    });
+    expect(meta.section).toBeNull();
+    expect(meta.fileHash).toBe(full.fileHash);
+    expect(meta.editRef.ref).toMatch(/^er_/);
+    expect(meta.editRef.nodeId).toBe(NEXT_NODE);
+    expect(meta.editRef.path).toBe("topics/" + DIR + "/" + NEXT_NODE + ".md");
+
+    const withLength = await fetch(
+      handle.url + "/api/agent/nodes/" + NEXT_NODE + "?meta=true&length=10",
+    );
+    expect(withLength.status).toBe(400);
+    const badIndex = await fetch(
+      handle.url + "/api/agent/nodes/" + NEXT_NODE + "?section-index=1",
+    );
+    expect(badIndex.status).toBe(400);
+    const blankSection = await fetch(
+      handle.url + "/api/agent/nodes/" + NEXT_NODE + "?section=%20%20",
+    );
+    expect(blankSection.status).toBe(400);
+    const missingSection = await fetch(
+      handle.url + "/api/agent/nodes/" + NEXT_NODE + "?section=" + encodeURIComponent("不存在"),
+    );
+    expect(missingSection.status).toBe(400);
+    expect(((await missingSection.json()) as { error: { code: string } }).error.code).toBe(
+      "INVALID_SECTION",
+    );
+  });
+
+  it("section 从章节起点切片，且与 core 的离线定位一致", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const file = path.join(root, "topics", DIR, NEXT_NODE + ".md");
+    const text = await fs.readFile(file, "utf8");
+    const body = [
+      "## 小节一",
+      "",
+      "默认更新现有内容。",
+      "",
+      "## 小节二",
+      "",
+      "第二段补充说明。",
+      "",
+      "## 同名",
+      "",
+      "第一处。",
+      "",
+      "## 同名",
+      "",
+      "第二处。",
+      "",
+    ].join("\n");
+    await fs.writeFile(
+      file,
+      text.replace(
+        "默认更新现有内容。\n\n第二段补充说明。\n",
+        body,
+      ),
+      "utf8",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+
+    const full = (await (
+      await fetch(handle.url + "/api/agent/nodes/" + NEXT_NODE + "?full=true")
+    ).json()) as { body: string };
+    // 离线读取用同一份 core helper；在线结果必须与它一致。
+    const offline = locateSection(full.body, "小节一");
+    const first = (await (
+      await fetch(
+        handle.url + "/api/agent/nodes/" + NEXT_NODE + "?section=" + encodeURIComponent("小节一"),
+      )
+    ).json()) as {
+      body: string;
+      range: { start: number; end: number; total: number };
+      section: { title: string; level: number; start: number } | null;
+    };
+    expect(first.range.start).toBe(offline.start);
+    expect(first.body.startsWith("## 小节一")).toBe(true);
+    expect(first.section?.title).toBe("小节一");
+    expect(first.section?.level).toBe(2);
+    expect(first.section?.start).toBe(offline.start);
+
+    const secondStart = full.body.indexOf("## 小节二");
+    const second = (await (
+      await fetch(
+        handle.url +
+          "/api/agent/nodes/" +
+          NEXT_NODE +
+          "?section=" +
+          encodeURIComponent("小节二") +
+          "&full=true",
+      )
+    ).json()) as { body: string; section: { title: string } | null };
+    expect(second.body).toBe(full.body.slice(secondStart));
+    expect(second.section?.title).toBe("小节二");
+
+    // 重名标题：不猜第几个；显式 index 后与 core 的离线定位一致。
+    const ambiguous = await fetch(
+      handle.url + "/api/agent/nodes/" + NEXT_NODE + "?section=" + encodeURIComponent("同名"),
+    );
+    expect(ambiguous.status).toBe(400);
+    const indexed = (await (
+      await fetch(
+        handle.url +
+          "/api/agent/nodes/" +
+          NEXT_NODE +
+          "?section=" +
+          encodeURIComponent("同名") +
+          "&section-index=1",
+      )
+    ).json()) as { range: { start: number }; section: { title: string } | null };
+    expect(indexed.range.start).toBe(locateSection(full.body, "同名", 1).start);
+    expect(indexed.section?.title).toBe("同名");
   });
 });

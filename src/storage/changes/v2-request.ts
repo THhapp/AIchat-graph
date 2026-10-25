@@ -87,6 +87,16 @@ export interface V2SetDiscussionFocusOperation {
   readonly nodeId: string | null;
 }
 
+/**
+ * 重要标记：只改一项元数据，不改正文、连接或排序。
+ * 它属于"卡片值得关注"的标注，不计入最近一次内容更新。
+ */
+export interface V2SetImportanceOperation {
+  readonly op: "setImportance";
+  readonly nodeId: string;
+  readonly important: boolean;
+}
+
 /** 源码修复：给出真实节点文件的完整新原文，用于无法解析的文件。 */
 export interface ReplaceNodeSourceOperation {
   readonly op: "replaceNodeSource";
@@ -104,6 +114,7 @@ export type V2Operation =
   | V2MoveNodeToTopicOperation
   | V2RemoveLeafOperation
   | V2SetDiscussionFocusOperation
+  | V2SetImportanceOperation
   | ReplaceNodeSourceOperation;
 
 export interface V2ChangeRequest {
@@ -197,6 +208,7 @@ const operationSchema = z.discriminatedUnion("op", [
   }),
   z.strictObject({ op: z.literal("removeLeaf"), nodeId: nodeIdSchema }),
   z.strictObject({ op: z.literal("setDiscussionFocus"), nodeId: nodeIdSchema.nullable() }),
+  z.strictObject({ op: z.literal("setImportance"), nodeId: nodeIdSchema, important: z.boolean() }),
   z.strictObject({
     op: z.literal("replaceNodeSource"),
     nodeId: nodeIdSchema,

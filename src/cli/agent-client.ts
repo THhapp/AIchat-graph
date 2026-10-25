@@ -27,6 +27,12 @@ export interface AgentReadOptions {
   readonly start?: number | undefined;
   readonly length?: number | undefined;
   readonly full?: boolean | undefined;
+  /** 只取元数据与 editRef；服务端不返回正文。 */
+  readonly meta?: boolean | undefined;
+  /** 按标题定位章节；与离线读取共用 core 的 locateSection。 */
+  readonly section?: string | undefined;
+  /** 同名标题中的第几个（0 起）；必须与 section 一起使用。 */
+  readonly sectionIndex?: number | undefined;
 }
 
 function buildReadUrl(baseUrl: string, nodeId: string, options: AgentReadOptions): string {
@@ -34,6 +40,11 @@ function buildReadUrl(baseUrl: string, nodeId: string, options: AgentReadOptions
   if (options.start !== undefined) url.searchParams.set("start", String(options.start));
   if (options.length !== undefined) url.searchParams.set("length", String(options.length));
   if (options.full) url.searchParams.set("full", "true");
+  if (options.meta) url.searchParams.set("meta", "true");
+  if (options.section !== undefined) url.searchParams.set("section", options.section);
+  if (options.sectionIndex !== undefined) {
+    url.searchParams.set("section-index", String(options.sectionIndex));
+  }
   return url.toString();
 }
 
@@ -118,6 +129,7 @@ export async function readAgentNode(
     workspaceId: String(body["workspaceId"] ?? ""),
     node: node as unknown as AgentNodeReadResponse["node"],
     body: body["body"],
+    ...(body["bodyOmitted"] === true ? { bodyOmitted: true } : {}),
     range: assertRange(body["range"], url),
     truncated: body["truncated"] === true,
     path: body["path"],

@@ -21,7 +21,7 @@ import {
   type PreparedChanges,
   type V2ChangeRequest,
 } from "../storage/index.js";
-import type { AgentChangeRequest, AgentChangeResponse } from "../shared/protocol.js";
+import type { AgentChangeRequest, AgentChangeResponse, AgentEditRef } from "../shared/protocol.js";
 import { compileAgentAction, issueRefForNode } from "./agent.js";
 import type { Diagnostic } from "../shared/protocol.js";
 import type { StorageDiagnostic } from "../storage/index.js";
@@ -77,6 +77,28 @@ export interface ApplyResult {
 function diagnoseChange(error: unknown): never {
   if (error instanceof ChangeError) throw serviceErrorFromChange(error);
   throw error;
+}
+
+/**
+ * 本次提交真正改写了源文件的节点。
+ * 格式 2 的候选层会排除删除与仅改重要性的节点；格式 1（旧格式）没有这份细分，
+ * 退化为 changedNodeIds，仍只由成功提交链路使用。
+ */
+function contentNodeIdsOf(prepared: PreparedChanges): string[] {
+  return [...(prepared.contentNodeIds ?? prepared.changedNodeIds)];
+}
+
+/** changedNodeIds 中仍在快照里的节点各签发一份刷新后凭据，供调用方继续改。 */
+function editRefsOf(
+  runtime: WorkspaceRuntime,
+  nodeIds: readonly string[],
+): Record<string, AgentEditRef> {
+  const refs: Record<string, AgentEditRef> = {};
+  for (const nodeId of nodeIds) {
+    const issued = issueRefForNode(runtime, runtime.editRefs, nodeId);
+    if (issued !== null) refs[nodeId] = issued;
+  }
+  return refs;
 }
 
 function fileViews(files: readonly CommitFileInput[]): CheckedFile[] {
@@ -245,6 +267,8 @@ export async function applyChanges(
         "COMMITTED_REFRESH_PENDING",
         "已提交事务 " + committed.transactionId + " 的源文件已落盘，但当前磁盘无法重建有效快照；保留事务日志，修复后重启服务",
       );
+      // 源文件确实已提交：标记仍按本次内容节点记录，重启后与磁盘一致。
+      await runtime.recordLastChange(contentNodeIdsOf(prepared));
       const pending: ApplyResult = {
         ok: true,
         requestId: request.requestId,
@@ -284,6 +308,9 @@ export async function applyChanges(
       });
       return pending;
     }
+
+    // 快照已刷新：本次提交真实改写的节点成为"最近一次内容更新"。
+    await runtime.recordLastChange(contentNodeIdsOf(prepared));
 
     let journalCleaned = false;
     let cleanupDiagnostic: Diagnostic | null = null;
@@ -451,6 +478,7 @@ export async function applyAgentChange(
         changedNodeIds: prepared.changedNodeIds,
         touchedFiles: [],
         editRef: issueRefForNode(runtime, runtime.editRefs, compiled.primaryNodeId ?? ""),
+        editRefs: editRefsOf(runtime, prepared.changedNodeIds),
         summary: prepared.summary,
         diagnostics: prepared.diagnostics.map((diagnostic) =>
           wireDiagnostic(diagnostic.code, diagnostic.message, diagnostic.path, "info"),
@@ -499,6 +527,8 @@ export async function applyAgentChange(
         "COMMITTED_REFRESH_PENDING",
         "已提交事务 " + committed.transactionId + " 的源文件已落盘，但当前磁盘无法重建有效快照；保留事务日志，修复后重启服务",
       );
+      // 源文件确实已提交：标记仍按本次内容节点记录，重启后与磁盘一致。
+      await runtime.recordLastChange(contentNodeIdsOf(prepared));
       const pending: AgentChangeResponse = {
         ...runtime.snapshotVersion(),
         ok: true,
@@ -515,6 +545,7 @@ export async function applyAgentChange(
           byteLength: file.byteLength,
         })),
         editRef: null,
+        editRefs: {},
         summary: prepared.summary,
         diagnostics: [
           ...prepared.diagnostics.map((diagnostic) =>
@@ -536,6 +567,9 @@ export async function applyAgentChange(
       });
       return pending;
     }
+
+    // 与低层 apply 同一条规则：只有成功提交并刷新快照后才替换标记。
+    await runtime.recordLastChange(contentNodeIdsOf(prepared));
 
     let journalCleaned = false;
     try {
@@ -573,6 +607,7 @@ export async function applyAgentChange(
         compiled.primaryNodeId === null
           ? null
           : issueRefForNode(runtime, runtime.editRefs, compiled.primaryNodeId),
+      editRefs: editRefsOf(runtime, prepared.changedNodeIds),
       summary: prepared.summary,
       diagnostics: prepared.diagnostics.map((diagnostic) =>
         wireDiagnostic(diagnostic.code, diagnostic.message, diagnostic.path, "info"),

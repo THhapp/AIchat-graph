@@ -91,6 +91,8 @@ export function nodeHeaderObject(header: V2NodeHeader): Record<string, unknown> 
   if (header.side !== undefined) record["side"] = header.side;
   if (header.order !== undefined) record["order"] = header.order;
   if (header.summary !== undefined) record["summary"] = header.summary;
+  // 缺省不写：清除重要标记时字段整个消失，文件回到"没有这条元数据"的干净状态。
+  if (header.important === true) record["important"] = true;
   return record;
 }
 

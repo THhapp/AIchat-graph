@@ -31,13 +31,30 @@ CLI 和工作区从用户给定入口、已配置命令或宿主实际加载的�
 
 ## 入口与身份
 
-使用已绑定 CLI，或 `node "<CLI入口>"`。开发构建入口通常是工程的 `dist/cli/index.js`；若使用隔离日用构建，应绑定 `.local/daily/dist/cli/index.js` 及该快照内同版本的 Skill。开发源码及其文档可能已变化，不能据此默认日用快照已经支持新接口。实际位置以用户和启动器提供的信息为准。
+同一条命令可能来自三种运行位置，定位和更新方式不同，先分清在使用哪一种：
 
-随 Skill 提供的 [aichat.ps1](../scripts/aichat.ps1) 只是仓库内转发脚本，从当前位置推导工程 CLI；**仅适用于保留仓库目录结构的使用方式**。把 Skill 复制到其他地方后，应使用实际 CLI 入口，不承诺该脚本仍可定位工程。脚本不启动服务、不构建、不复制业务逻辑。
+| 使用方式 | CLI 位置 | Skill 来源 | 更新时被覆盖 | 更新时保留 |
+| --- | --- | --- | --- | --- | --- |
+| 仓库开发 | `<repo>/dist/cli/index.js`（先 `npm run build:node`） | 仓库 `skills/aichat-graph` | 源码与构建产物 | `launcher.local.json`、`.local/` |
+| 日用快照 | `<repo>/.local/daily/dist/cli/index.js` | 同一快照内 `.local/daily/skills/aichat-graph` | `update-daily.cmd` 整份替换快照 | 快照内已有的 `local.env.json`（若有） |
+| 已安装副本 | 安装目录 `local.env.json` 的 `cli` | 安装目录的 `SKILL.md`／`references`／`scripts` | `scripts/install-skill.ps1` 覆盖通用内容 | `local.env.json`（本机绑定，不覆盖不生成） |
+
+三者是不同步骤：开发入口随源码变化；`update-daily.cmd` 只换日用快照，不会自动改已安装副本；已安装副本要按实际宿主分别同步，例如 `pwsh scripts/install-skill.ps1 -Host workbuddy -Daily` 或 `-Host codex -Daily`（其他目录用 `-Target` 显式指定），同步前后核对 `local.env.json` 未变。不要把一个宿主的同步结果推广到其他副本；同步后用该副本 `local.env.json` 的 `cli` 运行 `--help`，必要时用实际工作区运行 `whoami` 核对。开发源码和文档可能已变，不能据此假定日用快照或已安装副本已经支持新接口；以实际入口的 `--help` 为准。
+
+随 Skill 提供的 [aichat.ps1](../scripts/aichat.ps1) 由近及远定位，命中即停：
+
+1. `-Cli "<绝对路径>"`：本次调用显式指定；
+2. 脚本同目录或 Skill 根 `local.env.json` 的 `cli` 字段；文件缺失或入口不存在只作说明，不中断查找；
+3. 仓库内从 `scripts` 上三级推导 `dist/cli/index.js`（仅当上一级确实是本仓库）；
+4. 都不成立：退出码 7，列出试过的路径与修复办法，不猜正式库、不自动切换运行版本、不改配置。
+
+`local.env.json` 只存在于使用该机的安装副本里，不进仓库，也不该被同步覆盖；它不是脚本里的硬编码路径。其中的 `workspace` 只是本机记录，CLI 不会自动套用；每条命令仍需显式给出 `--workspace`（或用本机启动器绑定工作区），不要因为配置里有路径就省略。
 
 ```powershell
-# 从 Skill 目录调用；PowerShell 7 和已构建的仓库可用时
+# 仓库内、日用快照内、已安装副本内都可用这一形式
 ./scripts/aichat.ps1 topics --workspace "<工作区>"
+# 临时对照另一个入口，只在本次调用生效
+./scripts/aichat.ps1 -Cli "D:/path/to/dist/cli/index.js" topics --workspace "<工作区>"
 ```
 
 `whoami --workspace "<工作区>"` 核对运行服务与磁盘身份。没有服务时失败不等于源资料不存在，仍可用 `topics`、`read`、`validate` 离线读取检查。身份不符时先解决定位问题，不回退默认端口。

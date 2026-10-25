@@ -26,6 +26,8 @@ export interface WorkspaceNodeSummary {
   readonly from: string | null;
   readonly side?: ParsedNode["side"] | undefined;
   readonly order?: number | undefined;
+  /** 重要标记（格式 2 源字段）；格式 1 恒为 false。 */
+  readonly important: boolean;
   readonly label?: string | undefined;
   readonly number: string;
   readonly nextId: string | null;
@@ -122,6 +124,7 @@ export function toNodeSummary(node: WorkspaceNodeView): WorkspaceNodeSummary {
     from: node.from,
     ...(node.side !== undefined ? { side: node.side } : {}),
     ...(node.order !== undefined ? { order: node.order } : {}),
+    important: node.important,
     ...(node.label !== undefined ? { label: node.label } : {}),
     number: node.number,
     nextId: node.nextId,

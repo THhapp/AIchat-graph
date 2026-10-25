@@ -57,6 +57,7 @@ export function computeLayout(input: LayoutInput): LayoutResult {
   const sides = new Map<string, LayoutSide>();
   const groupDepths = new Map<string, number>();
   const columns = new Map<string, number>();
+  const entrySides = new Map<string, LayoutSide>();
   const measureContext: MeasureContext = {
     nextByParent: tree.nextByParent,
     branchesByParent: tree.branchesByParent,
@@ -67,6 +68,7 @@ export function computeLayout(input: LayoutInput): LayoutResult {
     sides,
     groupDepths,
     columns,
+    entrySides,
   };
 
   const forest = tree.roots.map((root) => ({ root, block: measureBlock(root, null, 0, measureContext) }));
@@ -115,6 +117,7 @@ export function computeLayout(input: LayoutInput): LayoutResult {
     sides,
     groupDepths,
     columns,
+    entrySides,
   );
   const edgeRoutes = routed.routes;
   reportRoutePenetrations(edgeRoutes, routed.trunks, nodes, visibility.visible, positions, config, diagnostics);

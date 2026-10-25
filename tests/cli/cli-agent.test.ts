@@ -246,7 +246,15 @@ describe("read --node 在线获取 editRef", () => {
     const body = JSON.parse(result.stdout) as Record<string, unknown>;
     const node = (body["nodes"] as Array<Record<string, unknown>>)[0];
     expect(node?.["source"]).toBe("online");
-    expect(node?.["revision"]).toBe(3);
+    // 版本与身份只在顶层 online 出现，不再逐项重复。
+    expect(node?.["revision"]).toBeUndefined();
+    expect(node?.["online"]).toBeUndefined();
+    expect(body["online"]).toMatchObject({
+      available: true,
+      instanceId: "inst-1",
+      revision: 3,
+      workspaceId,
+    });
     expect(node?.["truncated"]).toBe(false);
     expect((node?.["editRef"] as Record<string, unknown>)["ref"]).toBe("ref-abc123");
     const call = fake.requests.find((request) => request.url.includes("/api/agent/nodes/"));
@@ -257,11 +265,14 @@ describe("read --node 在线获取 editRef", () => {
     const { root } = await newV2Workspace();
     const result = await main(["read", "--node", CHILD_NODE, "--workspace", root]);
     expect(result.exitCode).toBe(0);
-    const node = (JSON.parse(result.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
+    const body = JSON.parse(result.stdout) as Record<string, unknown>;
+    const node = (body["nodes"] as Array<Record<string, unknown>>)[0];
     expect(node?.["source"]).toBe("disk");
-    expect(node?.["editRef"]).toBeUndefined();
-    expect((node?.["online"] as Record<string, unknown>)["available"]).toBe(false);
-    expect((node?.["online"] as Record<string, unknown>)["code"]).toBe("SERVICE_NOT_RUNNING");
+    expect(node?.["editRef"]).toBeNull();
+    expect(body["online"]).toMatchObject({
+      available: false,
+      code: "SERVICE_NOT_RUNNING",
+    });
   });
 
   it("--offline 时不访问服务，只读磁盘", async () => {
@@ -704,6 +715,7 @@ describe("磁盘哈希在写入前后保持一致的真实性", () => {
     const { root, childText } = await newV2Workspace();
     const result = await main(["read", "--node", CHILD_NODE, "--workspace", root]);
     const node = (JSON.parse(result.stdout)["nodes"] as Array<Record<string, unknown>>)[0];
-    expect((node?.["file"] as Record<string, unknown>)["sha256"]).toBe(sha256Bytes(childText));
+    expect(node?.["fileHash"]).toBe(sha256Bytes(childText));
+    expect(node?.["file"]).toBeUndefined();
   });
 });

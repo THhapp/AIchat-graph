@@ -62,7 +62,8 @@ function headerEquals(left: V2NodeHeader, right: V2NodeHeader): boolean {
     left.description === right.description &&
     left.side === right.side &&
     left.order === right.order &&
-    left.summary === right.summary
+    left.summary === right.summary &&
+    left.important === right.important
   );
 }
 
@@ -155,6 +156,7 @@ export function headerFromParsed(node: ParsedNode): V2NodeHeader {
   if (node.side !== undefined) header.side = node.side;
   if (node.order !== undefined) header.order = node.order;
   if (node.summaryExplicit) header.summary = node.summary;
+  if (node.important) header.important = true;
   return header;
 }
 

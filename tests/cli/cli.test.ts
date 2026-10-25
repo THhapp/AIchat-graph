@@ -270,11 +270,16 @@ describe("格式 2 工作区", () => {
     expect(topics[0]).toMatchObject({
       topicId: TOPIC_ID,
       title: "条目整理",
+      schemaVersion: 2,
       dir: "条目整理",
       path: "topics/条目整理/topic.md",
       nodeCount: 2,
     });
-    expect((topics[0]?.["sourcePaths"] as string[]).length).toBe(3);
+    // 主题文件事实与节点清单不再在主题项里重复。
+    for (const key of ["sourcePaths", "files", "sha256", "absolutePath", "byteLength"]) {
+      expect(topics[0]).not.toHaveProperty(key);
+    }
+    expect(body["workspaceFile"]).toBeUndefined();
   });
 
   it("read 默认返回有界片段并带真实节点文件哈希", async () => {
@@ -285,15 +290,14 @@ describe("格式 2 工作区", () => {
     const node = (body["nodes"] as Array<Record<string, unknown>>)[0];
     expect(node).toMatchObject({
       source: "disk",
-      id: CHILD_NODE,
       path: `topics/条目整理/${CHILD_NODE}.md`,
       body: CHILD_BODY,
-      schemaVersion: 2,
     });
+    expect(node?.["node"]).toMatchObject({ id: CHILD_NODE });
+    expect(node?.["schemaVersion"]).toBeUndefined();
     expect((node?.["range"] as Record<string, unknown>).unit).toBe("utf16");
-    expect((node?.["file"] as Record<string, unknown>)["sha256"]).toBe(
-      hashes[`topics/条目整理/${CHILD_NODE}.md`],
-    );
+    expect(node?.["fileHash"]).toBe(hashes[`topics/条目整理/${CHILD_NODE}.md`]);
+    expect(node?.["file"]).toBeUndefined();
   });
 
   it("长正文默认截断，--length 与 --full 按预期生效", async () => {
@@ -338,16 +342,24 @@ describe("格式 2 工作区", () => {
   });
 
   it("read 主题返回主题元数据与节点清单，不把节点正文当主题全文", async () => {
-    const { root, hashes } = await newV2Workspace();
+    const { root } = await newV2Workspace();
     const byId = await main(["read", TOPIC_ID, "--workspace", root]);
     expect(byId.exitCode).toBe(0);
     const body = jsonOf(byId.stdout);
-    expect((body["topic"] as Record<string, unknown>)["path"]).toBe(
-      "topics/条目整理/topic.md",
-    );
-    expect((body["file"] as Record<string, unknown>)["sha256"]).toBe(
-      hashes["topics/条目整理/topic.md"],
-    );
+    const topic = body["topic"] as Record<string, unknown>;
+    expect(topic).toMatchObject({
+      topicId: TOPIC_ID,
+      title: "条目整理",
+      schemaVersion: 2,
+      path: "topics/条目整理/topic.md",
+      dir: "条目整理",
+      nodeCount: 2,
+    });
+    for (const key of ["sourcePaths", "files", "sha256", "absolutePath", "byteLength"]) {
+      expect(topic).not.toHaveProperty(key);
+    }
+    // 入口文件路径已在 topic.path，顶层不再重复 file。
+    expect(body["file"]).toBeUndefined();
     const nodes = body["nodes"] as Array<Record<string, unknown>>;
     expect(nodes.map((node) => node["path"])).toEqual([
       `topics/条目整理/${ROOT_NODE}.md`,
@@ -503,9 +515,11 @@ describe("格式 1 兼容读取", () => {
     expect(node).toMatchObject({
       path: "topics/条目整理.md",
       body: CHILD_BODY,
-      schemaVersion: 1,
     });
-    expect((node?.["file"] as Record<string, unknown>)["sha256"]).toBe(sha256Bytes(topicText));
+    expect(node?.["node"]).toMatchObject({ id: CHILD_NODE });
+    expect(node?.["schemaVersion"]).toBeUndefined();
+    expect(node?.["fileHash"]).toBe(sha256Bytes(topicText));
+    expect(node?.["file"]).toBeUndefined();
 
     const validate = await main(["validate", "--workspace", root]);
     expect(validate.exitCode).toBe(0);

@@ -245,6 +245,8 @@ describe('branch trunk', () => {
     const outer = trunkOf(result, 'bn', 'left');
     expect(outer.from).toBe('bn');
     expect(outer.to).toBe('bl2');
+    // 入口侧的子分支从卡片底边分出（见下），但 bn 是 next 节点：连进来的线是自上而下的竖线，
+    // 中心行横线不会与出口重合，所以它的干线仍从中心行横出。
     expect(outer.points[0]).toEqual({ x: bn.x, y: bn.y + H / 2 });
     // 干线止于唯一成员的接出点，支线从这一点下到目标中心。
     expect(outer.points[outer.points.length - 1]).toEqual({ x: bl2.x + W + HG / 2, y: outer.trunkY });
@@ -253,11 +255,12 @@ describe('branch trunk', () => {
     expect(edge.points[0]).toEqual(edge.join);
 
     // 列 1 的单张走 Z 形短折：出口横段 → 空隙正中的竖向通道 → 入卡横段，不产干线、不带 join。
+    // 入口侧（左边）的出口横段同样落在卡片底边，而不是中心行。
     const inner = route(result, 'br->bl');
     expect(inner.join).toBeUndefined();
     expect(inner.points).toEqual([
-      { x: br.x, y: br.y + H / 2 },
-      { x: br.x - HG / 2, y: br.y + H / 2 },
+      { x: br.x, y: br.y + H },
+      { x: br.x - HG / 2, y: br.y + H },
       { x: br.x - HG / 2, y: bl.y + H / 2 },
       { x: bl.x + W, y: bl.y + H / 2 },
     ]);
@@ -444,10 +447,19 @@ describe('branch trunk', () => {
       if (join === undefined) throw new Error('missing join ' + edge.id);
       const target = pos(result, edge.to);
       // 落在自己的独占支线上，不在公共干线、也不在任何卡里。
-      expect(anchor.x).toBe(join.x);
       expect(anchor.y).not.toBe(trunk.trunkY);
-      expect(anchor.y).toBeGreaterThan(trunk.trunkY + 14);
-      expect(anchor.y).toBeLessThan(target.y + H / 2 - 14);
+      if (edge.to === 'b1') {
+        // 最内成员的落点竖段与干线竖段是同一条线：标签不能骑上去（会读成整组说明），
+        // 改骑它自己的入卡横段中点——那条横段只通向这张卡。
+        expect(anchor.x).toBe((join.x + target.x) / 2);
+        expect(anchor.x).toBeGreaterThan(join.x);
+        expect(anchor.x).toBeLessThan(target.x);
+        expect(anchor.y).toBe(target.y + H / 2);
+      } else {
+        expect(anchor.x).toBe(join.x);
+        expect(anchor.y).toBeGreaterThan(trunk.trunkY + 14);
+        expect(anchor.y).toBeLessThan(target.y + H / 2 - 14);
+      }
       expect(insideAnyCard(result, anchor)).toEqual([]);
       expect(edge.labelWidth).toBe(Math.max(40, HG - 16));
     }

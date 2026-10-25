@@ -101,6 +101,7 @@ export {
   type V2MoveNodeToTopicOperation,
   type V2RemoveLeafOperation,
   type V2SetDiscussionFocusOperation,
+  type V2SetImportanceOperation,
   type PatchNodeOperation,
   type UpdateConnectionOperation,
   type ReplaceNodeSourceOperation,

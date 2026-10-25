@@ -32,6 +32,14 @@ export interface DetailPanelProps {
   onOpenNode?: (nodeId: string) => void;
   /** Boundary nodes from other topics, shown as context only (never full body). */
   boundaryNodes?: GraphNode[];
+  /** Copies the stable locator of the selected card; the parent builds the text. */
+  onCopyLocate?: () => void;
+  locateCopied?: boolean;
+  /** Source-level importance flag of the selected card. */
+  important?: boolean;
+  onToggleImportant?: (next: boolean) => void;
+  importanceBusy?: boolean;
+  importanceError?: string | null;
 };
 
 function versionLabel(instanceId: string, revision: number): string {
@@ -43,6 +51,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
     graph, tab, onTabChange, topic, node, nodeDetail, topicDetail, loading, error, detailVersion,
     activeNodeId, selectedNodeId, onSelectNode, onRetry, onClose, onOpenTopic, onCopyContinuation, copied,
     resources, resolvePathToNode, onOpenNode, boundaryNodes,
+    onCopyLocate, locateCopied, important = false, onToggleImportant, importanceBusy = false, importanceError = null,
   } = props;
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -135,12 +144,36 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                 <StateChip node={node} active={node.id === activeNodeId} />
                 {node.id === selectedNodeId ? <span className="detail__flag">已选中</span> : null}
                 <span className="detail__flag">{flowLabel(node)}</span>
+                {important ? <span className="detail__flag detail__flag--important">重要</span> : null}
               </div>
               <h2 id="detail-node-title" ref={headingRef} tabIndex={-1} className="detail__title">{node.title}</h2>
               <p className="detail__source">
                 {node.from !== null ? '来自 ' + (graph.nodes.find((item) => item.id === node.from)?.number ?? node.from) + ' · ' : ''}
                 {topic?.path ?? node.topicId}
               </p>
+              {onCopyLocate !== undefined || onToggleImportant !== undefined ? (
+                <div className="detail__actions">
+                  {onCopyLocate !== undefined ? (
+                    <button type="button" onClick={() => { onCopyLocate(); }}>{locateCopied === true ? '已复制定位' : '复制定位'}</button>
+                  ) : null}
+                  {onToggleImportant !== undefined ? (
+                    <button
+                      type="button"
+                      aria-pressed={important}
+                      disabled={importanceBusy}
+                      title={important ? '取消重要标记（写回源文件）' : '标记为重要（写回源文件）'}
+                      onClick={() => { onToggleImportant(!important); }}
+                    >
+                      {importanceBusy ? '正在保存…' : important ? '取消重要' : '设为重要'}
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              {importanceError !== null ? (
+                <div className="banner banner--error" role="alert">
+                  <span className="banner__text">{importanceError}</span>
+                </div>
+              ) : null}
               {connectionText !== '' ? (
                 <div className="detail__connection">
                   <span className="detail__connection-label">

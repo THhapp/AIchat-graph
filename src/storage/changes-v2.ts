@@ -20,6 +20,7 @@ import type {
   V2MoveNodeToTopicOperation,
   V2RemoveLeafOperation,
   V2SetDiscussionFocusOperation,
+  V2SetImportanceOperation,
   ReplaceNodeSourceOperation,
   V2Operation,
   V2ChangeRequest,
@@ -109,6 +110,9 @@ interface Context {
   declared: Map<string, string | null>;
   changed: string[];
   changedSeen: Set<string>;
+  /** 源文件内容真正被改写的节点；仅改重要性等元数据不进入这里。 */
+  content: string[];
+  contentSeen: Set<string>;
   notes: StorageDiagnostic[];
   opNames: string[];
 }
@@ -174,6 +178,19 @@ function markChanged(ctx: Context, nodeId: string): void {
   if (ctx.changedSeen.has(nodeId)) return;
   ctx.changedSeen.add(nodeId);
   ctx.changed.push(nodeId);
+}
+
+/**
+ * 记录"节点文件被真实改写"。
+ *
+ * 与 markChanged 分开：changedNodeIds 也包含被删除的节点与仅改重要性的节点，
+ * 而最近一次内容更新只算前者之外的"新建或实际改写"。
+ */
+function markContent(ctx: Context, nodeId: string): void {
+  markChanged(ctx, nodeId);
+  if (ctx.contentSeen.has(nodeId)) return;
+  ctx.contentSeen.add(nodeId);
+  ctx.content.push(nodeId);
 }
 
 function requireNode(ctx: Context, nodeId: string): NodeFileState {
@@ -327,7 +344,7 @@ function applyCreateNode(ctx: Context, op: V2CreateNodeOperation): void {
     created: true,
   };
   ctx.nodes.set(op.nodeId, state);
-  markChanged(ctx, op.nodeId);
+  markContent(ctx, op.nodeId);
 }
 
 function applyUpdateNode(ctx: Context, op: V2UpdateNodeOperation): void {
@@ -355,7 +372,7 @@ function applyUpdateNode(ctx: Context, op: V2UpdateNodeOperation): void {
   }
   node.header = nextHeader;
   if (bodyChanged) node.body = nextBody;
-  markChanged(ctx, node.nodeId);
+  markContent(ctx, node.nodeId);
 }
 
 /**
@@ -425,7 +442,7 @@ function applyPatchNode(ctx: Context, op: PatchNodeOperation): void {
   }
   if (metaChanged) node.header = nextHeader;
   if (bodyChanged) node.body = nextBody;
-  markChanged(ctx, node.nodeId);
+  markContent(ctx, node.nodeId);
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -497,7 +514,7 @@ function applyUpdateConnection(ctx: Context, op: UpdateConnectionOperation): voi
   if (op.description !== undefined) header.description = op.description.trim();
   assertHeaderShape(header, "updateConnection");
   node.header = header;
-  markChanged(ctx, node.nodeId);
+  markContent(ctx, node.nodeId);
 }
 
 function applyMoveNodeToTopic(ctx: Context, op: V2MoveNodeToTopicOperation): void {
@@ -511,7 +528,7 @@ function applyMoveNodeToTopic(ctx: Context, op: V2MoveNodeToTopicOperation): voi
   node.topicId = topic.topicId;
   node.dir = topic.dir;
   node.path = nodePath(topic.dir, node.nodeId);
-  markChanged(ctx, node.nodeId);
+  markContent(ctx, node.nodeId);
 }
 
 function applyRemoveLeaf(ctx: Context, op: V2RemoveLeafOperation): void {
@@ -534,6 +551,25 @@ function applyRemoveLeaf(ctx: Context, op: V2RemoveLeafOperation): void {
     });
   }
   void node;
+}
+
+/**
+ * 重要标记：只写节点头的 important；false 表示删除该字段（文件恢复干净）。
+ * 值未变时视为 no-op，不写文件、不改动任何节点。
+ */
+function applySetImportance(ctx: Context, op: V2SetImportanceOperation): void {
+  const node = requireNode(ctx, op.nodeId);
+  const current = node.header.important === true;
+  if (current === op.important) {
+    ctx.opNames.push("setImportance(no-op)");
+    return;
+  }
+  const header: V2NodeHeader = { ...node.header };
+  if (op.important) header.important = true;
+  else delete header.important;
+  node.header = header;
+  // 只改这一项元数据：磁盘文件确实被改写，但不计入"最近一次内容更新"。
+  markChanged(ctx, node.nodeId);
 }
 
 function applyOperation(ctx: Context, op: V2Operation): void {
@@ -562,6 +598,9 @@ function applyOperation(ctx: Context, op: V2Operation): void {
       return;
     case "setDiscussionFocus":
       setActiveNode(ctx, op.nodeId);
+      return;
+    case "setImportance":
+      applySetImportance(ctx, op);
       return;
     case "replaceNodeSource":
       throw badRequest("replaceNodeSource 只能用于修复无法解析的文件，当前工作区解析正常");
@@ -709,6 +748,8 @@ export function prepareChangesV2(files: WorkspaceFiles, request: V2ChangeRequest
     declared,
     changed: [],
     changedSeen: new Set(),
+    content: [],
+    contentSeen: new Set(),
     notes: [],
     opNames: [],
   };
@@ -814,9 +855,22 @@ export function prepareChangesV2(files: WorkspaceFiles, request: V2ChangeRequest
     throw conflict("缺少前置文件声明，调用方需重新读取后再提交", { missingFiles: missing });
   }
 
+  // 最近更新只算最终真实写盘的内容节点：markContent 在操作过程中收集的只是候选，
+  // 同批先改后恢复原值、仅改重要性、删除或移动都可能让它与最终 output 不一致；
+  // 这里以最终 node.path 命中非删除写盘文件为准，顺序与去重保持不变。
+  const writtenPaths = new Set(
+    output.filter((file) => file.content !== null).map((file) => file.path),
+  );
+  const contentNodeIds: string[] = [];
+  for (const nodeId of ctx.content) {
+    const node = ctx.nodes.get(nodeId);
+    if (node !== undefined && writtenPaths.has(node.path)) contentNodeIds.push(nodeId);
+  }
+
   return {
     files: output,
     changedNodeIds: ctx.changed,
+    contentNodeIds,
     diagnostics: [...files.diagnostics, ...ctx.notes],
     summary: buildSummary(ctx, output),
   };

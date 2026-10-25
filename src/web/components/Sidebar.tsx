@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
 import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
 import type { SearchResults } from '../lib/search.js';
 
 /** Structural reading order: root first, then next before branch by order. */
-function orderChain(nodes: GraphNode[]): GraphNode[] {
+export function orderChain(nodes: GraphNode[]): GraphNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const children = new Map<string, GraphNode[]>();
   for (const node of nodes) {
@@ -39,18 +38,93 @@ function orderChain(nodes: GraphNode[]): GraphNode[] {
   return result;
 }
 
+/** Direct children inside this topic; a node from another topic is not a child here. */
+export function treeChildCounts(nodes: GraphNode[]): Map<string, number> {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    if (node.from === null || !byId.has(node.from)) continue;
+    counts.set(node.from, (counts.get(node.from) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Directory rows in reading order, with the descendants of a folded node hidden.
+ * This is a navigation fold only: the graph's own `collapsedNodeIds` is a
+ * different value and is never read or written here.
+ */
+export function visibleTreeNodes(nodes: GraphNode[], collapsed: ReadonlySet<string>): GraphNode[] {
+  const hidden = hiddenTreeNodes(nodes, collapsed);
+  return orderChain(nodes).filter((node) => !hidden.has(node.id));
+}
+
+function childrenOf(nodes: GraphNode[]): Map<string, string[]> {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const children = new Map<string, string[]>();
+  for (const node of nodes) {
+    if (node.from === null || !byId.has(node.from)) continue;
+    const list = children.get(node.from);
+    if (list === undefined) children.set(node.from, [node.id]);
+    else list.push(node.id);
+  }
+  return children;
+}
+
+function descendantsOf(id: string, children: Map<string, string[]>): string[] {
+  const seen = new Set<string>();
+  const stack = [...(children.get(id) ?? [])];
+  while (stack.length > 0) {
+    const next = stack.pop();
+    if (next === undefined || seen.has(next)) continue;
+    seen.add(next);
+    const grand = children.get(next);
+    if (grand !== undefined) stack.push(...grand);
+  }
+  return [...seen];
+}
+
+function hiddenTreeNodes(nodes: GraphNode[], collapsed: ReadonlySet<string>): Set<string> {
+  const byId = new Set(nodes.map((node) => node.id));
+  const children = childrenOf(nodes);
+  const hidden = new Set<string>();
+  for (const id of collapsed) {
+    if (!byId.has(id)) continue;
+    for (const descendant of descendantsOf(id, children)) hidden.add(descendant);
+  }
+  return hidden;
+}
+
+/** How many directory rows each folded node hides, for the "+N" hint. */
+export function hiddenTreeCounts(nodes: GraphNode[], collapsed: ReadonlySet<string>): Map<string, number> {
+  const byId = new Set(nodes.map((node) => node.id));
+  const children = childrenOf(nodes);
+  const counts = new Map<string, number>();
+  for (const id of collapsed) {
+    if (!byId.has(id)) continue;
+    const count = descendantsOf(id, children).length;
+    if (count > 0) counts.set(id, count);
+  }
+  return counts;
+}
+
 export interface SidebarProps {
   graph: GraphResponse | null;
   query: string;
   onQueryChange: (value: string) => void;
   results: SearchResults;
-  collapsed: ReadonlySet<string>;
   activeNodeId: string | null;
   selectedNodeId: string | null;
   topicFilter: string | null;
   onSelectNode: (id: string) => void;
   onOpenTopic: (id: string) => void;
-  onToggleCollapse: (id: string) => void;
+  /** Directory-only fold of one node's children. Never collapses the graph. */
+  onToggleNavNode: (nodeId: string) => void;
+  /** Node ids folded inside the directory tree of the current topic. */
+  navCollapsed: ReadonlySet<string>;
+  /** Topic folders currently open; the reader's own choice, persisted locally. */
+  expandedTopicIds: ReadonlySet<string>;
+  onToggleTopicFolder: (topicId: string) => void;
   onTopicFilter: (id: string | null) => void;
   onSelectTopicPath: (path: string) => void;
   /** Called by the panel's own close control. */
@@ -61,27 +135,45 @@ export interface SidebarProps {
 }
 
 export function Sidebar(props: SidebarProps): React.JSX.Element {
-  const { graph, query, onQueryChange, results, collapsed, activeNodeId, selectedNodeId, topicFilter, onSelectNode, onOpenTopic, onToggleCollapse, onClose, directoryMode = false, onCopyTopic, copied } = props;
+  const {
+    graph, query, onQueryChange, results, activeNodeId, selectedNodeId, topicFilter,
+    onSelectNode, onOpenTopic, onToggleNavNode, navCollapsed, expandedTopicIds, onToggleTopicFolder,
+    onClose, directoryMode = false, onCopyTopic, copied,
+  } = props;
   const currentTopicId = topicFilter ?? (!directoryMode && graph?.topics.length === 1 ? graph.topics[0]?.id ?? null : null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set(currentTopicId === null ? [] : [currentTopicId]));
-  useEffect(() => {
-    if (currentTopicId !== null) setExpanded((current) => new Set([...current, currentTopicId]));
-  }, [currentTopicId]);
   const searching = query.trim().length > 0;
-  const toggleFolder = (id: string): void => {
-    setExpanded((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
+  const currentNodes = graph === null ? [] : graph.nodes.filter((node) => node.topicId === currentTopicId);
+  const childCounts = treeChildCounts(currentNodes);
+  const hiddenCounts = hiddenTreeCounts(currentNodes, navCollapsed);
+
+  const renderNode = (node: GraphNode): React.JSX.Element => {
+    const folded = navCollapsed.has(node.id);
+    const children = childCounts.get(node.id) ?? 0;
+    const hiddenCount = hiddenCounts.get(node.id) ?? 0;
+    return (
+      <li key={node.id} className="nav-item nav-item--chain" data-active={node.id === selectedNodeId ? 'true' : 'false'} data-current={node.id === activeNodeId ? 'true' : 'false'} style={{ paddingLeft: 'calc(' + String((node.number.match(/-/g) ?? []).length) + ' * 10px)' }}>
+        {children > 0 ? (
+          <button
+            type="button"
+            className="nav-item__twisty"
+            aria-expanded={!folded}
+            aria-label={(folded ? '在目录中展开 ' : '在目录中折叠 ') + node.number + ' ' + node.title}
+            title={folded ? '在目录中展开（不影响图）' : '在目录中折叠（不影响图）'}
+            onClick={() => { onToggleNavNode(node.id); }}
+          >
+            {folded ? '▸' : '▾'}
+          </button>
+        ) : <span className="nav-item__twisty nav-item__twisty--root" aria-hidden="true">·</span>}
+        <button type="button" className="nav-item__main" onClick={() => { onSelectNode(node.id); }}>
+          <span className="nav-item__number">{node.number}</span>
+          <span className="nav-item__title">{node.title}</span>
+          {folded && hiddenCount > 0 ? <span className="nav-item__meta">+{String(hiddenCount)}</span> : null}
+        </button>
+        <span className="nav-item__state" data-state={node.state} title={node.state} />
+      </li>
+    );
   };
-  const renderNode = (node: GraphNode): React.JSX.Element => (
-    <li key={node.id} className="nav-item nav-item--chain" data-active={node.id === selectedNodeId ? 'true' : 'false'} data-current={node.id === activeNodeId ? 'true' : 'false'} style={{ paddingLeft: 'calc(' + String((node.number.match(/-/g) ?? []).length) + ' * 10px)' }}>
-      <button type="button" className="nav-item__twisty" aria-expanded={!collapsed.has(node.id)} aria-label={collapsed.has(node.id) ? '展开节点分支' : '折叠节点分支'} onClick={() => { onToggleCollapse(node.id); }}>{collapsed.has(node.id) ? '▸' : '▾'}</button>
-      <button type="button" className="nav-item__main" onClick={() => { onSelectNode(node.id); }}><span className="nav-item__number">{node.number}</span><span className="nav-item__title">{node.title}</span></button>
-      <span className="nav-item__state" data-state={node.state} title={node.state} />
-    </li>
-  );
+
   const matches = results.nodes.filter((node) => node.topicId === currentTopicId);
   return (
     <nav className="sidebar panel" id="nav-panel" aria-label="主题目录">
@@ -94,17 +186,25 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
           <h3 className="nav-heading">主题 {String(graph?.topics.length ?? 0)}</h3>
           {graph === null ? <p className="sidebar__placeholder">图尚未载入。</p> : graph.topics.length === 0 ? <p className="sidebar__placeholder">工作区尚无主题，请让 Agent 创建。</p> : (
             <ul className="nav-list">
-              {graph.topics.map((topic) => (
-                <li key={topic.id} className="topic-folder" data-topic-id={topic.id}>
-                  <div className="nav-item" data-active={topic.id === currentTopicId ? 'true' : 'false'}>
-                    <button type="button" className="nav-item__twisty" aria-expanded={expanded.has(topic.id)} aria-label={(expanded.has(topic.id) ? '收起主题 ' : '展开主题 ') + topic.title} onClick={() => { toggleFolder(topic.id); }}>{expanded.has(topic.id) ? '▾' : '▸'}</button>
-                    <button type="button" className="nav-item__main" aria-current={topic.id === currentTopicId ? 'page' : undefined} onClick={() => { onOpenTopic(topic.id); }} title={topic.title}>
-                      <span aria-hidden="true">▱</span><span className="nav-item__title">{topic.title}</span><span className="nav-item__meta">{String(topic.nodeIds.length)} 张</span>
-                    </button>
-                  </div>
-                  {expanded.has(topic.id) ? <ul className="nav-list nav-list--tree" aria-label={topic.title + '的节点'}>{orderChain(graph.nodes.filter((node) => node.topicId === topic.id)).map(renderNode)}</ul> : null}
-                </li>
-              ))}
+              {graph.topics.map((topic) => {
+                const open = expandedTopicIds.has(topic.id);
+                const topicNodes = graph.nodes.filter((node) => node.topicId === topic.id);
+                return (
+                  <li key={topic.id} className="topic-folder" data-topic-id={topic.id}>
+                    <div className="nav-item" data-active={topic.id === currentTopicId ? 'true' : 'false'}>
+                      <button type="button" className="nav-item__twisty" aria-expanded={open} aria-label={(open ? '收起主题 ' : '展开主题 ') + topic.title} onClick={() => { onToggleTopicFolder(topic.id); }}>{open ? '▾' : '▸'}</button>
+                      <button type="button" className="nav-item__main" aria-current={topic.id === currentTopicId ? 'page' : undefined} onClick={() => { onOpenTopic(topic.id); }} title={topic.title}>
+                        <span aria-hidden="true">▱</span><span className="nav-item__title">{topic.title}</span><span className="nav-item__meta">{String(topic.nodeIds.length)} 张</span>
+                      </button>
+                    </div>
+                    {open ? (
+                      <ul className="nav-list nav-list--tree" aria-label={topic.title + '的节点'}>
+                        {visibleTreeNodes(topicNodes, new Set(navCollapsed)).map(renderNode)}
+                      </ul>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>

@@ -22,6 +22,7 @@ function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch',
     from,
     flow,
     state: 'agreed',
+    important: false,
     ...(flow === 'branch' ? { side: 'right' as const, order: 10 } : {}),
   };
 }

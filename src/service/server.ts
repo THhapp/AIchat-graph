@@ -28,6 +28,7 @@ import type {
 } from "../shared/protocol.js";
 import { applyChanges, applyAgentChange, checkChanges } from "./changes.js";
 import { parseAgentReadQuery, readAgentNode } from "./agent.js";
+import { setNodeImportance } from "./importance.js";
 import type { ExportCoordinator as ExportCoordinatorType } from "./export.js";
 import { ServiceError, serviceErrorFromUnknown } from "./errors.js";
 import { graphTopics } from "./snapshot.js";
@@ -44,6 +45,7 @@ import {
   readAgentRequest,
   readChangeRequest,
   readExportTargetRequest,
+  readImportanceRequest,
 } from "./http/requests.js";
 import {
   diskTopicDetail,
@@ -187,6 +189,9 @@ export function createApp(options: AppOptions): Hono {
       start: c.req.query("start"),
       length: c.req.query("length"),
       full: c.req.query("full"),
+      meta: c.req.query("meta"),
+      section: c.req.query("section"),
+      "section-index": c.req.query("section-index"),
     });
     const version = parseVersionQuery(c);
     assertSnapshotVersion(runtime, version);
@@ -332,6 +337,14 @@ export function createApp(options: AppOptions): Hono {
       });
     }
     return jsonResponse(c, await applyChanges(runtime, request, bodyHash));
+  });
+
+  /* ------------------------------ 重要标记 ------------------------------ */
+
+  // 只改一项元数据；仍经候选层与事务提交，成功后发布快照。
+  api.post("/importance", limitBody, async (c) => {
+    const body = await readImportanceRequest(c);
+    return jsonResponse(c, await setNodeImportance(runtime, body));
   });
 
   /* ------------------------------ 导出 ------------------------------ */

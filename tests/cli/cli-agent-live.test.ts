@@ -6,6 +6,7 @@ import path from "node:path";
 import { startService } from "../../src/service/index.js";
 import type { ServiceHandle } from "../../src/service/index.js";
 import { main } from "../../src/cli/index.js";
+import { EXIT_CODES } from "../../src/cli/errors.js";
 
 /**
  * 真实服务上的低摩擦 Agent 链路：read --node 取 editRef → edit／next／connect。
@@ -359,5 +360,44 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     ]);
     expect(result.exitCode).not.toBe(0);
     expect(result.exitCode).not.toBe(0);
+  });
+});
+/**
+ * A03：`read --length 0` 是参数错误，不是 INTERNAL。
+ * 在线与离线都在 CLI 本地判定（不发出注定失败的请求），退出码为 usage；
+ * 服务端对直接 GET 的 length=0 仍自行返回 400。
+ */
+describe("A03 非法读取参数（真实 CLI）", () => {
+  it("length=0 在线与离线都退出 2，并给出有效范围", async () => {
+    const online = await main(["read", "--node", CHILD_NODE, "--length", "0", "--workspace", root]);
+    expect(online.exitCode).toBe(EXIT_CODES.usage);
+    const onlineBody = JSON.parse(online.stderr) as { error: { code: string; message: string } };
+    expect(onlineBody.error.code).toBe("INVALID_ARGUMENT");
+    expect(onlineBody.error.message).toContain("1-16000");
+
+    const offline = await main([
+      "read",
+      "--node",
+      CHILD_NODE,
+      "--length",
+      "0",
+      "--offline",
+      "--workspace",
+      root,
+    ]);
+    expect(offline.exitCode).toBe(EXIT_CODES.usage);
+    const offlineBody = JSON.parse(offline.stderr) as {
+      error: { code: string; message: string; details?: { min?: number; max?: number } };
+    };
+    expect(offlineBody.error.code).toBe("INVALID_ARGUMENT");
+    expect(offlineBody.error.message).toContain("1-16000");
+    expect(offlineBody.error.details?.min).toBe(1);
+    expect(offlineBody.error.details?.max).toBe(16000);
+  });
+
+  it("length=1 是合法下界，仍可正常读取", async () => {
+    const node = await readNodeJson(CHILD_NODE, ["--length", "1"]);
+    expect(node.range.end - node.range.start).toBe(1);
+    expect(node.body.length).toBe(1);
   });
 });

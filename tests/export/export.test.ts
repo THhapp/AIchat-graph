@@ -47,6 +47,7 @@ function graphNode(id: string, title: string): GraphNode {
     from: null,
     flow: 'root',
     state: 'agreed',
+    important: false,
   };
 }
 

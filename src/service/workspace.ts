@@ -19,9 +19,10 @@ import {
   recoverTransactions,
   resolveWorkspaceRoot,
 } from "../storage/index.js";
-import type { Diagnostic, TopicExportStatus } from "../shared/protocol.js";
+import type { Diagnostic, LastChange, TopicExportStatus } from "../shared/protocol.js";
 import { loadCacheIdentity, saveCache } from "./cache.js";
 import { ServiceError, serviceErrorFromUnknown, wireDiagnostic } from "./errors.js";
+import { readLastChanges, writeLastChanges } from "./lastChange.js";
 import { readSnapshot } from "./load.js";
 import { SerialQueue } from "./queue.js";
 import {
@@ -83,6 +84,11 @@ export class WorkspaceRuntime {
   current: CurrentSnapshot;
   writable: boolean;
   writableReason: string | null;
+  /**
+   * 各主题最近一次成功提交里被新建或真实改写的节点；跨重启从
+   * .aichat/runtime/last-change.json 读回。主题之间互不覆盖。
+   */
+  lastChanges: Record<string, LastChange> = {};
   port = 0;
   url = "";
   /** 实例内写入凭据；随实例销毁，重启后旧凭据一律失效。 */
@@ -239,6 +245,14 @@ export class WorkspaceRuntime {
       runtime.releaseLock = releaseLock;
       lockState.runtime = runtime;
       runtime.systemDiagnostics.push(...systemDiagnostics);
+      // 每个主题各自保留最近一批内容修改；v1 单批记录按当前快照的主题归属拆分。
+      const topicByNodeId = new Map(
+        data.graph.nodes.map((node) => [node.id, node.topicId] as const),
+      );
+      runtime.lastChanges = await readLastChanges(
+        rootReal,
+        (nodeId) => topicByNodeId.get(nodeId) ?? null,
+      ).catch(() => ({} as Record<string, LastChange>));
       if (identityFromCache) {
         // 身份都来自缓存时不能安全写入：没有可核对的工作区身份源文件。
         runtime.writable = false;
@@ -328,6 +342,53 @@ export class WorkspaceRuntime {
     );
     if (exists) return;
     this.systemDiagnostics.push(diagnostic);
+  }
+
+  /**
+   * 记录一次成功提交的内容节点，按当前有效快照的主题归属分别保存。
+   *
+   * 只由提交链路在快照刷新成功后调用：读取、导出、折叠、revision 变化都不会走到这里。
+   * 同次提交涉及多个主题时分别更新各主题集合；未受影响主题保持原值。
+   * 找不到归属的节点忽略。写入失败不回滚已提交的源文件，只留下诊断；
+   * 内存值仍反映本次提交。
+   */
+  async recordLastChange(nodeIds: readonly string[]): Promise<void> {
+    const unique: string[] = [];
+    for (const nodeId of nodeIds) {
+      if (!unique.includes(nodeId)) unique.push(nodeId);
+    }
+    if (unique.length === 0) return;
+
+    const topicByNodeId = new Map(
+      this.current.data.graph.nodes.map((node) => [node.id, node.topicId] as const),
+    );
+    const nodeIdsByTopic = new Map<string, string[]>();
+    for (const nodeId of unique) {
+      const topicId = topicByNodeId.get(nodeId);
+      if (topicId === undefined) continue;
+      const ids = nodeIdsByTopic.get(topicId) ?? [];
+      ids.push(nodeId);
+      nodeIdsByTopic.set(topicId, ids);
+    }
+    if (nodeIdsByTopic.size === 0) return;
+
+    const at = new Date().toISOString();
+    const next: Record<string, LastChange> = { ...this.lastChanges };
+    for (const [topicId, ids] of nodeIdsByTopic) {
+      next[topicId] = { at, nodeIds: ids };
+    }
+    this.lastChanges = next;
+    try {
+      await writeLastChanges(this.rootReal, next);
+    } catch (error) {
+      this.addSystemDiagnostic(
+        wireDiagnostic(
+          "LAST_CHANGE_WRITE_FAILED",
+          "最近一次内容更新记录写入失败（源文件已提交）：" +
+            (error instanceof Error ? error.message : String(error)),
+        ),
+      );
+    }
   }
 
   disableWrites(reason: string, message: string): void {

@@ -33,6 +33,8 @@ export interface WorkspaceSnapshot {
   readonly ok: boolean;
   readonly topics: readonly TopicEntry[];
   readonly graph: WorkspaceGraph | null;
+  /** 有效图的 id→派生编号映射；图无效时为空，读侧显示 null。 */
+  readonly nodeNumbers: ReadonlyMap<string, string>;
   readonly diagnostics: readonly Diagnostic[];
   readonly filesByPath: ReadonlyMap<string, WorkspaceFile>;
   /** workspace.json 不是合法 JSON 时的原因；与 schema 错误分开报告。 */
@@ -116,6 +118,12 @@ export async function loadWorkspace(root: string): Promise<WorkspaceSnapshot> {
     };
   });
 
+  // 编号只来自有效图；离线读取与主题清单共用同一映射。
+  const nodeNumbers = new Map<string, string>();
+  if (parse.ok) {
+    for (const node of parse.graph?.nodes ?? []) nodeNumbers.set(node.id, node.number);
+  }
+
   return {
     root: rootReal,
     files,
@@ -125,6 +133,7 @@ export async function loadWorkspace(root: string): Promise<WorkspaceSnapshot> {
     ok: parse.ok,
     topics,
     graph: parse.ok ? (parse.graph ?? null) : null,
+    nodeNumbers,
     diagnostics: parse.diagnostics,
     filesByPath,
     workspaceJsonError,
@@ -243,47 +252,42 @@ export function validateSnapshot(snapshot: WorkspaceSnapshot): ValidationView {
   };
 }
 
-/** 主题摘要：真实文件事实 + 解析状态。 */
-export function describeTopic(snapshot: WorkspaceSnapshot, entry: TopicEntry) {
-  const file = topicEntryFile(snapshot, entry);
+/** 主题摘要：身份、入口路径与节点数；文件事实与节点清单不在此重复。 */
+export function describeTopic(entry: TopicEntry) {
   return {
     topicId: entry.topic.topicId,
     title: entry.topic.title,
     schemaVersion: entry.topic.schemaVersion,
     path: entry.path,
     dir: entry.dir,
-    ...(file
-      ? { absolutePath: file.absolutePath, sha256: file.sha256, byteLength: file.byteLength }
-      : {}),
     nodeCount: entry.nodes.length,
-    sourcePaths: entry.sourcePaths,
-    files: entry.sourcePaths.map((path) => {
-      const source = snapshot.filesByPath.get(path);
-      return source ? fileFacts(source) : { path, missing: true };
-    }),
   };
 }
 
-/** 节点摘要：含真实源文件与哈希，正文不在列表里重复。 */
-export function describeNode(topic: TopicEntry, entry: NodeEntry) {
+/**
+ * 主题概览里的节点清单：只保留清单需要的字段。
+ * 主题身份与入口文件在主题对象里，不在每个节点上重复。
+ */
+export function describeNode(
+  entry: NodeEntry,
+  nodeNumbers: ReadonlyMap<string, string>,
+) {
   const { node } = entry;
   return {
     id: node.id,
-    topicId: node.topicId,
-    topicPath: node.topicPath,
-    path: entry.path,
+    number: nodeNumbers.get(node.id) ?? null,
     title: node.title,
     summary: node.summary,
-    summaryExplicit: node.summaryExplicit,
     state: node.state,
     flow: node.flow,
     from: node.from,
-    ...(node.description !== undefined ? { description: node.description } : {}),
-    ...(node.side !== undefined ? { side: node.side } : {}),
-    ...(node.order !== undefined ? { order: node.order } : {}),
-    ...(node.label !== undefined ? { label: node.label } : {}),
-    schemaVersion: topic.topic.schemaVersion,
+    important: node.important,
+    ...(node.description !== undefined
+      ? { description: node.description }
+      : node.label !== undefined
+        ? { label: node.label }
+        : {}),
+    path: entry.path,
     fileHash: entry.file.sha256,
-    byteLength: entry.file.byteLength,
   };
 }

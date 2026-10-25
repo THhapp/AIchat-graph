@@ -67,7 +67,7 @@ function buildAgentsMarkdown(name: string): string {
     "~~~",
     "",
     "- nodeId／title／state／from／flow 必需。root 的 from 写 null 且不写 description；其他节点必须有非空 description，说明为什么接到来源。",
-    "- state 取 agreed／proposed／reference；新提议默认 proposed，不要从来源继承 agreed。",
+    "- state 取 agreed／proposed／reference；新提议默认 proposed，不要从来源继承 agreed。重要标记写 important: true，缺省不写该字段。",
     "- flow 取 root／next／branch。branch 可省 side／order，省略时按右侧与稳定顺序；新增分支的 order 取同源最大值加 10。",
     "- 标题只写在 YAML 头里，正文不要再写同名标题。",
     "",

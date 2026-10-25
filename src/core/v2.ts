@@ -207,6 +207,7 @@ export function nodeFromV2Document(
     ...(header.description !== undefined ? { description: header.description } : {}),
     ...(header.side !== undefined ? { side: header.side } : {}),
     ...(header.order !== undefined ? { order: header.order } : {}),
+    important: header.important === true,
     ranges,
   };
   if (header.summary !== undefined) {

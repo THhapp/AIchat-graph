@@ -8,13 +8,19 @@
  * - 一次提交只做一个动作；复杂变更仍走 check／apply 底层链路；
  * - 超时／断线不换 requestId 重发：报告 RESULT_UNKNOWN，交给 status 或重读决定。
  */
-import type { AgentChangeAction, AgentChangeResponse } from "../shared/protocol.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import type {
+  AgentChangeAction,
+  AgentChangeResponse,
+  AgentRearrangeEdit,
+} from "../shared/protocol.js";
 import { parseOptions, type ParsedArgs } from "./args.js";
-import { readAppendText, readReplacePairs, resolveBody } from "./body-input.js";
+import { readAppendText, readReplacePairs, readStdinText, resolveBody } from "./body-input.js";
 import { emit, invalidArgument, parseOutputMode, workspaceRoot } from "./commands.js";
 import type { CliContext } from "./context.js";
-import { submitAgentChange } from "./agent-client.js";
-import { EXIT_CODES, UsageError } from "./errors.js";
+import { readAgentNode, submitAgentChange } from "./agent-client.js";
+import { CliError, EXIT_CODES, UsageError } from "./errors.js";
 import { resolveServiceForWorkspace } from "./service-client.js";
 
 const NODE_STATES = ["agreed", "proposed", "reference"] as const;
@@ -125,22 +131,6 @@ function summarize(command: string, response: AgentChangeResponse): string[] {
   }
   return lines;
 }
-
-async function submit(
-  command: string,
-  action: AgentChangeAction,
-  args: readonly string[],
-  ctx: CliContext,
-  rootOverride: string | undefined,
-): Promise<number> {
-  const parsed = parseOptions(args, action === undefined ? [] : OPTIONS_FOR[command] ?? [], 0);
-  void parsed;
-  const mode = rootOverride === undefined ? "json" : "json";
-  void mode;
-  return EXIT_CODES.ok;
-}
-
-const OPTIONS_FOR: Record<string, never> = {};
 
 /* ---------------------------------- edit ---------------------------------- */
 
@@ -333,6 +323,184 @@ export async function runConnect(args: readonly string[], ctx: CliContext): Prom
   return submitAction("connect", action, root, ctx, mode);
 }
 
+/* -------------------------------- rearrange ------------------------------- */
+
+const REARRANGE_OPTIONS = [
+  { name: "workspace" },
+  { name: "input" },
+  { name: "input-stdin", boolean: true },
+  ...OUTPUT,
+] as const;
+
+const REARRANGE_EDIT_FIELDS = new Set(["ref", "fromRef", "flow", "side", "order", "description"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function specString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw invalidArgument(label + " 必须是非空字符串");
+  }
+  if (/[\r\n]/.test(value)) throw invalidArgument(label + " 必须是单行文本");
+  return value;
+}
+
+/**
+ * 解析 rearrange spec：调用方只写最终关系与说明，不写 requestId／expectedFiles。
+ * 每个错误都指出具体条目与字段，退出码 2；不把半成品发给服务。
+ */
+function parseRearrangeSpec(rawText: string): AgentChangeAction {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText) as unknown;
+  } catch (error) {
+    throw invalidArgument(
+      "rearrange spec 不是合法 JSON：" +
+        (error instanceof Error ? error.message : String(error)),
+    );
+  }
+  if (!isRecord(parsed)) throw invalidArgument("rearrange spec 必须是 JSON 对象");
+  for (const key of Object.keys(parsed)) {
+    if (key !== "edits") throw invalidArgument("rearrange spec 未知字段：" + key);
+  }
+  const rawEdits = parsed["edits"];
+  if (!Array.isArray(rawEdits) || rawEdits.length === 0) {
+    throw invalidArgument("rearrange spec 的 edits 必须是非空数组");
+  }
+
+  const edits: AgentRearrangeEdit[] = [];
+  for (const [index, entry] of rawEdits.entries()) {
+    const label = "edits[" + index + "]";
+    if (!isRecord(entry)) throw invalidArgument(label + " 必须是对象");
+    for (const key of Object.keys(entry)) {
+      if (!REARRANGE_EDIT_FIELDS.has(key)) {
+        throw invalidArgument(label + " 未知字段：" + key);
+      }
+    }
+    const ref = specString(entry["ref"], label + ".ref");
+    const fromRef = specString(entry["fromRef"], label + ".fromRef");
+    const flow = entry["flow"];
+    if (flow !== "next" && flow !== "branch") {
+      throw invalidArgument(
+        label + ".flow 只能是 next／branch，收到 " + String(flow),
+      );
+    }
+    const description = specString(entry["description"], label + ".description");
+    let side: "left" | "right" | undefined;
+    if (Object.prototype.hasOwnProperty.call(entry, "side")) {
+      if (flow !== "branch") {
+        throw invalidArgument(label + ".side 只允许在 flow=branch 时出现");
+      }
+      if (entry["side"] !== "left" && entry["side"] !== "right") {
+        throw invalidArgument(
+          label + ".side 只能是 left／right，收到 " + String(entry["side"]),
+        );
+      }
+      side = entry["side"];
+    }
+    let order: number | undefined;
+    if (Object.prototype.hasOwnProperty.call(entry, "order")) {
+      if (flow !== "branch") {
+        throw invalidArgument(label + ".order 只允许在 flow=branch 时出现");
+      }
+      const value = entry["order"];
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+        throw invalidArgument(label + ".order 必须是非负整数");
+      }
+      order = value;
+    }
+    edits.push({
+      editRef: ref,
+      fromRef,
+      flow,
+      description,
+      ...(side !== undefined ? { side } : {}),
+      ...(order !== undefined ? { order } : {}),
+    });
+  }
+  return { action: "rearrange", edits };
+}
+
+async function readRearrangeSpec(parsed: ParsedArgs, ctx: CliContext): Promise<string> {
+  const input = parsed.values.get("input");
+  const fromStdin = parsed.values.has("input-stdin");
+  if (input !== undefined && fromStdin) {
+    throw new UsageError("--input 与 --input-stdin 互斥，只能给一个");
+  }
+  if (input === undefined && !fromStdin) {
+    throw new UsageError("rearrange 需要 --input <spec.json> 或 --input-stdin");
+  }
+  if (fromStdin) return await (ctx.stdin ?? readStdinText)();
+  const absolute = path.resolve(ctx.cwd, input as string);
+  try {
+    return await fs.readFile(absolute, "utf8");
+  } catch (error) {
+    throw new CliError("INPUT_UNREADABLE", "无法读取 --input 文件: " + absolute, EXIT_CODES.usage, {
+      details: { path: absolute },
+      cause: error,
+    });
+  }
+}
+
+export async function runRearrange(args: readonly string[], ctx: CliContext): Promise<number> {
+  const parsed = parseOptions(args, REARRANGE_OPTIONS, 0);
+  const mode = parseOutputMode(parsed);
+  const root = await workspaceRoot(parsed, ctx);
+  const text = await readRearrangeSpec(parsed, ctx);
+  const action = parseRearrangeSpec(text);
+  return submitAction("rearrange", action, root, ctx, mode);
+}
+
+/* -------------------------------- important ------------------------------- */
+
+const IMPORTANT_OPTIONS = [
+  { name: "workspace" },
+  { name: "ref" },
+  { name: "node" },
+  { name: "on", boolean: true },
+  { name: "off", boolean: true },
+  ...OUTPUT,
+] as const;
+
+/**
+ * 设置／取消重要标记。
+ *
+ * --ref 直接提交（凭据失效由服务返回 412，不自行刷新哈希）；
+ * --node 先做一次真实在线 meta 读取取得 editRef，离线不伪造凭据。
+ */
+export async function runImportant(args: readonly string[], ctx: CliContext): Promise<number> {
+  const parsed = parseOptions(args, IMPORTANT_OPTIONS, 0);
+  const mode = parseOutputMode(parsed);
+  const root = await workspaceRoot(parsed, ctx);
+  const ref = parsed.values.get("ref");
+  const nodeId = parsed.values.get("node");
+  if ((ref === undefined) === (nodeId === undefined)) {
+    throw new UsageError("important 需要且只能给一个 --ref 或 --node");
+  }
+  const on = parsed.values.has("on");
+  const off = parsed.values.has("off");
+  if (on === off) {
+    throw new UsageError("important 需要且只能给一个 --on 或 --off");
+  }
+  const important = on;
+
+  let editRef: string;
+  if (ref !== undefined) {
+    editRef = ref;
+  } else {
+    const service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
+    const read = await readAgentNode(service, nodeId as string, { meta: true }, ctx.fetchImpl ?? fetch);
+    editRef = read.editRef.ref;
+  }
+
+  const action: AgentChangeAction = { action: "setImportance", editRef, important };
+  return submitAction("important", action, root, ctx, mode, (response) => ({
+    nodeId: nodeId ?? response.editRef?.nodeId ?? null,
+    important,
+  }));
+}
+
 /* ------------------------------- create-root ------------------------------ */
 
 export async function runCreateTopic(args: readonly string[], ctx: CliContext): Promise<number> {
@@ -383,6 +551,7 @@ async function submitAction(
   root: string,
   ctx: CliContext,
   mode: "json" | "text",
+  extras?: (response: AgentChangeResponse) => Record<string, unknown>,
 ): Promise<number> {
   const service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
   const result = await submitAgentChange(service, action, ctx.fetchImpl ?? fetch);
@@ -397,6 +566,7 @@ async function submitAction(
       instanceId: service.identity.instanceId,
       rootPath: service.identity.rootPath,
     },
+    ...(extras === undefined ? {} : extras(result.response)),
     result: result.response,
   };
   emit(ctx, mode, payload, summarize(command, result.response));

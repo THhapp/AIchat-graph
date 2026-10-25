@@ -83,6 +83,11 @@ export interface MeasureContext {
   groupDepths: Map<string, number>;
   /** branch 节点在父 block 内落到的列（从 1 起，越靠近主脊越小）。 */
   columns: Map<string, number>;
+  /**
+   * 有入口带的分支节点：node id -> 入口侧（它背向自己方向的那一侧）。
+   * 这一侧的子分支从卡片底边分出，与父节点连进来的中心行横线区分开。
+   */
+  entrySides: Map<string, LayoutSide>;
 }
 
 export function compareIds(a: string, b: string): number {

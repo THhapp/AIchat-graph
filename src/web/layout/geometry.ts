@@ -33,18 +33,21 @@ interface Placement {
   entry: MeasuredEntry;
   column: number;
   y: number;
+  /** 该块在这一列占用的纵向区间（含上方走廊），列宽只按与它相交的块计算。 */
+  top: number;
+  bottom: number;
 }
 
-/** 一段纵向占用，含该块自身在带上方的走廊预留。 */
+/** 一段纵向占用，含该块自身在带上方的走廊预留与它在该列的宽度。 */
 interface Occupancy {
   top: number;
   bottom: number;
+  width: number;
 }
 
 /** 每侧向外编号的列：1 最靠近主脊。索引 0 留空。 */
 interface Column {
   intervals: Occupancy[];
-  width: number;
 }
 
 /** 干线离目标带上沿的距离；带内每嵌套一层再抬高一个 TRUNK_STEP。 */
@@ -222,12 +225,28 @@ export function measureBlock(
     return deepest < 0 ? 0 : corridorNeedFor(deepest);
   };
 
+  // 两侧都有子分支时，出口侧首行成员与入口侧共用 head 下方那一条带（P10）。
+  // 成因：入口侧不能占 head 自己那一行——父节点连进来的横线正好在 head 的中心行，
+  // 同带的卡会被那条线穿过；而两侧各自占一条带，同级两个方向就差了一整行，读不出并列。
+  // 因此两侧一起落在 head 下方那一条带上：入口带在前，出口侧首行成员并进去。
+  const deferredRow0 =
+    entrySide !== null && entryMembers.length > 0
+      ? measured.filter((entry) => entry.side !== entrySide && entry.sourceIndex === 0)
+      : [];
+  const deferred = new Set<MeasuredEntry>(deferredRow0);
+  const deferredSpan = laneSpanOf(deferredRow0);
+  // 入口带存在时，入口侧的出线改从卡片底边分出（路由侧读这张表），
+  // 与"进入父卡"的中心行横线分开，读者能区分两个方向。
+  if (entrySide !== null && entryMembers.length > 0) context.entrySides.set(head.id, entrySide);
+
   const corridorAt: number[] = [];
   for (let row = 0; row < spine.length; row += 1) {
     let span = 0;
     for (const sideName of ['left', 'right'] as const) {
       if (sideName === entrySide) continue;
-      const group = measured.filter((entry) => entry.side === sideName && entry.sourceIndex === row);
+      const group = measured.filter(
+        (entry) => entry.side === sideName && entry.sourceIndex === row && !deferred.has(entry),
+      );
       if (group.length === 0) continue;
       span = Math.max(span, laneSpanOf(group));
     }
@@ -235,7 +254,7 @@ export function measureBlock(
   }
   // 兄弟 block 自己的 topExtent 是它内部再分支要的头部空间，行距必须一并容下。
   for (const entry of measured) {
-    const bandRow = entry.side === entrySide ? 1 : entry.sourceIndex;
+    const bandRow = entry.side === entrySide || deferred.has(entry) ? 1 : entry.sourceIndex;
     if (bandRow < 0 || bandRow >= spine.length) continue;
     if (entry.side === entrySide && spine.length === 1) continue;
     corridorAt[bandRow] = Math.max(corridorAt[bandRow] ?? 0, entry.block.topExtent);
@@ -243,7 +262,7 @@ export function measureBlock(
   // 入口侧整侧是一条带且落在 rowY[1]：它的干线也要在 0→1 的行间距里有位置。
   const entrySpan = laneSpanOf(entryMembers);
   if (entrySide !== null && entryMembers.length > 0 && spine.length > 1) {
-    corridorAt[1] = Math.max(corridorAt[1] ?? 0, entrySpan);
+    corridorAt[1] = Math.max(corridorAt[1] ?? 0, entrySpan, deferredSpan);
   }
 
   // 5. 逐行推进：本行侧支簇占满父行的纵向区间，主线下一个节点排在整个簇之下。
@@ -254,6 +273,8 @@ export function measureBlock(
   const bandShift = head.flow === 'branch' ? NESTED_BAND_OFFSET : 0;
   const columns: Record<LayoutSide, Column[]> = { left: [createColumn()], right: [createColumn()] };
   const placements: Placement[] = [];
+  /** 每次 placeGroup 的落位集合：同组兄弟共用一个纵向并集区间来算列宽，保证对齐。 */
+  const groups: Placement[][] = [];
   const rowY: number[] = [];
   const clusterBottom: number[] = [];
   for (let row = 0; row < spine.length; row += 1) {
@@ -267,7 +288,9 @@ export function measureBlock(
     let bandBottom = bandY;
     for (const sideName of ['right', 'left'] as const) {
       if (sideName === entrySide) continue;
-      const group = measured.filter((entry) => entry.side === sideName && entry.sourceIndex === row);
+      const group = measured.filter(
+        (entry) => entry.side === sideName && entry.sourceIndex === row && !deferred.has(entry),
+      );
       if (group.length === 0) continue;
       const laneSpan = laneSpanOf(group);
       const placed = placeGroup(
@@ -283,6 +306,7 @@ export function measureBlock(
         placements.push(placement);
         bandBottom = Math.max(bandBottom, placement.y + placement.entry.block.bottom);
       }
+      groups.push(placed);
     }
     // 入口侧整侧是一条带，固定在 rowY[1]；它同样占满这一行的纵向区间。
     if (row === 1 && entrySide !== null && entryMembers.length > 0) {
@@ -299,41 +323,110 @@ export function measureBlock(
         placements.push(placement);
         bandBottom = Math.max(bandBottom, placement.y + placement.entry.block.bottom);
       }
+      groups.push(placed);
+      // 出口侧首行成员与入口侧同带（P10）：两侧一起读作并列的同一行。
+      if (deferredRow0.length > 0) {
+        const deferredPlaced = placeGroup(
+          columns[opposite(entrySide)],
+          deferredRow0,
+          bandY + bandShift,
+          deferredSpan,
+          context.config,
+          head.id,
+          context.diagnostics,
+        );
+        for (const placement of deferredPlaced) {
+          placements.push(placement);
+          bandBottom = Math.max(bandBottom, placement.y + placement.entry.block.bottom);
+        }
+        groups.push(deferredPlaced);
+      }
     }
     clusterBottom[row] = Math.max(0, bandBottom - bandY);
   }
   const topExtent = corridorAt[0] ?? 0;
   // head 没有 next 时不新开 rowY[1] 幽灵行：入口带直接落在 head 下方。
   if (spine.length === 1 && entrySide !== null && entryMembers.length > 0) {
-    const entryBandY = head.height + Math.max(verticalGap, entrySpan) + bandShift;
-    placements.push(
-      ...placeGroup(columns[entrySide], entryMembers, entryBandY, entrySpan, context.config, head.id, context.diagnostics),
+    const entryBandY =
+      head.height + Math.max(verticalGap, entrySpan, deferredSpan) + bandShift;
+    const placed = placeGroup(
+      columns[entrySide],
+      entryMembers,
+      entryBandY,
+      entrySpan,
+      context.config,
+      head.id,
+      context.diagnostics,
     );
+    placements.push(...placed);
+    groups.push(placed);
+    // 出口侧首行成员并进同一条带（P10），不再单独占 head 自己那一行。
+    if (deferredRow0.length > 0) {
+      const deferredPlaced = placeGroup(
+        columns[opposite(entrySide)],
+        deferredRow0,
+        entryBandY,
+        deferredSpan,
+        context.config,
+        head.id,
+        context.diagnostics,
+      );
+      placements.push(...deferredPlaced);
+      groups.push(deferredPlaced);
+    }
   }
 
   // 记录每个分支在父块内落到的列，路由据此判断"最内一列"并决定是否简化。
   for (const placement of placements) context.columns.set(placement.entry.child.id, placement.column);
 
-  const leftColumns = usedColumns(columns.left);
-  const rightColumns = usedColumns(columns.right);
-  const leftWidth = columnsWidth(columns.left, leftColumns, horizontalGap);
+  // 6. 列宽按纵向区间取，不按整列取一个值。
+  //    成因（P02）：原先每列只有一个宽度，取全列所有块的最大值，与行无关。
+  //    给下方分支加一个子分支，只让下方那个块变宽，却把同一列里上方无关分组的下一列
+  //    一起推出去——两者在纵向并不相交，本来不需要互相让路。
+  //    现在每个落位只累加"与自己纵向区间相交的块"的列宽；同一带的兄弟共用一个并集
+  //    区间，所以组内仍然对齐，只有不同行的列宽可以不同。
+  const spanOfPlacement = new Map<Placement, { top: number; bottom: number }>();
+  for (const group of groups) {
+    const top = Math.min(...group.map((placement) => placement.top));
+    const bottom = Math.max(...group.map((placement) => placement.bottom));
+    for (const placement of group) spanOfPlacement.set(placement, { top, bottom });
+  }
+  const spanFor = (placement: Placement): { top: number; bottom: number } =>
+    spanOfPlacement.get(placement) ?? { top: placement.top, bottom: placement.bottom };
+
+  /** 列 1..column 合计占用的横向宽度（含每列之后的列间距）。 */
+  const stripSpan = (side: LayoutSide, column: number, span: { top: number; bottom: number }): number => {
+    let total = 0;
+    for (let index = 1; index <= column; index += 1) {
+      total += columnWidthIn(columns[side], index, span.top, span.bottom) + horizontalGap;
+    }
+    return total;
+  };
+
+  // 左侧从主脊向左编号，cardX 是主脊左边缘：块左边界要容下每一行各自需要的列宽。
+  let leftWidth = 0;
+  for (const placement of placements) {
+    if (placement.entry.side !== 'left') continue;
+    leftWidth = Math.max(leftWidth, stripSpan('left', placement.column, spanFor(placement)));
+  }
   const cardX = leftWidth;
 
   // 左侧列的条带右边界（列 1 紧贴主脊），块在条带内右对齐；右侧列左对齐。
-  const leftStripRight = new Map<number, number>();
-  let leftCursor = cardX - horizontalGap;
-  for (const column of leftColumns) {
-    leftStripRight.set(column, leftCursor);
-    leftCursor -= horizontalGap + (columns.left[column]?.width ?? 0);
-  }
+  const offsetOf = (placement: Placement): number => {
+    const span = spanFor(placement);
+    if (placement.entry.side === 'left') {
+      return cardX - horizontalGap - stripSpan('left', placement.column - 1, span) - placement.entry.block.width;
+    }
+    return cardX + cardWidth + horizontalGap + stripSpan('right', placement.column - 1, span);
+  };
 
-  const rightStripLeft = new Map<number, number>();
-  let rightCursor = cardX + cardWidth + horizontalGap;
-  for (const column of rightColumns) {
-    rightStripLeft.set(column, rightCursor);
-    rightCursor += (columns.right[column]?.width ?? 0) + horizontalGap;
+  let width = cardX + cardWidth;
+  for (const placement of placements) {
+    if (placement.entry.side !== 'right') continue;
+    const span = spanFor(placement);
+    const stripLeft = cardX + cardWidth + horizontalGap + stripSpan('right', placement.column - 1, span);
+    width = Math.max(width, stripLeft + columnWidthIn(columns.right, placement.column, span.top, span.bottom));
   }
-  const width = rightColumns.length === 0 ? cardX + cardWidth : rightCursor - horizontalGap;
 
   // 7. 合成 block 内坐标；带内分组深度只算同一带上再分支的组（入口侧在别的带，不计）。
   let bandDepth = 0;
@@ -354,10 +447,7 @@ export function measureBlock(
 
   for (const placement of placements) {
     const block = placement.entry.block;
-    const offsetX =
-      placement.entry.side === 'left'
-        ? (leftStripRight.get(placement.column) ?? cardX - horizontalGap) - block.width
-        : (rightStripLeft.get(placement.column) ?? cardX);
+    const offsetX = offsetOf(placement);
     for (const node of block.nodes) nodes.push({ node: node.node, x: offsetX + node.x, y: placement.y + node.y });
     bottom = Math.max(bottom, placement.y + block.bottom);
   }
@@ -369,7 +459,22 @@ export function measureBlock(
 }
 
 function createColumn(): Column {
-  return { intervals: [], width: 0 };
+  return { intervals: [] };
+}
+
+/**
+ * 某列在给定纵向区间内的宽度：取与之相交的块的宽度最大值。
+ * 纵向不相交的块（不同行、互不重叠）不必互相让路，这是 P02 的关键。
+ */
+function columnWidthIn(columns: Column[], column: number, top: number, bottom: number): number {
+  const state = columns[column];
+  if (state === undefined) return 0;
+  let width = 0;
+  for (const interval of state.intervals) {
+    if (interval.bottom <= top + EDGE_EPSILON || interval.top >= bottom - EDGE_EPSILON) continue;
+    width = Math.max(width, interval.width);
+  }
+  return width;
 }
 
 function ensureColumn(columns: Column[], column: number): void {
@@ -481,25 +586,12 @@ function commitGroup(
     const state = columns[target];
     if (state === undefined) continue;
     const above = Math.max(entry.block.topExtent, laneSpan);
-    state.intervals.push({ top: y - above, bottom: y + entry.block.bottom });
-    state.width = Math.max(state.width, entry.block.width);
-    placements.push({ entry, column: target, y });
+    const top = y - above;
+    const bottom = y + entry.block.bottom;
+    state.intervals.push({ top, bottom, width: entry.block.width });
+    placements.push({ entry, column: target, y, top, bottom });
   }
   return placements;
-}
-
-function usedColumns(columns: Column[]): number[] {
-  const used: number[] = [];
-  for (let column = 1; column < columns.length; column += 1) {
-    if ((columns[column]?.width ?? 0) > 0) used.push(column);
-  }
-  return used;
-}
-
-function columnsWidth(columns: Column[], used: number[], horizontalGap: number): number {
-  let total = 0;
-  for (const column of used) total += (columns[column]?.width ?? 0) + horizontalGap;
-  return total;
 }
 
 export function applyPreviousAnchor(
@@ -563,6 +655,7 @@ export function buildEdgeRoutes(
   sides: Map<string, LayoutSide>,
   groupDepths: Map<string, number>,
   columns: Map<string, number>,
+  entrySides: Map<string, LayoutSide>,
 ): BuiltRoutes {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const { cardWidth, horizontalGap } = config;
@@ -691,6 +784,11 @@ export function buildEdgeRoutes(
 
     const sourceCenterY = source.y + parent.height / 2;
     const sourceEdge = group.side === 'right' ? source.x + cardWidth : source.x;
+    // 入口侧（分支节点背向自己方向的那一侧）的子分支带落在 head 下方；
+    // 若仍从中心行横出，这截横段会与父节点连进来的那条横线重合，两个方向读不出区别。
+    // 改从卡片底边分出：入口在中心行，分出在底边，两者分开一条卡高。
+    const onEntrySide = entrySides.get(group.from) === group.side;
+    const exitY = onEntrySide ? source.y + parent.height : sourceCenterY;
     const first = group.members[0];
     if (first === undefined) continue;
 
@@ -709,15 +807,15 @@ export function buildEdgeRoutes(
         flow: 'branch',
         side: group.side,
         points: simplifyPoints([
-          { x: sourceEdge, y: sourceCenterY },
-          { x: channelX, y: sourceCenterY },
+          { x: sourceEdge, y: exitY },
+          { x: channelX, y: exitY },
           { x: channelX, y: first.targetCenterY },
           { x: first.targetEdge, y: first.targetCenterY },
         ]),
       };
       if (hasLabel(first.node)) {
-        const rise = Math.abs(first.targetCenterY - sourceCenterY);
-        const midY = (sourceCenterY + first.targetCenterY) / 2;
+        const rise = Math.abs(first.targetCenterY - exitY);
+        const midY = (exitY + first.targetCenterY) / 2;
         // 竖段够长就贴着自己的竖段，近乎等高时退回两点中点；两者在空隙里同 x。
         route.labelAnchor =
           rise < LABEL_MIN_RISE ? { x: (sourceEdge + first.targetEdge) / 2, y: midY } : { x: channelX, y: midY };
@@ -738,7 +836,7 @@ export function buildEdgeRoutes(
     // 出口竖段与最内成员的落点竖段合成一条线：空隙里只留一条竖线，最内那张的标签骑在它上面。
     // 最内按落点列取（右侧最小 dropX、左侧最大 dropX），不依赖成员数组顺序。
     // 注意共线有两处，别把这句读成缺陷：
-    //   近端（这里引入）——出口竖段 sourceCenterY→trunkY 与最内成员落点 trunkY→targetCenterY 合并；
+    //   近端（这里引入）——出口竖段 exitY→trunkY 与最内成员落点 trunkY→targetCenterY 合并；
     //   远端（既有结构）——干线末点就是最远成员的落点 dropX，任何 T 型干线都长这样。
     const innermost = group.members.reduce((best, member) =>
       group.side === 'right'
@@ -772,8 +870,8 @@ export function buildEdgeRoutes(
       to: farthest.node.id,
       trunkY,
       points: simplifyPoints([
-        { x: sourceEdge, y: sourceCenterY },
-        { x: channel, y: sourceCenterY },
+        { x: sourceEdge, y: exitY },
+        { x: channel, y: exitY },
         { x: channel, y: trunkY },
         { x: farthest.dropX, y: trunkY },
       ]),
@@ -795,7 +893,13 @@ export function buildEdgeRoutes(
         ]),
       };
       if (hasLabel(member.node)) {
-        route.labelAnchor = { x: member.dropX, y: trunkLabelY(trunkY, member.targetCenterY) };
+        // 最内成员的落点竖段与干线竖段是同一条线（merged），标签骑上去等于贴在整组的
+        // 共享通道上，会被读成整组说明。它的独占段只有那截入卡横段，所以改骑横段中点：
+        // 这条横段只通向它自己的目标卡，指向唯一。其余成员落点线独占一格空隙，照旧。
+        route.labelAnchor =
+          merged && member === innermost
+            ? { x: (member.dropX + member.targetEdge) / 2, y: member.targetCenterY }
+            : { x: member.dropX, y: trunkLabelY(trunkY, member.targetCenterY) };
         route.labelWidth = Math.max(40, horizontalGap - 16);
       }
       routes.push(route);

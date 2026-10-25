@@ -269,6 +269,7 @@ describe("工作区图约束", () => {
       name: "测试工作区",
       activeNode: null,
       rootId: null,
+      rootIds: [],
       topics: [],
       nodes: [],
     });

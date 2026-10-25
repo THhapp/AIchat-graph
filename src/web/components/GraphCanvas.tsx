@@ -15,7 +15,7 @@ import {
   type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import type { GraphNode, GraphResponse, BranchSide } from '../../shared/protocol.js';
+import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
 import type { LayoutBranchTrunk, LayoutResult } from '../layout/types.js';
 import { connectionText, type GraphView } from '../graph/viewModel.js';
 import type { SavedViewport } from '../data/readingState.js';
@@ -43,6 +43,12 @@ export interface CanvasProps {
   anchorNodeId: string | null;
   /** Screen position of the anchor captured *before* the new geometry was applied. */
   anchorScreen: { x: number; y: number } | null;
+  /**
+   * Node ids of the current topic's `GraphResponse.lastChanges[topicId].nodeIds`.
+   * Read-only decoration: it never affects geometry, and view-only actions cannot
+   * change it.
+   */
+  recentNodeIds?: ReadonlySet<string>;
 }
 
 const nodeTypes = { topic: TopicCard };
@@ -105,7 +111,7 @@ export function buildFlowEdges(layout: LayoutResult, view: GraphView): Edge[] {
 }
 
 function CanvasInner(props: CanvasProps): React.JSX.Element {
-  const { graph, view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, anchorScreen } = props;
+  const { graph, view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, anchorScreen, recentNodeIds } = props;
   const { fitView, getNode, setViewport, getViewport } = useReactFlow();
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -165,11 +171,6 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
     const collapsed = new Set(view.collapsedIds);
     // Each card keeps its own height (title wrap); width stays shared by the layout.
     const heights = layout.heights;
-    // The side a branch actually landed on, so the card hint matches the drawing.
-    const edgeSides = new Map<string, BranchSide>();
-    for (const route of layout.edgeRoutes) {
-      if (route.side !== undefined) edgeSides.set(route.id, route.side);
-    }
     const result: Node<TopicCardData>[] = [];
     for (const node of view.nodes) {
       const position = layout.positions[node.id];
@@ -191,21 +192,19 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
           node,
           height,
           active: node.id === activeNodeId,
-          // Only the incoming edge carries this node's direction.
-          resolvedSide: node.from === null ? null : edgeSides.get(node.from + '->' + node.id) ?? null,
           // The UI owns this number: it counts descendants hidden by this collapse
           // within the current topic filter. Layout only receives already-filtered
           // input, so its hiddenCounts cannot know about them.
           hiddenCount: view.hiddenDescendantCounts.get(node.id) ?? 0,
           collapsed: collapsed.has(node.id),
           childCount: children.get(node.id) ?? 0,
+          recent: recentNodeIds?.has(node.id) ?? false,
           onToggleCollapse,
-          onOpenDetail: onOpenNodeDetail,
         },
       });
     }
     return result;
-  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, onOpenNodeDetail]);
+  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, recentNodeIds]);
 
   // `layout` is the dependency that carries `edgeRoutes` and `branchTrunks`
   // together, so a new trunk set always rebuilds the edge list.
@@ -401,6 +400,14 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
         panOnDrag
         zoomOnScroll
         zoomOnPinch
+        /*
+         * Double-click belongs to the card, not to the canvas. React Flow's pane
+         * listens for dblclick through d3-zoom and calls stopImmediatePropagation
+         * there, so an ancestor swallows the event before React's delegated
+         * handler runs: with zoom-on-double-click on, `onNodeDoubleClick` never
+         * fires. Zooming stays available through the controls and the wheel.
+         */
+        zoomOnDoubleClick={false}
         minZoom={0.2}
         maxZoom={1.6}
         fitView={false}

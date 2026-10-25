@@ -75,7 +75,10 @@ function alignEnd(text: string, end: number): number {
 export function normalizeLength(length: number | undefined): number {
   if (length === undefined) return DEFAULT_READ_LENGTH;
   if (!Number.isInteger(length) || length < 1) {
-    throw new RangeError("length 必须是正整数: " + String(length));
+    // 非法长度是参数错误，不是内部错误：消息里给出有效范围，调用方无需猜。
+    throw new RangeError(
+      "length 必须是 1-" + String(MAX_READ_SEGMENT) + " 之间的整数，收到 " + String(length),
+    );
   }
   return Math.min(length, MAX_READ_SEGMENT);
 }

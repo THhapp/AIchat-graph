@@ -117,6 +117,13 @@ function Update-DailySnapshot {
     }
     [void](New-Item -ItemType Directory -Path (Join-Path $ready 'skills'))
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'skills\aichat-graph') -Destination (Join-Path $ready 'skills') -Recurse
+    # local.env.json 是本机安装绑定（CLI／工作区绝对路径），不属于通用内容。
+    # 源码树里混入时明确提示并剔除，避免随快照发布或覆盖使用者的实际配置。
+    $strayConfig = Join-Path $ready 'skills\aichat-graph\local.env.json'
+    if (Test-Path -LiteralPath $strayConfig) {
+      Remove-Item -LiteralPath $strayConfig -Force
+      Write-Info '源码树中的 local.env.json 属于本机绑定，已排除在快照之外。'
+    }
     Write-Info '准备日用快照的独立运行依赖（npm ci --omit=dev --ignore-scripts）…'
     $npm = Get-NpmCommand
     Push-Location -LiteralPath $ready
@@ -158,6 +165,17 @@ function Update-DailySnapshot {
       throw
     }
     Write-Info ('日用快照已准备：' + $DailyRoot)
+    # 旧快照中若有本机绑定，原样带回新快照；不生成、不改写其中的路径。
+    $previousConfig = Join-Path $previous 'skills\aichat-graph\local.env.json'
+    if (Test-Path -LiteralPath $previousConfig) {
+      try {
+        Copy-Item -LiteralPath $previousConfig -Destination (Join-Path $DailyRoot 'skills\aichat-graph\local.env.json') -Force
+      } catch {
+        $preserveStage = $true
+        throw ('新快照已就位，但本机绑定 local.env.json 未能保留；旧文件仍在：' + $previousConfig + '：' + $_.Exception.Message)
+      }
+      Write-Info '已保留本机绑定 local.env.json（内容未修改）。'
+    }
     Write-Info '仅更新程序文件和 Skill，没有更改工作区或本机启动配置。'
   } catch { $updateError = $_.Exception.Message }
   finally {

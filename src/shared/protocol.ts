@@ -53,6 +53,11 @@ export interface GraphNode {
   /** branch only; integer ordering among siblings of the same source. */
   order?: number;
   /**
+   * Important flag: "worth attention", nothing else. It never affects numbering,
+   * connection or order, and defaults to false for sources without the field.
+   */
+  important: boolean;
+  /**
    * Why this node connects to its source (format 2). Format 1 workspaces may still
    * carry a short display label here; treat label as compatibility, description as truth.
    */
@@ -111,6 +116,17 @@ export interface WorkspaceResponse extends SnapshotVersion {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * Nodes whose source file was created or actually rewritten by a topic's latest
+ * successful commit. View-only actions, numbering, revisions, exports and reads
+ * never replace it; a failed or rolled-back commit never produces one.
+ */
+export interface LastChange {
+  /** ISO timestamp of the accepted commit. */
+  at: string;
+  nodeIds: string[];
+}
+
 /** GET /api/graph */
 export interface GraphResponse extends SnapshotVersion {
   topicMode?: 'isolated' | 'shared';
@@ -120,6 +136,11 @@ export interface GraphResponse extends SnapshotVersion {
   diagnostics: Diagnostic[];
   nodes: GraphNode[];
   topics: GraphTopic[];
+  /**
+   * Latest content change per stable topicId. A change in one topic never
+   * replaces another topic's record. Absent when no topic has a record.
+   */
+  lastChanges?: Record<string, LastChange>;
 }
 
 /** GET /api/topics */
@@ -171,6 +192,26 @@ export interface TopicDetailResponse extends SnapshotVersion {
   /** Nodes in original file order (the topic reading order). */
   nodes: TopicNodeDetail[];
   diagnostics: Diagnostic[];
+}
+
+/**
+ * POST /api/importance — flip a node's important flag.
+ *
+ * Only this one metadata field changes; body editing stays on the write channel.
+ * expectedHash is the SHA-256 of the node source bytes the caller actually saw;
+ * when supplied and no longer current the request fails with 412.
+ */
+export interface ImportanceRequest {
+  topicId: string;
+  nodeId: string;
+  important: boolean;
+  expectedHash?: string | undefined;
+}
+
+export interface ImportanceResponse extends SnapshotVersion {
+  ok: true;
+  /** Node as it exists in the published snapshot. */
+  node: GraphNode;
 }
 
 export type SearchField = 'title' | 'summary' | 'body';
@@ -284,6 +325,8 @@ export interface AgentNodeReadResponse extends SnapshotVersion {
   node: GraphNode;
   /** Requested fragment of the node body; full body only with full=true. */
   body: string;
+  /** true 表示只返回元数据与 editRef，正文被明确省略（meta=true）。 */
+  bodyOmitted?: boolean;
   range: AgentReadRange;
   truncated: boolean;
   /** Real source file of this node (format 2: the node's own Markdown). */
@@ -354,6 +397,37 @@ export interface AgentUpdateConnectionAction {
   description: string;
 }
 
+/**
+ * 一次表达若干节点的最终入边；服务端在同一批候选里先腾空再落位，
+ * 中间排序只存在于内存，不落盘、不进入最终图。
+ */
+export interface AgentRearrangeEdit {
+  /** 要改接的节点。 */
+  editRef: string;
+  /** 最终来源节点。 */
+  fromRef: string;
+  flow: 'next' | 'branch';
+  /** 仅 flow=branch 允许。 */
+  side?: BranchSide;
+  /** 仅 flow=branch 允许。 */
+  order?: number;
+  /** 最终连接的说明，非空单行。 */
+  description: string;
+}
+
+export interface AgentRearrangeAction {
+  action: 'rearrange';
+  /** 至少 1 条。 */
+  edits: AgentRearrangeEdit[];
+}
+
+/** 只翻转一张卡片的重要标记；不手写底层 apply JSON。 */
+export interface AgentSetImportanceAction {
+  action: 'setImportance';
+  editRef: string;
+  important: boolean;
+}
+
 export interface AgentCreateRootAction {
   action: 'createRoot';
   topicTitle: string;
@@ -377,6 +451,8 @@ export type AgentChangeAction =
   | AgentCreateBranchAction
   | AgentCreateNextAction
   | AgentUpdateConnectionAction
+  | AgentRearrangeAction
+  | AgentSetImportanceAction
   | AgentCreateRootAction
   | AgentCreateTopicAction;
 
@@ -413,6 +489,11 @@ export interface AgentChangeResponse extends SnapshotVersion {
   }>;
   /** New credential for the primary affected node, when it is still readable. */
   editRef: AgentEditRef | null;
+  /**
+   * 按 nodeId 索引的刷新后凭据，覆盖本次 changedNodeIds 中仍在快照里的节点；
+   * 提交／无操作后有效，committed_refresh_pending 时为空对象或省略。
+   */
+  editRefs?: Record<string, AgentEditRef>;
   summary: string;
   diagnostics: Diagnostic[];
   transactionId: string | null;

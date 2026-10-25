@@ -17,6 +17,8 @@ coverage/
 *.env
 .envrc
 !.env.example
+# 已安装 Skill 的本机安装绑定（CLI／工作区绝对路径），不入库
+**/local.env.json
 *.pem
 *.key
 *.pfx

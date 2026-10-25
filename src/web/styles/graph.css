@@ -113,17 +113,33 @@
   min-height: 0;
 }
 .topic-card__foot { display: flex; align-items: center; gap: var(--space-2); height: 16px; min-height: 16px; min-width: 0; }
-.topic-card__flow { font-size: var(--text-2xs); color: var(--text-muted); flex: none; }
-.topic-card__open {
+/* Recent-change marker lives in the row the direction text used to occupy, so a
+   marked card keeps exactly the height the layout reserved for it. */
+.topic-card__recent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
   font-size: var(--text-2xs);
   line-height: 1;
-  padding: 1px 5px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
+  color: var(--danger);
+  flex: none;
+  white-space: nowrap;
+}
+.topic-card__recent-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--danger);
   flex: none;
 }
-.topic-card__open:hover { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
+/* Importance marker: a glyph inside the 24px header row, never a new box. */
+.topic-card__pin {
+  font-size: var(--text-2xs);
+  line-height: 1;
+  color: var(--danger);
+  flex: none;
+}
 
 .rf-handle { opacity: 0; pointer-events: none; width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; }
 

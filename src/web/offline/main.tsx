@@ -84,6 +84,9 @@ function OfflineReader(): React.JSX.Element {
   const [tab, setTab] = useState<'node' | 'topic'>('node');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  /** Directory folds are separate from the graph, exactly like the live reader. */
+  const [navCollapsed, setNavCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [expandedTopics, setExpandedTopics] = useState<ReadonlySet<string> | null>(null);
   const [fitSignal, setFitSignal] = useState(FIT_SIGNAL_NONE);
   const [savedViewport] = useState<null>(null);
   const [copied, setCopied] = useState(false);
@@ -288,13 +291,29 @@ function OfflineReader(): React.JSX.Element {
             query={query}
             onQueryChange={setQuery}
             results={results}
-            collapsed={collapsed}
             activeNodeId={null}
             selectedNodeId={selectedNodeId}
             topicFilter={null}
             onSelectNode={setSelectedNodeId}
             onOpenTopic={() => { setTab('topic'); setRightOpen(true); }}
-            onToggleCollapse={toggleCollapse}
+            navCollapsed={navCollapsed}
+            expandedTopicIds={expandedTopics ?? new Set(graph.topics.map((topic) => topic.id))}
+            onToggleNavNode={(id) => {
+              setNavCollapsed((current) => {
+                const next = new Set(current);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+              });
+            }}
+            onToggleTopicFolder={(id) => {
+              setExpandedTopics((current) => {
+                const next = new Set(current ?? graph.topics.map((topic) => topic.id));
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+              });
+            }}
             onTopicFilter={() => { /* offline: single topic, nothing to filter */ }}
             onSelectTopicPath={() => { setTab('topic'); setRightOpen(true); }}
             onClose={() => { setLeftOpen(false); }}

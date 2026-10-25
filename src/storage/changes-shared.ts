@@ -47,6 +47,11 @@ export class ChangeError extends Error {
 export interface PreparedChanges {
   readonly files: CommitFileInput[];
   readonly changedNodeIds: string[];
+  /**
+   * 节点文件内容被真实新建或改写的节点。
+   * 格式 2 由候选层精确给出（不含删除、不含仅改重要性的节点）；缺省时按 changedNodeIds 理解。
+   */
+  readonly contentNodeIds?: string[];
   readonly diagnostics: StorageDiagnostic[];
   readonly summary: string;
 }

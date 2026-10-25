@@ -25,7 +25,10 @@ import type {
   AgentEditRef,
   AgentNodeReadResponse,
   AgentPatchNodeAction,
+  AgentReadRange,
+  AgentRearrangeAction,
   AgentSection,
+  AgentSetImportanceAction,
   AgentUpdateConnectionAction,
   Diagnostic,
   GraphNode,
@@ -35,7 +38,12 @@ import type {
   V2Operation,
 } from "../storage/index.js";
 import { normalizeRelativePath } from "../storage/paths.js";
-import { DEFAULT_READ_LENGTH, MAX_READ_SEGMENT, sliceBody } from "../core/index.js";
+import {
+  DEFAULT_READ_LENGTH,
+  MAX_READ_SEGMENT,
+  locateSection,
+  sliceBody,
+} from "../core/index.js";
 import type { ParsedNode } from "../core/index.js";
 import type { WorkspaceRuntime } from "./workspace.js";
 import type { SnapshotData, TopicSnapshot } from "./snapshot.js";
@@ -116,6 +124,48 @@ const updateConnectionActionSchema = z.strictObject({
   description: singleLine("description"),
 });
 
+/**
+ * rearrange 的一条最终入边：只表达"最后接到哪里"，不表达中间步骤。
+ * flow=next 时 side／order 没有意义，出现即拒绝（400 级校验错误）。
+ */
+const rearrangeEditSchema = z
+  .strictObject({
+    editRef: singleLine("editRef"),
+    fromRef: singleLine("fromRef"),
+    flow: z.enum(["next", "branch"]),
+    side: branchSideSchema.optional(),
+    order: z.int().min(0).optional(),
+    description: singleLine("description"),
+  })
+  .superRefine((value, ctx) => {
+    if (value.flow !== "next") return;
+    if (value.side !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["side"],
+        message: "flow=next 时不能带 side（纵向后继不使用左右排布）",
+      });
+    }
+    if (value.order !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["order"],
+        message: "flow=next 时不能带 order（纵向后继不使用兄弟排序）",
+      });
+    }
+  });
+
+const rearrangeActionSchema = z.strictObject({
+  action: z.literal("rearrange"),
+  edits: z.array(rearrangeEditSchema).min(1),
+});
+
+const setImportanceActionSchema = z.strictObject({
+  action: z.literal("setImportance"),
+  editRef: z.string().min(1),
+  important: z.boolean(),
+});
+
 const createRootActionSchema = z.strictObject({
   action: z.literal("createRoot"),
   topicTitle: singleLine("topicTitle"),
@@ -143,6 +193,8 @@ export const agentChangeRequestSchema = z.strictObject({
     createBranchActionSchema,
     createNextActionSchema,
     updateConnectionActionSchema,
+    rearrangeActionSchema,
+    setImportanceActionSchema,
     createRootActionSchema,
     createTopicActionSchema,
   ]),
@@ -157,6 +209,12 @@ export interface AgentReadQuery {
   readonly start?: number | undefined;
   readonly length?: number | undefined;
   readonly full?: boolean | undefined;
+  /** 只取元数据与 editRef，不返回正文（不能与其他定位／切片参数同时使用）。 */
+  readonly meta?: boolean | undefined;
+  /** 按标题定位章节；start 取该章节起点。 */
+  readonly section?: string | undefined;
+  /** 同名标题中的第几个（0 起）；必须与 section 一起使用。 */
+  readonly sectionIndex?: number | undefined;
 }
 
 function parseOffset(raw: string | undefined, label: string): number | undefined {
@@ -182,10 +240,62 @@ export function parseAgentReadQuery(query: Record<string, string | undefined>): 
   if (fullRaw !== undefined && fullRaw !== "true" && fullRaw !== "false" && fullRaw !== "") {
     throw new ServiceError(400, "BAD_REQUEST", "full 只接受 true 或省略", {});
   }
+  const metaRaw = query["meta"];
+  if (metaRaw !== undefined && metaRaw !== "true" && metaRaw !== "false" && metaRaw !== "") {
+    throw new ServiceError(400, "BAD_REQUEST", "meta 只接受 true 或省略", {});
+  }
+  const meta = metaRaw === "true" || metaRaw === "";
+
+  let section: string | undefined;
+  const sectionRaw = query["section"];
+  if (sectionRaw !== undefined) {
+    const trimmed = sectionRaw.trim();
+    if (trimmed.length === 0) {
+      throw new ServiceError(
+        400,
+        "BAD_REQUEST",
+        "section 去空白后不能为空；请给出正文里的标题，例如 --section \"小节一\"",
+        {},
+      );
+    }
+    section = trimmed;
+  }
+  const sectionIndex = parseOffset(query["section-index"], "section-index");
+  if (sectionIndex !== undefined && section === undefined) {
+    throw new ServiceError(
+      400,
+      "BAD_REQUEST",
+      "section-index 必须与 section 一起使用；单独给出无法定位章节",
+      {},
+    );
+  }
+
+  if (meta) {
+    // meta 只返回元数据与 editRef；切片／章节参数会让人误以为正文仍被返回。
+    const conflicts = [
+      query["start"] !== undefined ? "start" : undefined,
+      query["length"] !== undefined ? "length" : undefined,
+      query["full"] !== undefined ? "full" : undefined,
+      query["section"] !== undefined ? "section" : undefined,
+      query["section-index"] !== undefined ? "section-index" : undefined,
+    ].filter((item): item is string => item !== undefined);
+    if (conflicts.length > 0) {
+      throw new ServiceError(
+        400,
+        "BAD_REQUEST",
+        "meta=true 不能与 " + conflicts.join("／") + " 同时使用；meta 读取不含正文，请去掉这些参数",
+        { details: { conflicts } },
+      );
+    }
+  }
+
   return {
     start,
     length,
     full: fullRaw === "true" || fullRaw === "",
+    ...(meta ? { meta: true } : {}),
+    ...(section !== undefined ? { section } : {}),
+    ...(sectionIndex !== undefined ? { sectionIndex } : {}),
   };
 }
 
@@ -270,16 +380,67 @@ export function readAgentNode(context: AgentReadContext): AgentNodeReadResponse 
   }
   const { node, topic, view, fileHash } = found;
   const body = node.body;
-  // 切片统一复用 core 的纯 helper：UTF-16 单位、不切断代理对、
-  // truncated = start > 0 || end < total。
-  const segment = sliceBody(body, {
-    start: query.start ?? 0,
-    ...(query.length !== undefined ? { length: query.length } : {}),
-    full: query.full === true,
-  });
-  const section = sectionAt(sectionsOf(body), segment.range.start);
-  const fragment = segment.text;
-  const truncated = segment.truncated;
+  const sections = sectionsOf(body);
+
+  // section 定位走 core 的 AST helper；在线与离线共用同一份实现。
+  let rangeStart = query.start ?? 0;
+  let locatedSection: AgentSection | null = null;
+  if (query.section !== undefined) {
+    let location;
+    try {
+      location = locateSection(body, query.section, query.sectionIndex);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        throw new ServiceError(400, "INVALID_SECTION", error.message, {
+          details: {
+            section: query.section,
+            ...(query.sectionIndex !== undefined ? { sectionIndex: query.sectionIndex } : {}),
+          },
+        });
+      }
+      throw error;
+    }
+    rangeStart = location.start;
+    const known = sections.find((entry) => entry.start === location.start);
+    if (known !== undefined) {
+      locatedSection = known;
+    } else {
+      // AST 能识别缩进 0-3 格的标题，本地正则只认行首；仍返回同一位置。
+      const lineEnd = body.indexOf("\n", location.start);
+      locatedSection = {
+        index: location.index,
+        title: location.title,
+        level: location.level,
+        start: location.start,
+        end: lineEnd === -1 ? body.length : lineEnd,
+      };
+    }
+  }
+
+  let fragment: string;
+  let range: AgentReadRange;
+  let truncated: boolean;
+  let section: AgentSection | null;
+  if (query.meta === true) {
+    // meta 只给元数据与 editRef：正文明确省略，range 以 0/0 表达。
+    fragment = "";
+    range = { start: 0, end: 0, total: body.length, unit: "utf16" };
+    truncated = false;
+    section = null;
+  } else {
+    // 切片统一复用 core 的纯 helper：UTF-16 单位、不切断代理对、
+    // truncated = start > 0 || end < total。
+    const segment = sliceBody(body, {
+      start: rangeStart,
+      ...(query.length !== undefined ? { length: query.length } : {}),
+      full: query.full === true,
+    });
+    fragment = segment.text;
+    range = segment.range;
+    truncated = segment.truncated;
+    // 显式 section 返回定位到的章节；否则保留"包含 range.start 的最近章节"。
+    section = locatedSection ?? sectionAt(sections, range.start);
+  }
 
   const issued = editRefs.issue({
     workspaceId: snapshot.workspaceId,
@@ -300,6 +461,7 @@ export function readAgentNode(context: AgentReadContext): AgentNodeReadResponse 
     from: view.from,
     flow: view.flow,
     state: view.state,
+    important: view.important,
     ...(view.description !== undefined ? { description: view.description } : {}),
     ...(view.side !== undefined ? { side: view.side } : {}),
     ...(view.order !== undefined ? { order: view.order } : {}),
@@ -312,7 +474,8 @@ export function readAgentNode(context: AgentReadContext): AgentNodeReadResponse 
     workspaceId: snapshot.workspaceId,
     node: graphNode,
     body: fragment,
-    range: segment.range,
+    ...(query.meta === true ? { bodyOmitted: true } : {}),
+    range,
     truncated,
     path: node.sourcePath,
     fileHash,
@@ -577,6 +740,14 @@ export function compileAgentAction(
     );
   }
 
+  if (action.action === "rearrange") {
+    return compileRearrange(context, action);
+  }
+
+  if (action.action === "setImportance") {
+    return compileSetImportance(context, action);
+  }
+
   return compileCreateRoot(context, action);
 }
 
@@ -598,6 +769,218 @@ function resolveFromRef(
     });
   }
   return binding.nodeId;
+}
+
+/** 同一路径被两个凭据读出不同哈希：拒绝拿任何一边覆盖，先重新读取。 */
+function conflictingHashes(
+  path: string,
+  firstHash: string,
+  secondHash: string,
+): ServiceError {
+  return new ServiceError(
+    412,
+    "VERSION_CONFLICT",
+    "同一源文件出现两份不一致的读取哈希（凭据读数不一致）；请重新读取相关节点后再 rearrange",
+    { details: { path, firstSha256: firstHash, secondSha256: secondHash } },
+  );
+}
+
+/** 合并 expectedFiles；同一路径哈希不一致时立即 412，绝不静默选一个。 */
+function mergeExpected(
+  target: Record<string, string | null>,
+  source: Record<string, string | null>,
+): void {
+  for (const [path, hash] of Object.entries(source)) {
+    const existing = target[path];
+    if (existing !== undefined && existing !== null && hash !== null && existing !== hash) {
+      throw conflictingHashes(path, existing, hash);
+    }
+    target[path] = hash;
+  }
+}
+
+/**
+ * rearrange：一次表达若干节点的最终入边。
+ *
+ * 只生成现有 updateConnection 操作，分两步：
+ * 1. 腾空——当前是 next、但最终 from 不同或最终不是 next 的节点，先退成
+ *    当前来源下的 branch；这些中间状态只存在于内存候选，不落盘。
+ * 2. 落位——按调用方的最终关系逐条 updateConnection。
+ *
+ * 最终唯一 next／无环／结构由候选层整图校验负责；这里不覆盖未在 edits 中
+ * 声明的旧后继，占用冲突会自然得到 409。
+ */
+function compileRearrange(
+  context: CompileContext,
+  action: AgentRearrangeAction,
+): CompiledAction {
+  const snapshot = context.runtime.current.data;
+  if (snapshot.schemaVersion !== 2) {
+    throw new ServiceError(
+      409,
+      "OPERATION_CONFLICT",
+      "rearrange 仅用于格式 2 工作区（一节点一份 Markdown）；格式 1 没有可安全改接的节点文件",
+      { details: { schemaVersion: snapshot.schemaVersion } },
+    );
+  }
+
+  interface Target {
+    readonly nodeId: string;
+    readonly fromNodeId: string;
+    readonly flow: "next" | "branch";
+    readonly side: "left" | "right" | undefined;
+    readonly order: number | undefined;
+    readonly description: string;
+    readonly currentFrom: string | null;
+    readonly currentFlow: GraphNode["flow"];
+    readonly currentDescription: string | undefined;
+  }
+
+  const expected: Record<string, string | null> = {};
+  const targets: Target[] = [];
+  const seen = new Set<string>();
+
+  for (const edit of action.edits) {
+    const targetBinding = context.editRefs.resolve(edit.editRef);
+    if (targetBinding === null) {
+      throw new ServiceError(409, "STALE_EDIT_REF", "editRef 无效或已过期；请重新读取要改接的节点", {
+        details: { editRef: edit.editRef.slice(0, 24) },
+      });
+    }
+    const fromBinding = context.editRefs.resolve(edit.fromRef);
+    if (fromBinding === null) {
+      throw new ServiceError(409, "STALE_EDIT_REF", "fromRef 无效或已过期；请重新读取最终来源节点", {
+        details: { fromRef: edit.fromRef.slice(0, 24) },
+      });
+    }
+    if (seen.has(targetBinding.nodeId)) {
+      throw new ServiceError(
+        422,
+        "VALIDATION_FAILED",
+        "rearrange 的 edits 重复指向同一节点：" + targetBinding.nodeId + "；每个节点只能有一条最终入边",
+        { details: { nodeId: targetBinding.nodeId } },
+      );
+    }
+    seen.add(targetBinding.nodeId);
+
+    const targetView = snapshot.graph.nodes.find((entry) => entry.id === targetBinding.nodeId);
+    if (targetView === undefined) {
+      throw new ServiceError(409, "STALE_EDIT_REF", "editRef 指向的节点不在当前快照中", {
+        details: { nodeId: targetBinding.nodeId },
+      });
+    }
+    if (targetView.flow === "root") {
+      throw new ServiceError(
+        422,
+        "VALIDATION_FAILED",
+        "rearrange 不能改接 root 节点；每个工作区／隔离主题只能有一个根",
+        { details: { nodeId: targetView.id } },
+      );
+    }
+    const fromView = snapshot.graph.nodes.find((entry) => entry.id === fromBinding.nodeId);
+    if (fromView === undefined) {
+      throw new ServiceError(409, "STALE_EDIT_REF", "fromRef 指向的节点不在当前快照中", {
+        details: { nodeId: fromBinding.nodeId },
+      });
+    }
+    if (snapshot.topicMode === "isolated" && targetView.topicId !== fromView.topicId) {
+      throw new ServiceError(
+        409,
+        "OPERATION_CONFLICT",
+        "隔离主题不能把节点改接到其他主题的来源",
+        { details: { topicId: targetView.topicId, sourceTopicId: fromView.topicId } },
+      );
+    }
+
+    // 目标与来源都按"读取时哈希"声明；快照已变或两凭据不一致都在写盘前失败。
+    mergeExpected(expected, expectedForBinding(snapshot, targetBinding));
+    mergeExpected(expected, expectedForBinding(snapshot, fromBinding));
+
+    targets.push({
+      nodeId: targetBinding.nodeId,
+      fromNodeId: fromBinding.nodeId,
+      flow: edit.flow,
+      side: edit.flow === "branch" ? edit.side : undefined,
+      order: edit.flow === "branch" ? edit.order : undefined,
+      description: edit.description.trim(),
+      currentFrom: targetView.from,
+      currentFlow: targetView.flow,
+      currentDescription: targetView.description,
+    });
+  }
+
+  const operations: V2Operation[] = [];
+  // 先腾空所有需要让出 next 位置的节点，再统一落位。
+  for (const target of targets) {
+    const finalIsNext = target.flow === "next";
+    if (
+      target.currentFlow === "next" &&
+      (target.fromNodeId !== target.currentFrom || !finalIsNext)
+    ) {
+      operations.push({
+        op: "updateConnection",
+        nodeId: target.nodeId,
+        flow: "branch",
+        description:
+          target.currentDescription !== undefined && target.currentDescription.trim().length > 0
+            ? target.currentDescription
+            : target.description,
+      });
+    }
+  }
+  for (const target of targets) {
+    operations.push({
+      op: "updateConnection",
+      nodeId: target.nodeId,
+      from: target.fromNodeId,
+      flow: target.flow,
+      ...(target.flow === "branch" && target.side !== undefined ? { side: target.side } : {}),
+      ...(target.flow === "branch" && target.order !== undefined ? { order: target.order } : {}),
+      description: target.description,
+    });
+  }
+
+  return {
+    operations,
+    expectedFiles: expected,
+    created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
+    // rearrange 是多节点操作：不签发单节点兼容 editRef，凭据统一走 editRefs。
+    primaryNodeId: null,
+    action: action.action,
+  };
+}
+
+/** setImportance：只改一项元数据；值未变由候选层按 no-op 处理。 */
+function compileSetImportance(
+  context: CompileContext,
+  action: AgentSetImportanceAction,
+): CompiledAction {
+  const snapshot = context.runtime.current.data;
+  if (snapshot.schemaVersion !== 2) {
+    throw new ServiceError(
+      409,
+      "OPERATION_CONFLICT",
+      "重要标记只支持格式 2 工作区（一节点一份 Markdown）；格式 1 没有该写入口",
+      { details: { schemaVersion: snapshot.schemaVersion } },
+    );
+  }
+  const { binding } = requireEditRef(context, action.editRef);
+  const resolved = binding as NonNullable<typeof binding>;
+  const expected = expectedForBinding(snapshot, resolved);
+  if (!snapshot.graph.nodes.some((entry) => entry.id === resolved.nodeId)) {
+    throw new ServiceError(409, "STALE_EDIT_REF", "editRef 指向的节点不在当前快照中", {
+      details: { nodeId: resolved.nodeId },
+    });
+  }
+  return {
+    operations: [
+      { op: "setImportance", nodeId: resolved.nodeId, important: action.important },
+    ] as V2Operation[],
+    expectedFiles: expected,
+    created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
+    primaryNodeId: resolved.nodeId,
+    action: action.action,
+  };
 }
 
 function compileCreateBranch(context: CompileContext, action: AgentCreateBranchAction): CompiledAction {

@@ -260,6 +260,32 @@ describe('branch columns', () => {
     expect(penetrated(result)).toEqual([]);
   });
 
+  it('keeps an unrelated upper group in place when a lower branch gains a child', () => {
+    const base: LayoutNodeInput[] = [
+      node('r', null, 'root'),
+      node('s2', 'r', 'next'),
+      node('s3', 's2', 'next'),
+      node('a1', 'r', 'branch', { side: 'right', order: 10 }),
+      node('a2', 'r', 'branch', { side: 'right', order: 20 }),
+      node('b1', 's2', 'branch', { side: 'right', order: 10 }),
+    ];
+    const grown = [...base, node('b1x', 'b1', 'branch', { side: 'right', order: 10 })];
+    const before = computeLayout({ nodes: base });
+    const after = computeLayout({ nodes: grown });
+
+    // 上方分组与主脊完全不动。列宽按纵向区间取：b1 的块变宽只影响与它纵向相交的行，
+    // 上方 a1/a2 与 b1 不在同一段区间，因此原来的全局列宽扩张不再发生。
+    for (const id of ['r', 'a1', 'a2', 'b1']) expect(pos(after, id)).toEqual(pos(before, id));
+
+    // 子分支只占 b1 自己那一列外侧的一格，落回嵌套带的 24px 提示。
+    expect(pos(after, 'b1x').x).toBe(pos(after, 'b1').x + W + HG);
+    expect(pos(after, 'b1x').y).toBe(pos(after, 'b1').y + 24);
+
+    expect(overlaps(after)).toEqual([]);
+    expect(penetrated(after)).toEqual([]);
+    expect(after.diagnostics).toEqual([]);
+  });
+
   it('keeps a later spine node branch on its own parent band in the nearest column', () => {
     const nodes: LayoutNodeInput[] = [
       node('r', null, 'root'),
@@ -749,15 +775,18 @@ describe('route labels', () => {
       const anchor = edge.labelAnchor;
       if (anchor === undefined) throw new Error('missing label anchor ' + edge.id);
       const target = pos(result, edge.to);
-      // 标签落在目标列左侧的空隙中心，不再共用出口竖线的 x。
-      expect(anchor.x).toBe(target.x - gap / 2);
+      // 最内成员（b1）的落点竖段就是干线竖段，标签改骑自己的入卡横段中点；
+      // 其余成员落在自己那一格的落点线上，都与共享出口竖线的 x 不同。
+      const innermost = edge.to === 'b1';
+      expect(anchor.x).toBe(innermost ? target.x - gap / 4 : target.x - gap / 2);
       anchors.push(anchor.x);
       expect(insideAnyCard(result, anchor)).toEqual([]);
 
       // 文字框（labelWidth + 8 内边距，高度按 3 行粗略估计）不压任何卡。
+      // 水平位置按渲染端的同一条防御边界复算：板不许越过目标卡的入口边（右侧卡是左边缘）。
       const width = (edge.labelWidth ?? 0) + 8;
-      const x0 = anchor.x - width / 2;
-      const x1 = anchor.x + width / 2;
+      const x0 = Math.min(anchor.x - width / 2, target.x - width);
+      const x1 = x0 + width;
       const y0 = anchor.y - 30;
       const y1 = anchor.y + 30;
       const hits = rects(result).filter((rect) => x0 < rect.right && x1 > rect.x && y0 < rect.bottom && y1 > rect.y);
@@ -766,6 +795,59 @@ describe('route labels', () => {
     expect(new Set(anchors).size).toBe(6);
     expect(overlaps(result)).toEqual([]);
     expect(penetrated(result)).toEqual([]);
+  });
+
+  it('keeps the innermost branch label on its own entry run, off the shared exit riser', () => {
+    const result = computeLayout({
+      nodes: [
+        node('r', null, 'root'),
+        node('b1', 'r', 'branch', { side: 'right', order: 10, label: '第一个分支的说明' }),
+        node('b2', 'r', 'branch', { side: 'right', order: 20, label: '第二个分支的说明' }),
+        node('b3', 'r', 'branch', { side: 'right', order: 30, label: '第三个分支的说明' }),
+      ],
+    });
+    const trunk = result.branchTrunks[0];
+    if (trunk === undefined) throw new Error('missing trunk');
+
+    /** 点是否落在干线（多条关系共用的段）内部。 */
+    const onSharedRun = (point: { x: number; y: number }): boolean => {
+      for (let index = 1; index < trunk.points.length; index += 1) {
+        const a = trunk.points[index - 1];
+        const b = trunk.points[index];
+        if (a === undefined || b === undefined) continue;
+        if (Math.abs(a.y - b.y) < 0.01) {
+          if (Math.abs(point.y - a.y) < 0.01 && point.x > Math.min(a.x, b.x) && point.x < Math.max(a.x, b.x)) {
+            return true;
+          }
+        } else if (Math.abs(point.x - a.x) < 0.01 && point.y > Math.min(a.y, b.y) && point.y < Math.max(a.y, b.y)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // 共享段只画一次，说明文字挂上去就会被读成整组说明：任何一条都不能骑在上面。
+    for (const edge of result.edgeRoutes) {
+      if (edge.flow !== 'branch') continue;
+      const anchor = edge.labelAnchor;
+      if (anchor === undefined) throw new Error('missing label ' + edge.id);
+      expect(onSharedRun(anchor)).toBe(false);
+    }
+
+    // 最内支线的共享段就是它的落点竖段：说明改骑自己的入卡横段中点，只指向这张卡。
+    const inner = route(result, 'r->b1');
+    const target = pos(result, 'b1');
+    const anchor = inner.labelAnchor;
+    if (anchor === undefined) throw new Error('missing label r->b1');
+    expect(anchor.y).toBe(target.y + H / 2);
+    expect(anchor.x).toBeGreaterThan(inner.join?.x ?? 0);
+    expect(anchor.x).toBeLessThan(target.x);
+    // 不为了塞进横段而缩窄：宽度仍按列间空隙给足。
+    expect(inner.labelWidth).toBe(Math.max(40, HG - 16));
+    expect(insideAnyCard(result, anchor)).toEqual([]);
+    // 其余两条仍骑在自己那一格的落点竖段上（那是它们独有的段）。
+    expect(route(result, 'r->b2').labelAnchor?.x).toBe(route(result, 'r->b2').join?.x);
+    expect(route(result, 'r->b3').labelAnchor?.x).toBe(route(result, 'r->b3').join?.x);
   });
 
   it('omits label fields when there is no label', () => {
