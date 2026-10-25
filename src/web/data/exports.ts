@@ -3,7 +3,7 @@ import type {
   ExportsResponse,
   TopicExportStatus,
 } from '../../shared/protocol.js';
-import { ApiError, getJson } from './client.js';
+import { getJson, requestJson } from './client.js';
 
 /**
  * Export target/status calls go through the local service. The page never writes
@@ -14,35 +14,15 @@ export async function fetchExportStatuses(signal: AbortSignal): Promise<TopicExp
   return response.topics;
 }
 
-async function sendJson<T>(method: 'PUT' | 'POST', path: string, body: unknown, signal: AbortSignal): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      method,
-      signal,
-      headers: {
-        'content-type': 'application/json',
-        // The service contract requires exactly this value on write requests;
-        // anything else (including a browser-specific label) is rejected with 403.
-        'x-aichat-client': 'cli',
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (cause) {
-    if (signal.aborted) throw cause;
-    throw new ApiError(0, 'NETWORK', '无法连接到本地服务');
-  }
-  const text = await response.text();
-  let parsed: unknown = null;
-  if (text.length > 0) {
-    try { parsed = JSON.parse(text) as unknown; } catch { parsed = null; }
-  }
-  if (!response.ok) {
-    const error = (parsed as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(response.status, error?.code ?? 'HTTP_' + String(response.status), error?.message ?? '导出请求失败', parsed);
-  }
-  if (parsed === null) throw new ApiError(response.status, 'EMPTY_RESPONSE', '服务返回了空响应');
-  return parsed as T;
+function sendJson<T>(method: 'PUT' | 'POST', path: string, body: unknown, signal: AbortSignal): Promise<T> {
+  return requestJson<T>(path, {
+    method,
+    body,
+    signal,
+    write: true,
+    fallbackMessage: '导出请求失败',
+    malformedAsEmpty: true,
+  });
 }
 
 /** Sets or clears the absolute .html target for one topic. */

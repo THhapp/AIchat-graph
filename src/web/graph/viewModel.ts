@@ -182,3 +182,17 @@ export function buildGraphView(
     childCounts,
   };
 }
+
+/** Anchor = selected node, else nearest visible ancestor, else root. */
+export function findAnchorNodeId(view: GraphView, selectedId: string | null, graph: GraphResponse): string | null {
+  if (selectedId === null) return graph.nodes.find((node) => node.flow === 'root')?.id ?? null;
+  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+  let current: string | null = selectedId;
+  const seen = new Set<string>();
+  while (current !== null && !seen.has(current)) {
+    if (view.visibleIds.has(current)) return current;
+    seen.add(current);
+    current = byId.get(current)?.from ?? null;
+  }
+  return graph.nodes.find((node) => node.flow === 'root')?.id ?? null;
+}

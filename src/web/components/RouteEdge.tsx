@@ -2,7 +2,7 @@ import { BaseEdge, getSmoothStepPath } from '@xyflow/react';
 import type { EdgeProps } from '@xyflow/react';
 import type { LayoutEdgeRoute, LayoutLabelBox } from '../layout/types.js';
 import { EDGE_LABEL_LINE_HEIGHT, EDGE_LABEL_RADIUS } from '../graph/cardMetrics.js';
-import { EDGE_ORIGIN_RADIUS, buildOrthogonalPath } from './edgePath.js';
+import { buildOrthogonalPath } from './edgePath.js';
 
 function RouteLabel(
   { text, box }: { text: string; box: LayoutLabelBox },
@@ -40,11 +40,9 @@ export function RouteEdge({ id, sourceX, sourceY, targetX, targetY, sourcePositi
   const text = typeof label === 'string' ? label.trim() : '';
   if (route !== null) {
     // The renderer paints `route.points`; there is no join/side reconstruction.
+    // The line ends at the card border without an origin dot for either a
+    // direct branch or a stub leaving a shared trunk.
     const path = buildOrthogonalPath(route.points);
-    // Only a branch that leaves the source card directly gets the origin dot.
-    // A trunked branch starts at a T junction on the shared run, and a
-    // continuing next edge is a straight continuation rather than a departure.
-    const origin = route.flow === 'branch' && route.trunkId === undefined ? route.points[0] : undefined;
     const box = route.label ?? null;
     // The tooltip keeps the current relationship sentence; the visible text is
     // always the complete wrapped lines measured by layout.
@@ -53,9 +51,6 @@ export function RouteEdge({ id, sourceX, sourceY, targetX, targetY, sourcePositi
       <>
         <BaseEdge id={id} path={path} className="rf-edge" />
         {box !== null ? <RouteLabel text={title} box={box} /> : null}
-        {origin !== undefined ? (
-          <circle className="rf-edge__origin" cx={origin.x} cy={origin.y} r={EDGE_ORIGIN_RADIUS} />
-        ) : null}
       </>
     );
   }

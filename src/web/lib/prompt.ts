@@ -1,4 +1,5 @@
 import type { GraphNode, GraphResponse, GraphTopic, WorkspaceResponse } from '../../shared/protocol.js';
+import { absoluteWorkspacePath } from './locate.js';
 
 export interface ContinuationContext {
   workspace: WorkspaceResponse | null;
@@ -36,7 +37,7 @@ export function buildContinuationPrompt(context: ContinuationContext): string {
   }
   if (topic) {
     const directory = topic.path.replace(/\/?[^/]+$/, '');
-    const absolute = workspace === null ? directory : workspace.rootPath.replace(/[\\/]$/, '') + '/' + directory;
+    const absolute = workspace === null ? directory : absoluteWorkspacePath(workspace.rootPath, directory);
     lines.push('主题：' + topic.title + ' · topicId=' + topic.id);
     lines.push('主题目录：' + absolute);
     lines.push('主题元数据：' + topic.path + ' · fileHash ' + topic.fileHash);

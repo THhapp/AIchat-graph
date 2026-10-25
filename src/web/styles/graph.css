@@ -284,32 +284,26 @@
 .rf-edge--branch {
   stroke-dasharray: calc(3px * var(--edge-scale, 1)) calc(4px * var(--edge-scale, 1));
 }
+/* A branch stub that leaves a shared trunk joins it at a T junction. The trunk is
+   painted last and covers the stub's left end; a round cap at the target end (and
+   on every dash) closes the phase gap that a butt cap would leave. */
+.rf-edge--stub {
+  stroke-linecap: round;
+}
 /* Shared trunk between sibling branches: display geometry only. It reads as the
    structure, not as one relationship — solid, one step heavier and stronger than
-   a branch, so it stays traceable at overview zoom. It takes no pointer events
-   so panning never snags on it. */
+   a branch, so it stays traceable at overview zoom. A butt cap keeps the source
+   end and the branch junctions from bulging by half a stroke; it takes no
+   pointer events so panning never snags on it. */
 .rf-edge--trunk {
   stroke: var(--edge-strong);
   stroke-width: calc(1.5px * var(--edge-scale, 1));
   stroke-dasharray: none;
-  stroke-linecap: round;
+  stroke-linecap: butt;
   stroke-linejoin: round;
   pointer-events: none;
 }
 .react-flow__edge.selected .rf-edge { stroke: var(--accent); }
-.react-flow__edge.selected .rf-edge__origin { fill: var(--accent); }
-/* Where a line leaves a card: a small filled dot on the card border, so the
-   source of a run is visible without reading the whole path. Decoration only —
-   it must never swallow a pan or hover gesture. The radius follows `--edge-scale`
-   so it keeps its ratio to the stroke; browsers without the CSS `r` property fall
-   back to the `r` attribute, i.e. graph units. */
-.rf-edge__origin {
-  fill: var(--edge);
-  pointer-events: none;
-  r: calc(3.2px * var(--edge-scale, 1));
-}
-/* The trunk's source dot belongs to the stronger trunk line, not to a branch. */
-.rf-edge--trunk .rf-edge__origin { fill: var(--edge-strong); }
 /* Relationship sentence drawn on the connector: the rect is the canvas colour so
    the line is interrupted instead of crossing the words. Sizes come from
    cardMetrics (EDGE_LABEL_FONT / EDGE_LABEL_LINE_HEIGHT / padding). The text is

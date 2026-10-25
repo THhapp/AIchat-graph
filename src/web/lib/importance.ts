@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GraphNode, ImportanceRequest, ImportanceResponse } from '../../shared/protocol.js';
-import { ApiError, errorMessage } from '../data/client.js';
+import { ApiError, errorMessage, requestJson } from '../data/client.js';
 
 /** The flag is a source field; the reader only ever reads it. */
 export function importanceOf(node: Pick<GraphNode, 'important'> | null | undefined): boolean {
@@ -13,43 +13,22 @@ export function importanceOf(node: Pick<GraphNode, 'important'> | null | undefin
  * on writes, and `ApiError` carrying the service error code and status.
  */
 export async function writeImportance(request: ImportanceRequest, signal: AbortSignal): Promise<ImportanceResponse> {
-  let response: Response;
-  try {
-    response = await fetch('/api/importance', {
-      method: 'POST',
-      signal,
-      headers: {
-        'content-type': 'application/json',
-        'x-aichat-client': 'cli',
-      },
-      body: JSON.stringify({
-        topicId: request.topicId,
-        nodeId: request.nodeId,
-        important: request.important,
-        ...(request.expectedHash !== undefined ? { expectedHash: request.expectedHash } : {}),
-      }),
-    });
-  } catch (cause) {
-    if (signal.aborted) throw cause;
-    throw new ApiError(0, 'NETWORK', '无法连接到本地服务');
-  }
-  const text = await response.text();
-  let parsed: unknown = null;
-  if (text.length > 0) {
-    try { parsed = JSON.parse(text) as unknown; } catch { parsed = null; }
-  }
-  if (!response.ok) {
-    const error = (parsed as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(
-      response.status,
-      error?.code ?? 'HTTP_' + String(response.status),
-      error?.message ?? '设置重要性失败',
-      parsed,
-    );
-  }
-  const body = parsed as Partial<ImportanceResponse> | null;
-  if (body === null || typeof body !== 'object' || body.node === undefined) {
-    throw new ApiError(response.status, 'EMPTY_RESPONSE', '服务没有返回更新后的卡片');
+  const body = await requestJson<Partial<ImportanceResponse>>('/api/importance', {
+    method: 'POST',
+    signal,
+    write: true,
+    fallbackMessage: '设置重要性失败',
+    emptyMessage: '服务没有返回更新后的卡片',
+    malformedAsEmpty: true,
+    body: {
+      topicId: request.topicId,
+      nodeId: request.nodeId,
+      important: request.important,
+      ...(request.expectedHash !== undefined ? { expectedHash: request.expectedHash } : {}),
+    },
+  });
+  if (typeof body !== 'object' || body === null || body.node === undefined) {
+    throw new ApiError(200, 'EMPTY_RESPONSE', '服务没有返回更新后的卡片');
   }
   return {
     instanceId: typeof body.instanceId === 'string' ? body.instanceId : '',

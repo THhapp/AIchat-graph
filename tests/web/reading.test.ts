@@ -9,7 +9,7 @@ import { searchGraph } from '../../src/web/lib/search.js';
 import { buildContinuationPrompt } from '../../src/web/lib/prompt.js';
 import { computeLayout } from '../../src/web/layout/index.js';
 import type { LayoutEdgeRoute, LayoutResult } from '../../src/web/layout/types.js';
-import { buildOrthogonalPath, pathLength } from '../../src/web/components/edgePath.js';
+import { buildOrthogonalPath, buildTrunkPath, pathLength } from '../../src/web/components/edgePath.js';
 import { buildFlowEdges } from '../../src/web/graph/flowEdges.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string): GraphResponse['nodes'][number] {
@@ -361,18 +361,29 @@ describe('connector paths', () => {
     expect(buildOrthogonalPath([])).toBe('');
   });
 
-  it('rounds a corner on both sides of it by the shared radius', () => {
+  it('rounds a corner on both sides of it by the shared radius on long segments', () => {
     const path = buildOrthogonalPath([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }]);
     expect(path).toBe('M 0 0 L 94 0 Q 100 0 100 6 L 100 100');
   });
 
-  it('leaves corners alone when a segment is shorter than two radii', () => {
-    // The 10px middle segment cannot host two 6px fillets, so nothing is cut.
+  it('shrinks a corner radius to half of a short segment so it never crosses the midpoint', () => {
+    // A 10px run between two long ones: both fillets shrink from 6 to 5 and
+    // meet exactly at the segment's midpoint instead of overlapping.
     const points = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 10 }, { x: 0, y: 10 }];
-    expect(buildOrthogonalPath(points)).toBe('M 0 0 L 100 0 L 100 10 L 0 10');
-    // A single short run between two long ones keeps only the corner it can round.
-    const mixed = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 500 }];
-    expect(buildOrthogonalPath(mixed).startsWith('M 0 0 L 94 0 Q 100 0 100 6')).toBe(true);
+    expect(buildOrthogonalPath(points)).toBe('M 0 0 L 95 0 Q 100 0 100 5 Q 100 10 95 10 L 0 10');
+
+    // A 7px run: each side uses 3.5px, so neither cut passes the midpoint.
+    const tighter = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 7 }, { x: 0, y: 7 }];
+    expect(buildOrthogonalPath(tighter)).toBe('M 0 0 L 96.5 0 Q 100 0 100 3.5 Q 100 7 96.5 7 L 0 7');
+  });
+
+  it('keeps a corner square when the adaptive radius falls below the minimum', () => {
+    // A 2px run can only afford a 1px fillet, below EDGE_MIN_CORNER_RADIUS.
+    expect(buildOrthogonalPath([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 2 }]))
+      .toBe('M 0 0 L 100 0 L 100 2');
+    // 3px is exactly the 1.5px minimum, so it still rounds.
+    expect(buildOrthogonalPath([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 3 }]))
+      .toBe('M 0 0 L 98.5 0 Q 100 0 100 1.5 L 100 3');
   });
 
   it('keeps the vertex list of a polyline predictable', () => {
@@ -382,6 +393,28 @@ describe('connector paths', () => {
     // Rounded corners only shorten the drawn line.
     expect(pathLength(points)).toBeLessThan(pathLength(points, 0));
     expect(pathLength(points, 0)).toBeCloseTo(50 + 30 + 70, 6);
+  });
+});
+
+describe('shared trunk paths', () => {
+  it('draws the feeder and the riser as two subpaths and keeps the first junction square', () => {
+    const path = buildTrunkPath([{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 100 }]);
+    expect(path).toBe('M 0 0 L 20 0 M 20 0 L 20 100');
+    expect(path.split('M ')).toHaveLength(3);
+    // The channel corner is where the first branch joins: no fillet may cut it.
+    expect(path).not.toContain('Q');
+  });
+
+  it('still rounds the riser corners below the first junction', () => {
+    const path = buildTrunkPath([{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 50 }, { x: 40, y: 50 }]);
+    expect(path).toBe('M 0 0 L 20 0 M 20 0 L 20 44 Q 20 50 26 50 L 40 50');
+  });
+
+  it('falls back to the orthogonal path for two points and is empty below that', () => {
+    expect(buildTrunkPath([])).toBe('');
+    expect(buildTrunkPath([{ x: 5, y: 5 }])).toBe('');
+    const two = [{ x: 0, y: 0 }, { x: 20, y: 0 }];
+    expect(buildTrunkPath(two)).toBe(buildOrthogonalPath(two));
   });
 });
 

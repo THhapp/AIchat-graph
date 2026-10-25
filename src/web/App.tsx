@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSnapshot } from './data/snapshot.js';
 import {
+  DETAIL_WIDTH_DEFAULT,
+  DETAIL_WIDTH_MAX,
+  DETAIL_WIDTH_MIN,
   leftPanelOpenFor,
   navCollapsedNodeIds,
   navFolderExpanded,
@@ -13,26 +16,22 @@ import {
 } from './data/readingState.js';
 import { useReadingSession } from './data/useReadingSession.js';
 import { useDetails } from './data/details.js';
-import { buildGraphView, scopeGraphToTopic } from './graph/viewModel.js';
+import { buildGraphView, findAnchorNodeId, scopeGraphToTopic } from './graph/viewModel.js';
 import { useLayoutEngine } from './graph/layoutBridge.js';
 import { useGraphLayout } from './graph/useGraphLayout.js';
 import { searchGraph } from './lib/search.js';
 import { buildContinuationPrompt } from './lib/prompt.js';
 import { buildLocateText } from './lib/locate.js';
-import { copyText } from './lib/clipboard.js';
+import { useCopyFeedback } from './lib/clipboard.js';
 import { recentNodeIds } from './lib/recent.js';
 import { importanceOf, useImportance } from './lib/importance.js';
 import { Sidebar } from './components/Sidebar.js';
 import { DetailPanel, type DetailTab } from './components/DetailPanel.js';
 import { GraphCanvas } from './components/GraphCanvas.js';
-import { findAnchorNodeId } from './graph/flowEdges.js';
 import { EmptyState } from './components/States.js';
 import { ExportPanel } from './components/ExportPanel.js';
 import { AppBanners, AppFooter, AppHeader, type AppStatus } from './components/AppChrome.js';
 import type { GraphNode, GraphResponse } from '../shared/protocol.js';
-
-const DETAIL_MIN = 300;
-const DETAIL_MAX = 680;
 
 /** Panels are independent: either, both, or neither may be open. */
 function columnTemplate(leftOpen: boolean, detailOpen: boolean, detailWidth: number): string {
@@ -53,8 +52,8 @@ export function App(): React.JSX.Element {
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<DetailTab>('node');
   const [fitSignal, setFitSignal] = useState(0);
-  const [copied, setCopied] = useState(false);
-  const [locateCopied, setLocateCopied] = useState(false);
+  const { copied, copy: copyPromptText, reset: resetCopied } = useCopyFeedback();
+  const { copied: locateCopied, copy: copyLocateText } = useCopyFeedback();
   const [exportOpen, setExportOpen] = useState(false);
   /**
    * The last accepted importance write, applied on top of the snapshot until the
@@ -187,9 +186,9 @@ export function App(): React.JSX.Element {
     setReading((current) => current === null ? current : switchReadingTopic(current, id));
     setQuery('');
     setTab('node');
-    setCopied(false);
+    resetCopied();
     setFitSignal(0);
-  }, [graph]);
+  }, [graph, resetCopied]);
 
   // A link to another theme explicitly opens that theme before its node.
   const selectNode = useCallback((id: string) => {
@@ -244,15 +243,8 @@ export function App(): React.JSX.Element {
       topic,
       node: selectedNode,
     });
-    copyText(
-      text,
-      () => {
-        setCopied(true);
-        window.setTimeout(() => { setCopied(false); }, 2000);
-      },
-      () => { setCopied(false); },
-    );
-  }, [graph, snapshot.workspace, selectedNode, selectedTopic]);
+    copyPromptText(text);
+  }, [graph, snapshot.workspace, selectedNode, selectedTopic, copyPromptText]);
 
   /**
    * The locator is built from the card currently on screen: IDs, real paths and
@@ -262,23 +254,16 @@ export function App(): React.JSX.Element {
     if (graph === null || selectedNode === null) return;
     const topic = selectedTopic ?? graph.topics.find((item) => item.id === selectedNode.topicId) ?? null;
     const text = buildLocateText({ workspace: snapshot.workspace, graph, topic, node: selectedNode });
-    copyText(
-      text,
-      () => {
-        setLocateCopied(true);
-        window.setTimeout(() => { setLocateCopied(false); }, 2000);
-      },
-      () => { setLocateCopied(false); },
-    );
-  }, [graph, snapshot.workspace, selectedNode, selectedTopic]);
+    copyLocateText(text);
+  }, [graph, snapshot.workspace, selectedNode, selectedTopic, copyLocateText]);
 
-  const detailWidth = reading?.detailWidth ?? 380;
+  const detailWidth = reading?.detailWidth ?? DETAIL_WIDTH_DEFAULT;
   const resizeDetail = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     const startX = event.clientX;
-    const startWidth = reading?.detailWidth ?? 380;
+    const startWidth = reading?.detailWidth ?? DETAIL_WIDTH_DEFAULT;
     const onMove = (move: PointerEvent): void => {
-      const next = Math.min(DETAIL_MAX, Math.max(DETAIL_MIN, startWidth + (startX - move.clientX)));
+      const next = Math.min(DETAIL_WIDTH_MAX, Math.max(DETAIL_WIDTH_MIN, startWidth + (startX - move.clientX)));
       update({ detailWidth: next });
     };
     const onUp = (): void => {
@@ -371,8 +356,6 @@ export function App(): React.JSX.Element {
 
       <div
         className="app-main"
-        data-left={leftOpen ? 'open' : 'closed'}
-        data-detail={detailOpen ? 'open' : 'closed'}
         style={{
           gridTemplateColumns: columnTemplate(leftOpen, detailOpen, detailWidth),
         }}
@@ -438,14 +421,14 @@ export function App(): React.JSX.Element {
               role="separator"
               aria-orientation="vertical"
               aria-label="调整详情宽度"
-              aria-valuemin={DETAIL_MIN}
-              aria-valuemax={DETAIL_MAX}
+              aria-valuemin={DETAIL_WIDTH_MIN}
+              aria-valuemax={DETAIL_WIDTH_MAX}
               aria-valuenow={detailWidth}
               tabIndex={0}
               onPointerDown={resizeDetail}
               onKeyDown={(event) => {
-                if (event.key === 'ArrowLeft') update({ detailWidth: Math.min(DETAIL_MAX, detailWidth + 24) });
-                if (event.key === 'ArrowRight') update({ detailWidth: Math.max(DETAIL_MIN, detailWidth - 24) });
+                if (event.key === 'ArrowLeft') update({ detailWidth: Math.min(DETAIL_WIDTH_MAX, detailWidth + 24) });
+                if (event.key === 'ArrowRight') update({ detailWidth: Math.max(DETAIL_WIDTH_MIN, detailWidth - 24) });
               }}
             />
             <DetailPanel

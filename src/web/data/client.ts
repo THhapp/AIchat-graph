@@ -23,36 +23,105 @@ function isErrorBody(value: unknown): value is ApiErrorResponse {
   return typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string';
 }
 
-/** GET JSON with abort support. Network failures and malformed bodies are errors, never empty data. */
-export async function getJson<T>(path: string, signal: AbortSignal): Promise<T> {
+interface ErrorBodyDetails {
+  code: string;
+  message: string | null;
+  details: unknown;
+}
+
+function errorBodyDetails(body: unknown): ErrorBodyDetails | null {
+  if (!isErrorBody(body)) return null;
+  return {
+    code: body.error.code,
+    message: typeof body.error.message === 'string' ? body.error.message : null,
+    details: body.error.details ?? null,
+  };
+}
+
+export interface RequestJsonOptions {
+  signal: AbortSignal;
+  method?: 'GET' | 'POST' | 'PUT';
+  /** JSON body; omitted for GET. */
+  body?: unknown;
+  /** Write requests carry the service's client header and JSON content type. */
+  write?: boolean;
+  /** Message for a failed response without a usable error body. */
+  fallbackMessage?: string;
+  /** Message for an empty successful response. */
+  emptyMessage?: string;
+  /**
+   * Read export/importance bodies historically fell back to the empty-response
+   * path on unparsable JSON instead of BAD_RESPONSE.
+   */
+  malformedAsEmpty?: boolean;
+}
+
+/**
+ * One transport for API JSON. Network failures, HTTP errors, malformed bodies and
+ * empty bodies are errors, never empty data.
+ */
+export async function requestJson<T>(path: string, options: RequestJsonOptions): Promise<T> {
+  const {
+    signal,
+    method = 'GET',
+    body,
+    write = false,
+    fallbackMessage,
+    emptyMessage = '服务返回了空响应',
+    malformedAsEmpty = false,
+  } = options;
+  const headers = write
+    ? {
+        'content-type': 'application/json',
+        // The service contract requires exactly this value on write requests;
+        // anything else (including a browser-specific label) is rejected with 403.
+        'x-aichat-client': 'cli',
+      }
+    : { accept: 'application/json' };
+
   let response: Response;
   try {
-    response = await fetch(path, { signal, headers: { accept: 'application/json' } });
+    response = await fetch(path, {
+      method,
+      signal,
+      headers,
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
   } catch (cause) {
     if (signal.aborted) throw cause;
     throw new ApiError(0, 'NETWORK', '无法连接到本地服务');
   }
 
-  let body: unknown = null;
+  let parsed: unknown = null;
   const text = await response.text();
   if (text.length > 0) {
     try {
-      body = JSON.parse(text) as unknown;
+      parsed = JSON.parse(text) as unknown;
     } catch {
-      throw new ApiError(response.status, 'BAD_RESPONSE', '服务返回了无法解析的内容', text.slice(0, 400));
+      if (!malformedAsEmpty) {
+        throw new ApiError(response.status, 'BAD_RESPONSE', '服务返回了无法解析的内容', text.slice(0, 400));
+      }
+      parsed = null;
     }
   }
 
   if (!response.ok) {
-    if (isErrorBody(body)) {
-      throw new ApiError(response.status, body.error.code, body.error.message, body, body.error.details ?? null);
+    const details = errorBodyDetails(parsed);
+    const fallback = fallbackMessage ?? '请求失败（HTTP ' + String(response.status) + '）';
+    if (details !== null) {
+      throw new ApiError(response.status, details.code, details.message ?? fallback, parsed, details.details);
     }
-    throw new ApiError(response.status, 'HTTP_' + String(response.status), '请求失败（HTTP ' + String(response.status) + '）', body);
+    throw new ApiError(response.status, 'HTTP_' + String(response.status), fallback, parsed);
   }
-  if (body === null) {
-    throw new ApiError(response.status, 'EMPTY_RESPONSE', '服务返回了空响应');
+  if (parsed === null) {
+    throw new ApiError(response.status, 'EMPTY_RESPONSE', emptyMessage);
   }
-  return body as T;
+  return parsed as T;
+}
+
+/** GET JSON with abort support. */
+export async function getJson<T>(path: string, signal: AbortSignal): Promise<T> {
+  return requestJson<T>(path, { signal });
 }
 
 export function errorMessage(error: unknown): string {

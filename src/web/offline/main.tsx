@@ -3,16 +3,17 @@ import type { ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { GraphNode, GraphResponse, OfflineTopicDocument } from '../../shared/protocol.js';
 import { buildGraphView } from '../graph/viewModel.js';
-import { CARD_BASE_HEIGHT, CARD_WIDTH, LAYOUT_HORIZONTAL_GAP, LAYOUT_VERTICAL_GAP } from '../graph/cardMetrics.js';
+import { layoutInputForView } from '../graph/layoutBridge.js';
 import { computeLayout } from '../layout/index.js';
 import type { LayoutResult } from '../layout/types.js';
 import { searchGraph } from '../lib/search.js';
-import { copyText as writeClipboard } from '../lib/clipboard.js';
+import { useCopyFeedback } from '../lib/clipboard.js';
 import { GraphCanvas } from '../components/GraphCanvas.js';
 import { DetailPanel } from '../components/DetailPanel.js';
 import { Sidebar } from '../components/Sidebar.js';
 import { LicenseNotices } from '../components/LicenseNotices.js';
 import { bodyById, readEmbeddedDocument, toGraphResponse, OfflineDocumentError } from './document.js';
+import { deriveOfflineDetails } from './details.js';
 import '../styles/tokens.css';
 import '../styles/base.css';
 import '../styles/graph.css';
@@ -89,7 +90,7 @@ function OfflineReader(): React.JSX.Element {
   const [expandedTopics, setExpandedTopics] = useState<ReadonlySet<string> | null>(null);
   const [fitSignal, setFitSignal] = useState(FIT_SIGNAL_NONE);
   const [savedViewport] = useState<null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy: copyText } = useCopyFeedback();
 
   const graph = state?.graph ?? null;
   const bodies = state?.bodies ?? new Map<string, string>();
@@ -110,21 +111,12 @@ function OfflineReader(): React.JSX.Element {
     [graph, collapsed],
   );
 
-  // Deterministic synchronous layout: same module, same input shape and the same
-  // card metrics as the live reader.
-  const layout = useMemo<LayoutResult | null>(() => {
-    if (view === null) return null;
-    return computeLayout({
-      nodes: view.layoutNodes,
-      visibleNodeIds: [...view.visibleIds],
-      collapsedNodeIds: view.collapsedIds,
-      cardWidth: CARD_WIDTH,
-      cardHeight: CARD_BASE_HEIGHT,
-      verticalGap: LAYOUT_VERTICAL_GAP,
-      horizontalGap: LAYOUT_HORIZONTAL_GAP,
-      structureVersion: view.structureKey,
-    });
-  }, [view]);
+  // Deterministic synchronous layout: same module and the same input builder as
+  // the live reader, so offline never spells the card geometry out again.
+  const layout = useMemo<LayoutResult | null>(
+    () => (view === null ? null : computeLayout(layoutInputForView(view))),
+    [view],
+  );
 
   const anchorNodeId = useMemo(() => {
     if (view === null || selectedNodeId === null) return null;
@@ -137,48 +129,17 @@ function OfflineReader(): React.JSX.Element {
     : null;
   const selectedTopic = graph?.topics[0] ?? null;
 
-  const details = useMemo(() => {
-    if (graph === null || state === null) return { nodeDetail: null, topicDetail: null, loading: false, error: null, detailVersion: null };
-    if (tab === 'topic') {
-      const nodes = (state.doc.nodes as Array<GraphNode & { body: string; path: string; fileHash: string }>).map((node) => ({
-        ...node,
-        body: bodies.get(node.id) ?? node.body,
-      }));
-      return {
-        nodeDetail: null,
-        topicDetail: {
-          instanceId: graph.instanceId,
-          revision: graph.revision,
-          source: 'snapshot' as const,
-          valid: true,
-          topic: selectedTopic ?? state.doc.topic,
-          raw: '',
-          fileHash: state.doc.topic.fileHash,
-          nodes,
-          diagnostics: graph.diagnostics,
-        },
-        loading: false,
-        error: null,
-        detailVersion: graph.instanceId + ':' + String(graph.revision),
-      };
-    }
-    if (selectedNode === null) return { nodeDetail: null, topicDetail: null, loading: false, error: null, detailVersion: null };
-    return {
-      nodeDetail: {
-        instanceId: graph.instanceId,
-        revision: graph.revision,
-        node: selectedNode,
-        body: bodies.get(selectedNode.id) ?? '',
-        topicId: selectedNode.topicId,
-        path: selectedTopic?.path ?? '',
-        fileHash: selectedTopic?.fileHash ?? '',
-      },
-      topicDetail: null,
-      loading: false,
-      error: null,
-      detailVersion: graph.instanceId + ':' + String(graph.revision),
-    };
-  }, [graph, state, tab, selectedNode, selectedTopic, bodies]);
+  const details = useMemo(
+    () => deriveOfflineDetails({
+      graph,
+      doc: state?.doc ?? null,
+      bodies,
+      tab,
+      node: selectedNode,
+      topic: selectedTopic,
+    }),
+    [graph, state, tab, selectedNode, selectedTopic, bodies],
+  );
 
   const openDetail = useCallback((id: string) => {
     setSelectedNodeId(id);
@@ -193,17 +154,6 @@ function OfflineReader(): React.JSX.Element {
       else next.add(id);
       return next;
     });
-  }, []);
-
-  const copyText = useCallback((text: string) => {
-    writeClipboard(
-      text,
-      () => {
-        setCopied(true);
-        window.setTimeout(() => { setCopied(false); }, 2000);
-      },
-      () => { setCopied(false); },
-    );
   }, []);
 
   if (error !== null) {
@@ -261,10 +211,8 @@ function OfflineReader(): React.JSX.Element {
 
       <div
         className="app-main"
-        data-left={leftOpen ? 'open' : 'closed'}
-        data-detail={rightOpen ? 'open' : 'closed'}
         style={{
-          gridTemplateColumns: (leftOpen ? 'var(--sidebar-width) ' : '') + 'minmax(0, 1fr)' + (rightOpen ? ' 5px 380px' : ''),
+          gridTemplateColumns: (leftOpen ? 'var(--sidebar-width) ' : '') + 'minmax(0, 1fr)' + (rightOpen ? ' 5px var(--detail-width)' : ''),
           // The offline shell has no status-bar row; the canvas must get a real height.
           gridTemplateRows: 'minmax(0, 1fr)',
         }}

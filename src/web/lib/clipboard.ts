@@ -1,3 +1,5 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+
 /**
  * Clipboard write with the same fallback the rest of the reader already uses:
  * `navigator.clipboard` when present, otherwise a hidden textarea plus
@@ -22,4 +24,63 @@ export function copyText(text: string, onDone: () => void, onFail: () => void): 
   } else {
     fallback();
   }
+}
+
+export interface CopyFeedback {
+  /** True for two seconds after the most recent successful copy. */
+  copied: boolean;
+  copy: (text: string) => void;
+  /** Clears the hint immediately when the copied context changes. */
+  reset: () => void;
+}
+
+/**
+ * One copied flag per copy affordance. The timer and its cleanup live here so
+ * pages do not each repeat `setTimeout`/`clearTimeout` and copied state.
+ */
+export function useCopyFeedback(): CopyFeedback {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  const mounted = useRef(true);
+
+  const clearTimer = useCallback(() => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+
+  const reset = useCallback(() => {
+    clearTimer();
+    setCopied(false);
+  }, [clearTimer]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimer();
+    };
+  }, [clearTimer]);
+
+  const copy = useCallback((text: string) => {
+    clearTimer();
+    copyText(
+      text,
+      () => {
+        if (!mounted.current) return;
+        clearTimer();
+        setCopied(true);
+        timer.current = window.setTimeout(() => {
+          timer.current = null;
+          if (mounted.current) setCopied(false);
+        }, 2000);
+      },
+      () => {
+        if (mounted.current) reset();
+      },
+    );
+  }, [clearTimer, reset]);
+
+  return { copied, copy, reset };
 }

@@ -104,6 +104,8 @@ Agent 写入 → 凭据检查 → 纯候选变换与全图校验 → 文件事�
 HTTP 请求解析与响应组装在 `src/service/http/`；服务 Agent 动作的 schema、读取和编译分在 `src/service/agent/`；导出路径防护与冻结文档组装在 `src/service/export/`，队列及覆盖时序仍由 ExportCoordinator 管理。
 布局入口在 `src/web/layout/index.ts`；搜索唯一实现是 `src/index/search.ts`，CLI 与服务端不另写匹配、排序或 snippet。
 
+`src/web` 的阅读端分层：`App.tsx` 组合页面和用户操作；`data/` 管服务快照、详情、导出与阅读状态；`graph/` 管视图投影、边列表、布局输入和 React Flow 视口适配（`useCanvasViewport.ts`）；`components/` 只做呈现；`layout/` 只做纯几何；`offline/` 只读冻结文档；`lib/` 放跨页面 UI 辅助。实时与离线共享视图、布局输入、布局和呈现组件，各自保留服务连接、冻结数据和写入边界；页面和离线入口不重复拼布局输入或目录派生。
+
 ## 命名与组织
 
 - 目录使用下层职责名，小写单数；`src/web` 内按 `components/data/graph/layout/lib/offline/styles` 分工。
@@ -273,17 +275,17 @@ CLI 核对运行描述、工作区/实例身份与真实根，不自行启动第
 
 链块和标签占位在 `src/web/layout/measure.ts`，路由、干线和标签框在 `src/web/layout/routing.ts`；间距和标签度量由 `src/web/graph/cardMetrics.ts` 统一提供。容器框只存在于计算中，不显示为卡片、色块或标题。
 
-改布局前先确认 `src/web/layout/types.ts` 的输入输出契约：`LayoutNodeInput` 的 `height`、`label`、`order`；`LayoutResult` 的 `positions`、`heights`、`edgeRoutes`（`points`、`trunkId`、`label`）、`branchTrunks`（竖向共享干线）、`bounds`（含标签框）与 `layoutVersion`（当前为 5）。阅读界面、Worker 协议和离线成品按同一契约适配，不另写一套排布或标签放置逻辑。
+改布局前先确认 `src/web/layout/types.ts` 的输入输出契约：`LayoutNodeInput` 的 `height`、`label`、`order`；`LayoutResult` 的 `positions`、`heights`、`edgeRoutes`（`points`、`trunkId`、`label`）、`branchTrunks`（竖向共享干线）、`bounds`（含标签框）与 `layoutVersion`（当前为 5）。阅读界面、Worker 协议和离线成品按同一契约适配，不另写一套排布或标签放置逻辑。实时 Hook 与离线入口的布局输入统一由 `src/web/graph/layoutBridge.ts` 的 `layoutInputForView` 生成，页面不再各自拼 `LayoutInput` 字段。
 
 ### 连线与关系文字
 
-连线属于显示几何，不改变 from/flow/order、编号与连接语义。测量在 `src/web/layout/measure.ts`，路由在 `src/web/layout/routing.ts`，呈现在 `src/web/components/RouteEdge.tsx`、`TrunkEdge.tsx` 和 `edgePath.ts`；尺寸与折行复用 `src/web/graph/cardMetrics.ts`。
+连线属于显示几何，不改变 from/flow/order、编号与连接语义。测量在 `src/web/layout/measure.ts`，路由在 `src/web/layout/routing.ts`，呈现在 `src/web/components/RouteEdge.tsx`、`TrunkEdge.tsx` 和 `edgePath.ts`；尺寸与折行复用 `src/web/graph/cardMetrics.ts`。边的列表顺序在 `src/web/graph/flowEdges.ts`，干线必须最后绘制，以覆盖共享支线的端部。
 
 - next 从源卡底边中心连到目标卡顶边中心；两点同 x 时是一条直线。next 标签位于源卡下方、源卡与目标卡之间的空隙，背景使用画布底色断开自己的线。
 - branch 从来源卡右边发出。单个分支走一条从源卡边缘出发的短折，等高时退化为一条水平线，不产出干线。
 - 同一来源有多个 branch 时共用一个出口和一条竖向干线；干线只绘制一次，每条分支只绘制从干线接出到目标卡左边中心的独占横段。逻辑关系数与 SVG 路径数不必相等。
-- 干线的起点在源卡右边缘，画起点圆点；挂在干线上的支线不画圆点。单支从源卡出发，画起点圆点。
-- 干线为略重实线，next 为实线，branch 支线为虚线；转角采用圆角，画布通过 `--edge-scale` 对描边和虚线节距作有上限的缩放补偿，提升概览可见性。
+- 干线从源卡右边缘的横向接入段接到共享通道，再沿通道向下；首条支线接入处是横向段、竖向段与支线的 T 接。渲染把同一 path 拆成横向段和竖向段两个子路径，首接处保持直角，不再用圆角切掉入口，也不画起点大圆点。单支从卡边直接走短折，同样不画圆点。
+- 干线为略重实线，next 为实线，branch 支线为虚线。共享干线的端点用平头（butt），支线接出处由最后绘制的干线覆盖；独立连线的转角按相邻线段自适应圆角，半径不超过短段的一半，短于阈值时保持直角，避免短线被弯过头。画布通过 `--edge-scale` 对描边和虚线节距作有上限的缩放补偿，提升概览可见性。
 - 关系文字每条一份，靠近自己的独占支线：branch 标签在源卡与目标卡之间的通道内、自己独占横线的上方，next 标签在源卡下方；标签不覆盖共享干线、卡片、独占横线或其他标签。
 - 标签框由布局输出，阅读界面只绘制，不再自行搜索候选位置或另做碰撞避让。实时与离线使用同一份结果。
 - 折叠只画可见分支所需的干线，没有可见成员时不产出干线。

@@ -100,7 +100,6 @@ code, pre, kbd { font-family: var(--font-mono); }
 .app-header__topic { min-width: 5em; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--text-sm); }
 .app-header__spacer { flex: 1; }
 .app-header__meta { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-muted); }
-.app-header__root { max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
 
 .app-main {
   display: grid;
@@ -171,7 +170,6 @@ code, pre, kbd { font-family: var(--font-mono); }
 }
 .banner--stale { background: var(--state-proposed-bg); color: var(--state-proposed-fg); border-bottom-color: color-mix(in srgb, var(--state-proposed-fg) 25%, transparent); }
 .banner--error { background: var(--danger-soft); color: var(--danger); }
-.banner--info { background: var(--accent-soft); color: var(--accent-strong); }
 .banner__text { flex: 1; }
 .banner strong { font-weight: 650; }
 

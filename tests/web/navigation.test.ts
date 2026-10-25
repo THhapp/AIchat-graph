@@ -14,7 +14,7 @@ import {
   toggleNavNode,
   type ReadingState,
 } from '../../src/web/data/readingState.js';
-import { hiddenTreeCounts, treeChildCounts, visibleTreeNodes } from '../../src/web/components/Sidebar.js';
+import { hiddenTreeCounts, treeChildCounts, visibleTreeNodes } from '../../src/web/components/directoryTree.js';
 import { buildGraphView } from '../../src/web/graph/viewModel.js';
 import { absoluteWorkspacePath, buildLocateText } from '../../src/web/lib/locate.js';
 import { recentNodeIds } from '../../src/web/lib/recent.js';

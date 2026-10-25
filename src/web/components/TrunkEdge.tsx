@@ -1,7 +1,7 @@
 import { BaseEdge } from '@xyflow/react';
 import type { EdgeProps } from '@xyflow/react';
 import type { LayoutBranchTrunk } from '../layout/types.js';
-import { EDGE_ORIGIN_RADIUS, buildOrthogonalPath } from './edgePath.js';
+import { buildTrunkPath } from './edgePath.js';
 
 /**
  * The vertical trunk that sibling branches share to the right of a parent.
@@ -14,26 +14,21 @@ import { EDGE_ORIGIN_RADIUS, buildOrthogonalPath } from './edgePath.js';
  * and which part belongs to one relationship. Nothing is painted twice on top of
  * itself, because branches start where the trunk reaches their entry y.
  *
- * The first point sits on the source card's border, so it gets the origin dot
- * that says "this line starts at that card". Branches leaving this run do not.
+ * The path is split into the feeder and the riser (see `buildTrunkPath`), so the
+ * first branch entry meets a square corner instead of the inside of a fillet.
+ * The line ends at the cards' edges; there is no origin dot.
  */
 export function TrunkEdge({ id, data }: EdgeProps): React.JSX.Element | null {
   const trunk = (data as { trunk?: LayoutBranchTrunk | null } | undefined)?.trunk ?? null;
   if (trunk === null || trunk.points.length < 2) return null;
-  const origin = trunk.points[0];
   return (
-    <>
-      <BaseEdge
-        id={id}
-        path={buildOrthogonalPath(trunk.points)}
-        className="rf-edge rf-edge--trunk"
-        // No interaction surface: the trunk belongs to no relationship and must
-        // not take hover, focus or pan gestures away from the canvas.
-        interactionWidth={0}
-      />
-      {origin !== undefined ? (
-        <circle className="rf-edge__origin" cx={origin.x} cy={origin.y} r={EDGE_ORIGIN_RADIUS} />
-      ) : null}
-    </>
+    <BaseEdge
+      id={id}
+      path={buildTrunkPath(trunk.points)}
+      className="rf-edge rf-edge--trunk"
+      // No interaction surface: the trunk belongs to no relationship and must
+      // not take hover, focus or pan gestures away from the canvas.
+      interactionWidth={0}
+    />
   );
 }

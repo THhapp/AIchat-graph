@@ -2,12 +2,20 @@ import { createContext, useContext } from 'react';
 import type {
   LayoutDiagnostic,
   LayoutInput,
+  LayoutPosition,
   LayoutResult,
 } from '../layout/types.js';
 import type {
   LayoutWorkerRequest,
   LayoutWorkerResponse,
 } from '../layout/workerProtocol.js';
+import {
+  CARD_BASE_HEIGHT,
+  CARD_WIDTH,
+  LAYOUT_HORIZONTAL_GAP,
+  LAYOUT_VERTICAL_GAP,
+} from './cardMetrics.js';
+import type { GraphView } from './viewModel.js';
 
 /**
  * Adapter between the reading UI and the separately owned layout module
@@ -55,6 +63,30 @@ export class LayoutFailureError extends Error {
 export interface LayoutResultEnvelope {
   result: LayoutResult;
   structureVersion: number | string | null;
+}
+
+export interface LayoutInputOptions {
+  previousPositions?: Record<string, LayoutPosition> | null;
+}
+
+/**
+ * The one projection from a reading view to layout input. The live worker and
+ * the offline reader share these card metrics, visibility fields and structure
+ * version instead of spelling them out separately.
+ */
+export function layoutInputForView(view: GraphView, options?: LayoutInputOptions): LayoutInput {
+  return {
+    nodes: view.layoutNodes,
+    visibleNodeIds: [...view.visibleIds],
+    collapsedNodeIds: view.collapsedIds,
+    cardWidth: CARD_WIDTH,
+    // Nodes carry their own height; this is the fallback for any row without one.
+    cardHeight: CARD_BASE_HEIGHT,
+    verticalGap: LAYOUT_VERTICAL_GAP,
+    horizontalGap: LAYOUT_HORIZONTAL_GAP,
+    previousPositions: options?.previousPositions ?? null,
+    structureVersion: view.structureKey,
+  };
 }
 
 export interface LayoutEngine {

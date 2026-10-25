@@ -1,41 +1,10 @@
-import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
+import type { GraphResponse } from '../../shared/protocol.js';
 import type { SearchResults } from '../lib/search.js';
 import {
-  directoryChildCounts,
   directoryRows,
   visibleDirectoryRows,
   type DirectoryRow,
 } from './directoryTree.js';
-
-/** Structural directory order (not the graph's own DFS): mainline, then each branch chain. */
-export function orderChain(nodes: GraphNode[]): GraphNode[] {
-  return directoryRows(nodes).map((row) => row.node);
-}
-
-/** Direct directory children inside this topic; a `next` sibling is not a child. */
-export function treeChildCounts(nodes: GraphNode[]): Map<string, number> {
-  return directoryChildCounts(directoryRows(nodes));
-}
-
-/**
- * Directory rows in reading order, with the descendants of a folded node hidden.
- * This is a navigation fold only: the graph's own `collapsedNodeIds` is a
- * different value and is never read or written here.
- */
-export function visibleTreeNodes(nodes: GraphNode[], collapsed: ReadonlySet<string>): GraphNode[] {
-  return visibleDirectoryRows(directoryRows(nodes), collapsed).map((row) => row.node);
-}
-
-/** How many directory rows each folded node hides, for the "+N" hint. */
-export function hiddenTreeCounts(nodes: GraphNode[], collapsed: ReadonlySet<string>): Map<string, number> {
-  const byId = new Map(directoryRows(nodes).map((row) => [row.node.id, row]));
-  const counts = new Map<string, number>();
-  for (const id of collapsed) {
-    const count = byId.get(id)?.hiddenCount ?? 0;
-    if (count > 0) counts.set(id, count);
-  }
-  return counts;
-}
 
 export interface SidebarProps {
   graph: GraphResponse | null;

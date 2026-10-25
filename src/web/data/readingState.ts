@@ -3,6 +3,11 @@ import type { GraphResponse } from '../../shared/protocol.js';
 /** Bumping this invalidates saved panel choices; bump when the meaning changes. */
 export const VIEW_SCHEMA_VERSION = 2;
 
+/** Detail panel width bounds shared by saved state, the live reader and the offline shell. */
+export const DETAIL_WIDTH_DEFAULT = 380;
+export const DETAIL_WIDTH_MIN = 300;
+export const DETAIL_WIDTH_MAX = 680;
+
 export interface SavedViewport {
   x: number;
   y: number;
@@ -62,7 +67,7 @@ export function emptyReadingState(): ReadingState {
     viewport: null,
     selectedNodeId: null,
     collapsedNodeIds: [],
-    detailWidth: 380,
+    detailWidth: DETAIL_WIDTH_DEFAULT,
     topicFilter: null,
     leftPanelOpen: false,
     rightPanelOpen: false,
@@ -120,7 +125,7 @@ export function parseReadingState(raw: string | null): ReadingState {
   const candidate = value as Record<string, unknown>;
   const state = emptyReadingState();
   if (typeof candidate.detailWidth === 'number' && Number.isFinite(candidate.detailWidth)) {
-    state.detailWidth = Math.min(680, Math.max(300, candidate.detailWidth));
+    state.detailWidth = Math.min(DETAIL_WIDTH_MAX, Math.max(DETAIL_WIDTH_MIN, candidate.detailWidth));
   }
   if (isViewport(candidate.viewport)) state.viewport = candidate.viewport;
   if (typeof candidate.selectedNodeId === 'string') state.selectedNodeId = candidate.selectedNodeId;

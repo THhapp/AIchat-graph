@@ -6,7 +6,7 @@ import {
   switchReadingTopic,
   toggleNavNode,
 } from '../../src/web/data/readingState.js';
-import { visibleTreeNodes } from '../../src/web/components/Sidebar.js';
+import { visibleTreeNodes } from '../../src/web/components/directoryTree.js';
 import { buildGraphView } from '../../src/web/graph/viewModel.js';
 import { writeImportance } from '../../src/web/lib/importance.js';
 

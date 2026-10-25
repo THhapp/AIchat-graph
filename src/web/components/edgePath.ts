@@ -2,21 +2,19 @@
  * Shared geometry for the orthogonal connectors.
  *
  * The layout owner emits polylines in layout coordinates; this module turns them
- * into an SVG `d` with small rounded corners.
+ * into an SVG `d` with small rounded corners. A shared trunk is split into two
+ * subpaths so its first branch junction stays sharp.
  */
 import type { LayoutPoint } from '../layout/types.js';
 
-/** Corner radius. Larger than this reads as a curve, smaller is invisible at 1x. */
+/** Preferred corner radius. Larger than this reads as a curve, smaller is invisible at 1x. */
 export const EDGE_CORNER_RADIUS = 6;
 
 /**
- * Radius of the dot that marks where a line leaves a card. Small enough to sit
- * on the border without reading as a node, large enough to survive zoom-out.
- * The `r` attribute is the fallback for browsers without the CSS `r` property;
- * graph.css otherwise drives the radius from `--edge-scale`, so the dot keeps
- * this size on screen at every zoom.
+ * Below this a fillet is thinner than the line itself and reads as a kink, so
+ * the corner stays square instead.
  */
-export const EDGE_ORIGIN_RADIUS = 3.2;
+export const EDGE_MIN_CORNER_RADIUS = 1.5;
 
 /** Below this a segment counts as a duplicate point, not a direction. */
 const EPSILON = 0.01;
@@ -72,13 +70,14 @@ function curveLength(piece: Extract<Piece, { kind: 'curve' }>): number {
 
 /**
  * Straight runs and corner arcs of one polyline, each with its cumulative path
- * length. Corners whose neighbouring segment is shorter than `2 * radius` stay
- * sharp: rounding them would eat the whole segment and visibly bow the line.
+ * length. Each corner gets at most half of either neighbouring segment, so two
+ * corners on one short segment can meet at its midpoint but never cross it.
+ * Fillets below `EDGE_MIN_CORNER_RADIUS` keep the corner square instead.
  */
 function buildPieces(points: readonly LayoutPoint[], radius: number): Piece[] {
   const pts = dedupe(points);
   if (pts.length < 2) return [];
-  const cornerRadius = Number.isFinite(radius) && radius > 0 ? radius : 0;
+  const preferredRadius = Number.isFinite(radius) && radius > 0 ? radius : 0;
   const pieces: Piece[] = [];
   let cursor: Vec = pts[0] as Vec;
 
@@ -108,7 +107,10 @@ function buildPieces(points: readonly LayoutPoint[], radius: number): Piece[] {
       pushLine(point);
       continue;
     }
-    if (cornerRadius <= 0 || inLength < cornerRadius * 2 || outLength < cornerRadius * 2) {
+    // Shrink the fillet to fit the shorter neighbouring segment. Using half of
+    // each side guarantees the arc never reaches past that segment's midpoint.
+    const cornerRadius = Math.min(preferredRadius, inLength / 2, outLength / 2);
+    if (cornerRadius < EDGE_MIN_CORNER_RADIUS) {
       pushLine(point);
       continue;
     }
@@ -156,6 +158,24 @@ export function buildOrthogonalPath(
     }
   }
   return path;
+}
+
+/**
+ * SVG path for the shared trunk of a branch group.
+ *
+ * Layout emits one polyline: the feeder leaves the source card's edge, then the
+ * riser turns down the shared channel. Drawing that as one polyline would round
+ * the channel corner and cut the riser exactly where the first branch joins.
+ * Splitting it into a feeder subpath and a riser subpath keeps the first
+ * junction square; later corners on the riser still use the normal adaptive
+ * fillets because the riser is handed to `buildOrthogonalPath` as a polyline.
+ */
+export function buildTrunkPath(points: readonly LayoutPoint[]): string {
+  if (points.length < 2) return '';
+  if (points.length === 2) return buildOrthogonalPath(points);
+  const feeder = buildOrthogonalPath(points.slice(0, 2));
+  const riser = buildOrthogonalPath(points.slice(1));
+  return [feeder, riser].filter((part) => part !== '').join(' ');
 }
 
 /**
