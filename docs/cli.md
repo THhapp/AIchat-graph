@@ -1,7 +1,9 @@
 # AIchat-graph CLI 手册
 
 适用接口版本：2。程序版本以 aichat version 的实际输出为准。
-本手册面向人、脚本作者和任意 Agent，说明完整 CLI 行为；Skill 自带的命令参考是另一份独立文档。两者都应按实际命令核对，不以测试数量代替可用性结论。
+本手册面向人、脚本作者和任意 Agent，说明程序入口、工作区、数据流和完整 CLI 行为。
+独立运行或编写调用脚本时不需要 Skill。Skill 自带另一份独立命令参考，
+并提供讨论组织与节点写作方法；这些协作方法不作为程序校验条件。
 
 ## 入口与版本
 
@@ -35,7 +37,11 @@ version 返回程序名、程序版本、接口版本、构建标识、提交号
     aichat whoami --workspace <path>
     aichat whoami --workspace <path> --json
 
-whoami 核对并报告描述文件、运行服务、当前磁盘和真实工作区身份，同时给出本 CLI 与服务的接口版本和构建标识。接口缺失或不匹配时，whoami 仍尽量完成诊断；普通读取和写入会明确拒绝，不猜其他程序路径，不自动切换服务或工作区。
+whoami 核对描述文件、运行服务、当前磁盘和真实工作区身份，
+同时给出本 CLI 与服务的接口版本和构建标识。
+接口缺失或不匹配时，whoami 仍尽量完成诊断，在线读写拒绝连接该服务；
+read 可转为磁盘读取，在 source／online.reason 中说明原因并返回空 refs。
+这不是连接旧服务成功；写入不回退，也不猜其他程序路径、端口或工作区。
 升级或更新固定版本后，应停止旧服务、启动同版本服务，再让 CLI 指向同版本入口。不要用新 CLI 写旧服务，也不要把只更新 Skill 当成更新程序。
 
 ## 工作区与服务
@@ -55,6 +61,57 @@ init 只创建不存在的新目录，不覆盖已有工作区。serve 默认 12
     aichat whoami --workspace <path>
 
 topics 返回稳定 topicId、标题、入口路径和节点数；validate 检查磁盘结构与整图。日常保存后不必固定运行 validate，只有诊断异常、外部直接编辑或怀疑损坏时才需要。
+
+### 源文件、图与视图
+
+```text
+<工作区>/
+  workspace.json
+  AGENTS.md
+  topics/<主题目录>/
+    topic.md
+    <nodeId>.md
+  .aichat/
+```
+
+- workspace.json 保存工作区身份、格式与 activeNode；activeNode 不绑定外部 Agent 对话。
+- topic.md 保存主题身份和标题，正文为空；节点各自保存为 Markdown。
+- 节点头信息保存稳定 ID、标题、状态、from／flow、description 等属性；正文保存内容。
+  summary 是可选概述，important 是可选回看标记。编号和坐标由程序派生。
+- .aichat 保存缓存、本机导出绑定、服务描述与事务恢复信息；未恢复事务不能当缓存删除。
+- 新工作区的 AGENTS.md 是本地接入指南，可供宿主按自身规则加载；
+  它不授予源码开发权限，也不复制 Skill。程序不覆盖已有指南或用户的本地约定。
+
+每个主题有一个独立根。next 表示沿当前链继续，branch 表示从来源展开另一条链；
+非根节点只有一个父边，不能跨主题接边，最终结构必须无环且从主题根可达。
+节点正文的写作风格、何时视为共识，由使用者或外部 Agent 的协作方法决定。
+
+典型更新流程：外部 Agent 或脚本读取记录 → 提交 CLI 操作 → 本机服务检查旧版本、
+构造候选并校验 → 文件事务保存 Markdown → 重读源并发布有效快照 →
+浏览器收到 SSE 通知，取得图数据并计算布局。完整正文按需在详情中读取。
+
+服务还监听直接编辑的源文件。直接编辑是文件改变后再解析，不能与托管提交并行修改同一批文件；
+无效源产生诊断，服务保留上一份有效图。外部直接编辑不产生当前的最近更新标记。
+
+当前阅读器的全局主线在最左侧向下，分支向右且同源分支上下组织；
+卡片位置、干线、标签、主题筛选与折叠由程序处理，CLI 不提交自由坐标。
+目录折叠和图上折叠分别保存。浏览器的选择与外部 Agent 的记录目标分别管理。
+
+HTML 导出目标由用户在前端指定。已绑定的主题按有效快照自动生成完整单文件，
+包含折叠的分支和全部正文；离线页面只读，不连接服务或写回源文件。
+正文源、浏览视图和 HTML 成品分别维护，不需要手工双写。
+
+### 外部 Agent 接入
+
+给 Agent 实际程序入口、工作区和主题线索即可按本手册操作：
+
+1. 用 version、whoami 核对运行入口；服务未运行时按用户授权启动已有工作区。
+2. 用 topics 核对主题，保存稳定 topicId；已知节点可直接读取，不必先读全库。
+3. 按需要取正文和顶层 refs，选择 edit、next、branch、batch、insert 或 rearrange。
+4. 根据提交状态继续讨论；只有具体错误或异常才扩大诊断。
+
+新主题使用 create-topic，已有工作区不重复 init。
+采用随附 Skill 时，节点内容与讨论维护遵循其方法；自有 Agent 或脚本也可直接调用这些接口。
 
 ## 帮助与本地自查
 
@@ -77,7 +134,8 @@ aichat help <command> --json 返回机器可读说明，至少包含参数、必
 所有命令都按需接受 --workspace；省略时使用当前目录，serve 例外，必须显式给出。
 写命令的 --verbose 才输出路径、前后哈希、字节数、事务和完整服务身份；默认结果保持精简。
 
-Agent 高层写命令（edit／branch／next／connect／insert／batch／rearrange／important／create-*）的默认结果是顶层对象，不再包在 result 里：
+Agent 高层写命令（edit／branch／next／connect／insert／batch／rearrange／important／create-*）的默认结果是顶层对象，不再包在
+result 里：
 
     {
       "ok": true,
@@ -102,9 +160,11 @@ noop 或 committed_refresh_pending 时 refs 可以为空。
 底层 check／apply 仍使用各自的 {ok,command,requestId,httpStatus,service,result} 外壳，
 不等同于高层写结果。
 created.nodeIds 是本批创建节点；created.topicId 在创建主题时有值。refs 的键是稳定 nodeId，值是后续写入使用的 opaque token。
---verbose 才增加 httpStatus、service、transactionId、journalCleaned、touchedFiles、created.paths 和 created.topicPath。
+--verbose 才增加 httpStatus、service、transactionId、journalCleaned、touchedFiles、created.paths 和
+created.topicPath。
 
-读取结果不是写结果的外壳：它直接返回 ReadViewResponse，refs 同样在顶层。overview、structure 和离线读取的 refs 是空对象；content 在线读取只为自己实际返回的节点签发 refs。
+读取结果不是写结果的外壳：它直接返回 ReadViewResponse，refs 同样在顶层。overview、structure 和离线读取的 refs 是空对象；content
+在线读取只为自己实际返回的节点签发 refs。
 
 ### 提交状态
 
@@ -172,7 +232,8 @@ topics 和 validate 默认只读磁盘，不要求服务；whoami 需要服务�
 read 默认按主题给 overview；有 --node 时默认 content；有 --from 时默认 structure。三种粒度可以直接选择，不要求逐层经过。
 
     aichat read <topicId|relative-path> --workspace <path>
-    aichat read --topic <topicId|relative-path> [--view overview|structure] [--from <nodeId>] [--budget <n>]
+    aichat read --topic <topicId|relative-path> [--view overview|structure]
+                [--from <nodeId>] [--budget <n>]
     aichat read <topicId|relative-path> --view overview [--budget <n>]
     aichat read <topicId|relative-path> --view structure [--from <nodeId>] [--budget <n>]
     aichat read --node <nodeId> [--node <nodeId> ...] [--budget <n>]
@@ -412,7 +473,9 @@ status 查询原 requestId；unknown 既不证明成功也不证明失败。结�
 读取顶层 refs 后，用节点对应的 token 写入：
 
     .\aichat.cmd edit --ref "<token>" --append-file ".\补充.md" --workspace "D:\my-graph-vault"
-    .\aichat.cmd next --from-ref "<token>" --title "新的问题" --description "沿着上一个判断继续" --body-file ".\正文.md" --summary "新问题概述" --workspace "D:\my-graph-vault"
+    .\aichat.cmd next --from-ref "<token>" --title "新的问题" `
+      --description "沿着上一个判断继续" --body-file ".\正文.md" `
+      --summary "新问题概述" --workspace "D:\my-graph-vault"
 
 补充旧问题并记录新问题，一次提交：
 
@@ -421,7 +484,10 @@ status 查询原 requestId；unknown 既不证明成功也不证明失败。结�
 
 插入：
 
-    .\aichat.cmd insert --after-ref "<A token>" --before-ref "<B token>" --title "判断条件" --description "先引入判断条件" --next-description "满足条件后继续原问题" --body-file ".\判断.md" --workspace "D:\my-graph-vault"
+    .\aichat.cmd insert --after-ref "<A token>" --before-ref "<B token>" `
+      --title "判断条件" --description "先引入判断条件" `
+      --next-description "满足条件后继续原问题" `
+      --body-file ".\判断.md" --workspace "D:\my-graph-vault"
 
 写成功后从顶层 refs 取新 token：
 
@@ -440,8 +506,8 @@ status 查询原 requestId；unknown 既不证明成功也不证明失败。结�
 - 不自动合并或删除节点，不整主题替换；整理重复节点仍需基于正文判断和现有结构操作。
 - 不提供通用脚本语言、表达式引擎、工作流引擎或持久化 Agent 会话。
 - 不维护全局当前主题；前端浏览选择和其他对话焦点不改变本对话写入目标。
-- 不自动重排布局或修改前端视觉。
+- CLI 不直接指定节点坐标或前端样式；阅读器根据结构自动计算版式。
 - batch 不能创建主题或跨主题；insert 不能降级为 branch。
 - 不对旧接口提供别名、双轨输出或永久兼容层。接口版本不匹配时更新程序和服务，而不是猜路径。
 
-程序手册到此。Skill 的实际记录流程、工作区核对和宿主安装边界见 Skill 包自带的 SKILL.md 与 references；两份 CLI 文档各自独立维护，发布时用真实命令核对。
+本手册随程序分发；Skill 自带的命令参考独立说明同一接口，不是本手册的运行依赖。

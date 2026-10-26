@@ -1,6 +1,8 @@
-# 工作区与目录职责
+# 接入与主题绑定
 
-首次接入、换工作区、定位主题或检查安装副本时查阅，不是每轮的扫描清单。
+首次接入、换工作区、定位主题或核对宿主绑定时查阅，不是每轮的扫描清单。
+本页说明 Agent 在哪里操作、如何沿用本对话目标；完整命令行为在随附 commands.md。
+程序构建、日用快照发布与宿主安装属于独立维护任务，不是每轮记录的前置步骤。
 
 ## 分清位置与授权
 
@@ -59,15 +61,15 @@ Agent 使用与实际服务相同版本的 CLI 和 Skill，先区分以下位置
 | 使用方式 | CLI | Skill |
 | --- | --- | --- |
 | 仓库开发 | `<repo>/dist/cli/index.js` 或 `<repo>/aichat.cmd` | `<repo>/skills/aichat-graph` |
-| 日用快照 | `<repo>/.local/daily/dist/cli/index.js` 或 `.local/daily/aichat.cmd` | 同一快照的 `skills/aichat-graph` |
+| 日用快照 | `<repo>/.local/daily/dist/cli/index.js` | 同一快照的 `skills/aichat-graph` |
 | 已安装副本 | 本机 local.env.json 的 cli | 安装目录中的 SKILL.md、references 和 scripts |
 
 源码变化不自动更新日用快照，日用更新也不会自动同步已安装副本。
 开发库和正式讨论库分别绑定，不能因当前 shell 在源码目录就混用开发 CLI 写正式库。
 
-仓库入口缺少 dist 时，构建按当前任务授权执行。
-只构建 Node CLI 可用 `npm run build:node`；运行完整界面和导出需要完整构建。
-版本与接口用 `version`、`whoami` 核对；程序手册随程序分发，Skill 自带完整命令参考见 commands.md。
+版本与接口用 version、whoami 核对；Skill 自带完整命令参考，无需依赖程序手册的路径。
+记录任务遇到 dist 缺失或接口不匹配时，说明缺口；按已有授权启动同版服务或进入独立更新流程。
+不因正在记录讨论就自动安装依赖、重建程序、替换日用快照或迁移资料。
 不要仅凭仓库文档更新，就认定日用版或安装副本已支持新参数。
 
 ### Skill 自带启动脚本
@@ -81,8 +83,8 @@ Agent 使用与实际服务相同版本的 CLI 和 Skill，先区分以下位置
    先核对祖先确实包含本项目 Skill，不能把任意宿主祖先当成工程。
 4. 都不可用时退出码 7，报告尝试路径和修复办法，不猜正式库或改写配置。
 
-脚本与安装同步工具需要 PowerShell 7（pwsh）；仓库根目录的 start*.cmd 启动器
-使用 Windows PowerShell 5.1。接入时核对实际命令环境，不混用两套脚本要求。
+这个适配器需要 PowerShell 7（pwsh）；程序本身可以直接经 node 或 aichat.cmd 调用。
+接入时核对实际命令环境，不因为使用 CLI 就额外安装 Skill 或 pwsh。
 
 ```powershell
 pwsh -NoProfile -File '<Skill目录>/scripts/aichat.ps1' topics --workspace '<工作区>'
@@ -92,38 +94,22 @@ local.env.json 的 workspace、source 或启动器信息可作为本机定位线
 包装脚本只从 cli 字段取得程序入口，不自动套用 workspace，也不执行 source 同步。
 每条命令仍显式给出 `--workspace`。配置不进仓库，更新时保留其全部原始内容。
 
-### 更新与安装副本
+### 安装副本的使用边界
 
-以下仅在用户要求安装或更新、且持有相应授权时执行：
+Skill 可以直接从程序随附目录读取，宿主安装副本只是另一种加载方式。
+已安装副本需要仍然存在的程序入口；移动程序后按授权更新绑定，不能靠旧 source 线索自动切换。
 
-- `update-daily.cmd` 从完整构建更新日用程序和 Skill，运行中拒绝替换。
-  不强停用户服务、不迁移资料库、不自动拉取 GitHub。
-- 已安装副本另用仓库的 `scripts/install-skill.ps1` 同步通用文件。
-  必须显式给宿主 `-Host workbuddy|codex` 或绝对目录 `-Target`；两者不能同时给。
-- `-Daily` 选择日用快照，显式 `-Source` 优先于它。
-  同步只更新 SKILL.md、references、scripts，保留 local.env.json，不伪造本机绑定。
-
-仅整理 Skill 说明或脚本排版、且核对日用与仓库的完整 CLI 构建同版时，
-可用显式 `-Source` 和 `-Target` 单独同步日用的 skills/aichat-graph 目录。
-这不替换程序、不结束服务；不能只比较入口 index.js 就认定全部命令同版。
-CLI 能力或接口版本有变化时先更新对应程序与同版 Skill，不能用新说明覆盖旧版运行入口。
-更新后用该副本入口执行 --help、version，必要时 whoami；文件哈希一致不等于宿主已重新加载。
-
-```powershell
-# 从仓库目录执行；只同步实际需要更新的宿主
-pwsh scripts/install-skill.ps1 -Daily -Host codex
-pwsh scripts/install-skill.ps1 -Daily -Host workbuddy
-```
-
-各宿主分别同步、分别核对，不能用一个副本的结果代表其他副本。
-比较通用文件和配置哈希，使用该副本的包装脚本运行 --help，必要时再核对 whoami。
-文件一致和帮助可用不等于宿主已重新加载 Skill，也不证明实际工作区在线可写。
+记录时保留 local.env.json 的原始配置，不把本机路径写进通用参考文件。
+需要安装或更新时，按独立任务的授权同步通用文件，并分别核对实际宿主。
+CLI 接口变化须对应更新程序、服务和 Skill；只同步说明不能升级旧程序。
+文件一致、--help 可用、宿主已加载和工作区在线可写，是分别需要核对的状态。
 
 ## 工作区文件职责
 
 ```text
 <工作区>/
   workspace.json
+  AGENTS.md
   topics/<主题目录>/
     topic.md
     <nodeId>.md
@@ -133,6 +119,7 @@ pwsh scripts/install-skill.ps1 -Daily -Host workbuddy
 ```
 
 - workspace.json：工作区身份、格式、主题模式和讨论焦点，焦点不是聊天主题绑定。
+- AGENTS.md：新工作区的接入指南及用户本地约定；是否加载取决于宿主，不是本 Skill 的副本。
 - topic.md：主题元数据，不聚合复制全部节点正文。
 - 节点 Markdown：正文与邻近结构元数据，是维护源。
 - exports.json：本机导出目标，由前端／服务管理。

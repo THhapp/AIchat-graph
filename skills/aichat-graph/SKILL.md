@@ -12,11 +12,14 @@ description: >-
 让讨论留下可理解、可继续的实体思考图。
 Agent 维护 Markdown 节点和关系，实时界面跟进讨论，独立 HTML 用于回顾。
 
+程序独立提供 CLI、存储、校验、布局和导出；本 Skill 提供讨论与记录方法，
+并随附完整命令参考。接入时使用实际程序入口，不把 Skill 安装目录当作程序或资料库。
+
 ## 按需查阅
 
 | 场景 | 读取 |
 | --- | --- |
-| 首次接入、选主题、确认 CLI 或同步副本 | [工作区与目录职责](references/workspace.md) |
+| 首次接入、选主题、核对入口与宿主绑定 | [接入与主题绑定](references/workspace.md) |
 | 首次操作、读取分页、写入或命令报错 | [命令参考](references/commands.md) |
 | 组织节点、写概述和共识、整体整理 | [节点内容与维护分寸](references/maintenance.md) |
 
@@ -93,7 +96,7 @@ Agent 维护 Markdown 节点和关系，实时界面跟进讨论，独立 HTML �
   程序负责整次预算和分页；将 `page.next` 原样交回 `--cursor`，不手算各卡偏移。
   正文标题定位用 `--from-heading`，同名标题序号用 `--occurrence`（0 起）。
 - 写入凭据统一在读取或写入结果的**顶层 `refs[nodeId]`**；命令参数只接收其中的 token 字符串。
-  离线读取的 refs 为空，不能写入。不要再从 item.editRef、result.editRef 或 editRefs 取凭据。
+  离线读取的 refs 为空，不能写入。
 - 同一轮补充旧问题并记录新问题用 batch；链中插入用 insert；两者都是一次事务。
   batch 的局部名称只在本输入有效，不能当稳定 ID 或凭据；结果看 created.aliases 与顶层 refs。
 - 哈希与身份由工具核对。冲突后重读并重新判断，不自动补新哈希强行提交。

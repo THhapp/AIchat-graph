@@ -2,7 +2,8 @@
 
 适用接口版本：2。程序版本和构建标识用当前入口的 version/whoami 核对。
 本文件是 aichat-graph Skill 随附的完整 CLI 参考，面向讨论图维护场景；与程序仓库的程序手册是两份独立文档。
-开始前先按 SKILL.md 确认工作区、主题和本机入口；本文件不替代协作内容判断。
+开始前按 SKILL.md 和[接入与主题绑定](workspace.md)确认工作区、主题和本机入口。
+正文组织与共识判断按 maintenance.md；本文件负责实际命令行为。
 
 ## 入口与调用
 
@@ -11,7 +12,7 @@
     node <实际程序目录>/dist/cli/index.js <command> [options]
     <实际程序目录>/aichat.cmd <command> [options]
 
-固定版本目录通常为 .local/daily，安装副本的 local.env.json 会指向同一入口。
+固定版本目录通常为 .local/daily；安装副本的 local.env.json 应绑定期望的实际程序入口。
 始终显式传 --workspace，不依赖上一聊天的隐藏路径或 shell 当前目录。
 默认输出 JSON；--text 只是简短摘要。帮助和版本不需要工作区或服务：
 
@@ -20,9 +21,10 @@
     aichat help batch --json
     aichat version --json
 
-接口版本是 2；`version` 报告程序、接口与构建标识，`whoami` 同时核对
-CLI、服务、描述文件与磁盘身份。接口缺失或不匹配时普通读写退出 7 并明确提示，
-不猜路径；whoami 例外仍可诊断，read 可回退磁盘并在 online.reason 说明。
+接口版本是 2；version 报告程序、接口与构建标识，whoami 同时核对
+CLI、服务、描述文件与磁盘身份。接口缺失或不匹配时在线读写拒绝该服务；
+whoami 仍可诊断，read 可回退磁盘并在 source／online.reason 说明、返回空 refs。
+写入退出 7，不回退，不猜其他路径或工作区。
 不要用新 CLI 写旧服务，也不要把只同步 Skill 当成更新程序。
 
 初次接入先核对主题，不要凭标题猜 topicId：
@@ -67,7 +69,6 @@ overview、structure 和离线读取的 refs 是空对象；在线 content 只�
     }
 
 写成功后从顶层 refs 继续修改；created.aliases 只把本批 local 名称映射到稳定 nodeId，不是凭据。
-不要从 result.editRef、result.editRefs 或 items[i].editRef 取凭据，这些位置已不再使用。
 --verbose 才输出路径、哈希、事务和完整服务身份；默认只看精简结果。底层 check／apply 仍保留各自的 result 外壳，不属于这套高层写结果。
 
 写入还要看 state：
@@ -126,7 +127,8 @@ STALE_READ：相关范围已变，丢弃旧 cursor，从原范围重新读；无
 
 ### 修改已有问题
 
-    aichat edit --ref <token> --title <标题> --state agreed|proposed|reference --summary <概述> --workspace <ws>
+    aichat edit --ref <token> --title <标题> --state agreed|proposed|reference
+                --summary <概述> --workspace <ws>
     aichat edit --ref <token> --append-file <补充.md> --workspace <ws>
     aichat edit --ref <token> --replace-file <替换.json> --workspace <ws>
     aichat edit --ref <token> --body-file <完整正文.md> --workspace <ws>
@@ -250,7 +252,8 @@ dry-run：
 ### rearrange：只表达最终入边
 
     aichat rearrange --input <rearrange.json> --workspace <ws>
-    Get-Content -Raw -Encoding utf8 <rearrange.json> | aichat rearrange --input-stdin --workspace <ws>
+    Get-Content -Raw -Encoding utf8 <rearrange.json> |
+      aichat rearrange --input-stdin --workspace <ws>
 
     {
       "edits": [
@@ -315,7 +318,8 @@ rearrange 只改已有节点的最终入边，不同时创建或编辑正文。
 - serve --workspace [--port]：启动本机服务；同一工作区不要开两个写进程。
 - whoami --workspace：报告 CLI、服务、描述文件、磁盘身份、接口版本与构建是否一致；不匹配时仍可诊断。
 - edit：原位修改已有节点；--ref 来自顶层 refs。
-- branch／next／create-topic／create-root：创建节点或主题；正文来源三选一，支持 --summary。create-root 只用于空工作区；已有内容新增节点用 next／branch／insert／batch。
+- branch／next／create-topic／create-root：创建节点或主题；正文来源三选一，支持 --summary。create-root 只用于空工作区；
+  已有内容新增节点用 next／branch／insert／batch。
 - connect：改已有节点最终来源/flow/说明；flow 只取 next|branch，root 不可改接。
 - insert：A→N→B→C 当前相邻链插入，一次事务。
 - batch：一个已存在主题内 edit/create/connect/important 原子批次；支持 --dry-run。
@@ -325,7 +329,8 @@ rearrange 只改已有节点的最终入边，不同时创建或编辑正文。
 - apply --input <ChangeRequest.json>：底层显式提交，须带真实旧哈希，结果保留 result 外壳。
 - status <requestId|--input>：查询原请求；unknown 不代表未写入。
 
-错误分类：过期凭据 412、占位/语义冲突 409、格式/结构 422；结果未知退出码 8。所有命令的完整参数和最小示例以当前入口的 <command> --help、help <command> --json 为准；本索引不替代具体参数说明。
+错误分类：过期凭据 412、占位/语义冲突 409、格式/结构 422；结果未知退出码 8。所有命令的完整参数和最小示例以当前入口的 <command> --help、help
+<command> --json 为准；本索引不替代具体参数说明。
 
 ## 快速路径
 

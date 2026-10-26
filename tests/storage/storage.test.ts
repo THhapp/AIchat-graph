@@ -164,10 +164,11 @@ describe("初始化与读取", () => {
     const entries = (await fs.readdir(root)).sort();
     expect(entries).toEqual([".aichat", ".gitignore", "AGENTS.md", "topics", "workspace.json"]);
     const agents = await readText(root, "AGENTS.md");
-    // 指南按真实格式（一节点一份 Markdown）简短说明，不复制架构正文或示例思想。
-    expect(agents).toContain("aichat apply");
+    // 指南只保留工作区接入边界，指向当前高层命令，不复制 Skill 或完整 schema。
+    expect(agents).toContain("aichat batch");
     expect(agents).toContain("一个节点一份 Markdown");
     expect(agents).toContain("description");
+    expect(agents).toContain("refs[nodeId]");
     expect(agents).not.toContain("<!-- node:");
     expect(agents).toContain(".aichat/");
     // 检查必要小节与真实命令，不绑定整体行数。
