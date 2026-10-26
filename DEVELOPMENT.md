@@ -1,7 +1,7 @@
 # 开发与工程约束
 
 本文件集中维护开发操作、模块边界和跨模块约束。
-产品用法见 [README](README.md)，Agent 协作规则见 [AGENTS](AGENTS.md)。按任务阅读相关章节。
+产品用法见 [README](README.md)。按任务阅读相关章节；个人 Agent 协作约定可放本机 AGENTS.md，不随仓库分发。
 
 ## 文档维护边界
 
@@ -10,7 +10,7 @@
 | README.md | 用户能做什么、怎么使用、实际限制 | 用户操作或可见行为改变 |
 | docs/cli.md | 程序自身完整 CLI 手册：入口、版本、命令、参数、输入输出、错误与恢复 | 程序 CLI 接口或行为改变 |
 | DEVELOPMENT.md | 开发入口、数据流、跨模块契约与安全约束、验证方法 | 工程操作或跨模块契约改变 |
-| AGENTS.md | 角色、授权、调度和停止规则 | 协作规则改变 |
+| AGENTS.md（本机，不入库） | 个人 Agent 角色、授权、调度和停止规则 | 个人协作约定改变 |
 | skills/aichat-graph/SKILL.md | Skill 入口、适用范围与按需路由 | 协作方法或启用边界改变 |
 | skills/aichat-graph/references/commands.md | Skill 自带的完整 CLI 参考 | CLI 行为改变 |
 | skills/aichat-graph/references/workspace.md | 记录 Agent 的接入、主题绑定与目录识别 | 接入或定位方式改变 |
@@ -30,7 +30,7 @@ references 的指引。
 CLI 接口变化核对两份命令文档及真正受影响的指南；纯写作方法变化只改 Skill。
 程序不强制 Skill 的正文模板或共识约定，调用 CLI 不要求安装 Skill。
 
-仓库根目录 AGENTS.md 管开发协作，工作区 AGENTS.md 管本地资料接入，
+仓库根目录 AGENTS.md 是可选的本机开发协作约定，已从 Git 跟踪排除；工作区 AGENTS.md 管本地资料接入，
 两者不互相授予权限，也不充当 Skill 副本。
 工作区指南模板在 src/storage/init.ts，只对以后初始化的新工作区生效；
 程序升级不回写已有指南或用户本地约定。

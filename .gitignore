@@ -41,6 +41,9 @@ yarn-error.log*
 *.local.json
 /.local/
 
+# Personal agent collaboration instructions stay local to this checkout.
+/AGENTS.md
+
 # Local workspaces that must not be committed by accident.
 # The daily workspace is bound by machine-local configuration; development defaults
 # to the ignored .local/ directory. Rules below are root-anchored so nested fixture
