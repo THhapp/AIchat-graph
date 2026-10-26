@@ -21,7 +21,12 @@ import {
   type CommitFileInput,
   type PreparedChanges,
 } from "../storage/index.js";
-import type { AgentChangeRequest, AgentChangeResponse, AgentEditRef } from "../shared/protocol.js";
+import type {
+  AgentBatchAction,
+  AgentBatchCheckResponse,
+  AgentChangeRequest,
+  AgentChangeResponse,
+} from "../shared/protocol.js";
 import { compileAgentAction, issueRefForNode } from "./agent/compile.js";
 import type { Diagnostic } from "../shared/protocol.js";
 import type { StorageDiagnostic } from "../storage/index.js";
@@ -163,15 +168,15 @@ function contentNodeIdsOf(prepared: PreparedChanges): string[] {
   return [...(prepared.contentNodeIds ?? prepared.changedNodeIds)];
 }
 
-/** changedNodeIds 中仍在快照里的节点各签发一份刷新后凭据，供调用方继续改。 */
-function editRefsOf(
+/** changedNodeIds 中仍在快照里的节点各签发一份刷新后不透明凭据。 */
+function refsOf(
   runtime: WorkspaceRuntime,
   nodeIds: readonly string[],
-): Record<string, AgentEditRef> {
-  const refs: Record<string, AgentEditRef> = {};
+): Record<string, string> {
+  const refs: Record<string, string> = {};
   for (const nodeId of nodeIds) {
     const issued = issueRefForNode(runtime, runtime.editRefs, nodeId);
-    if (issued !== null) refs[nodeId] = issued;
+    if (issued !== null) refs[nodeId] = issued.ref;
   }
   return refs;
 }
@@ -445,34 +450,65 @@ function agentResponseOf(
     ok: true,
     requestId: request.requestId,
     action: request.action.action,
+    workspaceId: runtime.workspaceId,
+    topicId: compiled.topicId,
     state: outcome.state,
     created: compiled.created,
     changedNodeIds: prepared.changedNodeIds,
+    // 刷新待完成时旧凭据不可继续使用：只有本次已经能读到新快照才签发。
+    refs: {},
     touchedFiles: outcome.touchedFiles,
-    editRef: null,
-    editRefs: {},
     summary: prepared.summary,
     diagnostics: outcome.diagnostics,
     transactionId: outcome.transactionId,
     journalCleaned: outcome.journalCleaned,
   };
 
-  if (outcome.state === "committed_refresh_pending") {
-    // 刷新失败时旧编辑凭据不可继续使用。
-    return base;
-  }
+  if (outcome.state === "committed_refresh_pending") return base;
+  return { ...base, refs: refsOf(runtime, prepared.changedNodeIds) };
+}
 
-  const primary = compiled.primaryNodeId;
-  return {
-    ...base,
-    editRef:
-      outcome.state === "noop"
-        ? issueRefForNode(runtime, runtime.editRefs, primary ?? "")
-        : primary === null
-          ? null
-          : issueRefForNode(runtime, runtime.editRefs, primary),
-    editRefs: editRefsOf(runtime, prepared.changedNodeIds),
-  };
+/** dry-run：只编译与检查，不写盘、不写 agentLog、不更新最近更新。 */
+async function checkAgentBatch(
+  runtime: WorkspaceRuntime,
+  request: AgentChangeRequest,
+  action: AgentBatchAction,
+): Promise<AgentBatchCheckResponse> {
+  return runtime.queue.run(async () => {
+    const files = await readWorkspaceFiles(runtime.rootReal);
+    const compiled = compileAgentAction(
+      { runtime, editRefs: runtime.editRefs, requestId: request.requestId, generated: null },
+      action,
+    );
+    let prepared: PreparedChanges;
+    try {
+      prepared = prepareChanges(files, {
+        workspaceId: request.workspaceId,
+        requestId: request.requestId,
+        expectedFiles: compiled.expectedFiles,
+        operations: compiled.operations,
+      });
+    } catch (error) {
+      diagnoseChange(error);
+    }
+    return {
+      ok: true as const,
+      command: "batch" as const,
+      dryRun: true as const,
+      state: "checked" as const,
+      requestId: request.requestId,
+      workspaceId: runtime.workspaceId,
+      topicId: compiled.topicId,
+      summary: prepared.summary,
+      diagnostics: preparedDiagnostics(prepared),
+      files: prepared.files.map((file) => ({
+        path: file.path,
+        beforeSha256: file.expectedSha256,
+        nextSha256: file.content === null ? null : sha256Bytes(file.content),
+        deleted: file.content === null,
+      })),
+    };
+  });
 }
 
 /**
@@ -486,7 +522,11 @@ export async function applyAgentChange(
   runtime: WorkspaceRuntime,
   request: AgentChangeRequest,
   rawBodyHash: string,
-): Promise<AgentChangeResponse> {
+): Promise<AgentChangeResponse | AgentBatchCheckResponse> {
+  // dry-run 只在 batch 上存在（schema 已限制）；只检查，不进入幂等日志。
+  if (request.action.action === "batch" && request.dryRun === true) {
+    return checkAgentBatch(runtime, request, request.action);
+  }
   return runQueuedWrite<AgentChangeResponse>(
     runtime,
     rawBodyHash,

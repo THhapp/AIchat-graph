@@ -34,7 +34,9 @@ function Get-SnapshotFileHash([string] $Path) {
   finally { $algorithm.Dispose(); $stream.Dispose() }
 }
 
-function Assert-DailySnapshot {
+<# 只核对快照身份：私有路径、清单可读、kind 与 schemaVersion 正确。
+   更新器在替换旧快照前也用这一层，因此不断言新版本才有的文件。 #>
+function Assert-DailySnapshotManifest {
   Assert-PrivatePath $DailyRoot
   $manifest = Join-Path $DailyRoot 'snapshot.json'
   if (-not (Test-Path -LiteralPath $manifest)) {
@@ -45,6 +47,11 @@ function Assert-DailySnapshot {
   if ($snapshot.kind -ne 'aichat-daily' -or $snapshot.schemaVersion -ne 1) {
     Fail '无法识别此日用快照。' '不要把用户工作区放进 .local/daily；请用 update-daily.cmd 准备程序快照。'
   }
+}
+
+<# 日用启动前核对完整快照：身份 + 全部运行产物、根入口与程序手册。 #>
+function Assert-DailySnapshot {
+  Assert-DailySnapshotManifest
   foreach ($relative in @($RequiredOutputs) + @('package.json', 'package-lock.json', 'node_modules', 'skills\aichat-graph\SKILL.md')) {
     if (-not (Test-Path -LiteralPath (Join-Path $DailyRoot $relative))) {
       Fail ('日用快照不完整：' + $relative) '验证开发构建后执行 update-daily.cmd；启动器不会回退使用开发文件。'
@@ -90,17 +97,24 @@ function Update-DailySnapshot {
     Assert-DailyNotRunning
     Assert-PrivatePath $DailyRoot
     if (Test-Path -LiteralPath $DailyRoot) {
-      Assert-DailySnapshot
-      $allowed = @('dist', 'node_modules', 'package.json', 'package-lock.json', 'snapshot.json', 'skills', 'LICENSE', 'THIRD_PARTY_NOTICES.txt')
+      Assert-DailySnapshotManifest
+      $allowed = @('dist', 'node_modules', 'package.json', 'package-lock.json', 'snapshot.json', 'skills', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'aichat.cmd', 'docs')
       $unexpected = @(Get-ChildItem -LiteralPath $DailyRoot -Force | Where-Object { $_.Name -notin $allowed })
       if ($unexpected.Count -gt 0) { throw '日用快照包含预期以外的文件，不会移动或清理。' }
     }
 
-    $oldest = [datetime]::MaxValue
+    # 待分发的构建产物、根入口与程序手册必须先在工程里齐全。
     foreach ($relative in $RequiredOutputs) {
       $path = Join-Path $ProjectRoot $relative
-      if (-not (Test-Path -LiteralPath $path)) { throw ('缺少构建产物：' + $relative + '。请执行 npm ci 和 npm run build，完成验证后再更新。') }
-      $stamp = (Get-Item -LiteralPath $path).LastWriteTime
+      if (Test-Path -LiteralPath $path) { continue }
+      if ($BuildOutputs -contains $relative) {
+        throw ('缺少构建产物：' + $relative + '。请执行 npm ci 和 npm run build，完成验证后再更新。')
+      }
+      throw ('缺少分发文件：' + $relative + '。根入口 aichat.cmd 与 docs/cli.md 必须随程序一起提供。')
+    }
+    $oldest = [datetime]::MaxValue
+    foreach ($relative in $BuildOutputs) {
+      $stamp = (Get-Item -LiteralPath (Join-Path $ProjectRoot $relative)).LastWriteTime
       if ($stamp -lt $oldest) { $oldest = $stamp }
     }
     if ((Get-NewestWriteTime $InputPaths) -gt $oldest) {
@@ -112,9 +126,12 @@ function Update-DailySnapshot {
     $ready = Join-Path $stage 'ready'
     $previous = Join-Path $stage 'previous'
     [void](New-Item -ItemType Directory -Path $ready -Force)
-    foreach ($relative in @('dist', 'package.json', 'package-lock.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt')) {
+    foreach ($relative in @('dist', 'package.json', 'package-lock.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'aichat.cmd')) {
       Copy-Item -LiteralPath (Join-Path $ProjectRoot $relative) -Destination $ready -Recurse
     }
+    # 根入口与程序手册随快照分发，使用者无需安装 Skill 即可调用和查阅。
+    [void](New-Item -ItemType Directory -Path (Join-Path $ready 'docs'))
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'docs\cli.md') -Destination (Join-Path $ready 'docs\cli.md')
     [void](New-Item -ItemType Directory -Path (Join-Path $ready 'skills'))
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'skills\aichat-graph') -Destination (Join-Path $ready 'skills') -Recurse
     # local.env.json 是本机安装绑定（CLI／工作区绝对路径），不属于通用内容。
@@ -176,7 +193,7 @@ function Update-DailySnapshot {
       }
       Write-Info '已保留本机绑定 local.env.json（内容未修改）。'
     }
-    Write-Info '仅更新程序文件和 Skill，没有更改工作区或本机启动配置。'
+    Write-Info '仅更新程序文件、根入口、程序手册和 Skill，没有更改工作区或本机启动配置。'
   } catch { $updateError = $_.Exception.Message }
   finally {
     if ($stage -and -not $preserveStage) {

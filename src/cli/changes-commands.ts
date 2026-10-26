@@ -6,12 +6,12 @@
  * CLI 不补哈希、不改写 workspaceId。
  */
 import path from "node:path";
-import { parseOptions } from "./args.js";
+import { parseCommandArgs } from "./command-specs.js";
 import { readChangeRequestFile, type ChangeRequest } from "./change-input.js";
+import { INTERFACE_VERSION, loadProgramInfo } from "../build-info.js";
 import type { CliContext } from "./context.js";
 import { CliError, EXIT_CODES, UsageError, invalidArgument } from "./errors.js";
 import { applyChanges, checkChanges, queryChangeStatus } from "./changes-transport.js";
-import { OUTPUT_OPTIONS, WORKSPACE_OPTION } from "./options.js";
 import { emit, parseOutputMode } from "./output.js";
 import { resolveServiceForWorkspace } from "./service-client.js";
 import { briefUsage } from "./usage.js";
@@ -37,11 +37,7 @@ export async function runCheckOrApply(
   args: readonly string[],
   ctx: CliContext,
 ): Promise<number> {
-  const parsed = parseOptions(
-    args,
-    [WORKSPACE_OPTION, { name: "input" }, ...OUTPUT_OPTIONS],
-    0,
-  );
+  const parsed = parseCommandArgs(command, args);
   const mode = parseOutputMode(parsed);
   const root = await workspaceRoot(parsed, ctx);
   const inputRaw = parsed.values.get("input");
@@ -77,11 +73,7 @@ export async function runCheckOrApply(
 }
 
 export async function runStatus(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(
-    args,
-    [WORKSPACE_OPTION, { name: "input" }, { name: "request-id" }, ...OUTPUT_OPTIONS],
-    1,
-  );
+  const parsed = parseCommandArgs("status", args);
   const mode = parseOutputMode(parsed);
   const root = await workspaceRoot(parsed, ctx);
   let requestId = parsed.positional[0] ?? parsed.values.get("request-id");
@@ -130,25 +122,60 @@ export async function runStatus(args: readonly string[], ctx: CliContext): Promi
   return EXIT_CODES.ok;
 }
 
+/**
+ * 身份诊断：即使服务接口缺失或不匹配也完成报告，不因不匹配而无法排查。
+ *
+ * 旧字段（ok／url／descriptor／identity／diskWorkspaceId）保持不变，便于现有脚本
+ * 读取 .ok／.url／.identity.instanceId／.identity.workspaceId；版本信息放在
+ * cli／service／interface／build 额外字段。
+ */
 export async function runWhoami(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(args, [WORKSPACE_OPTION, ...OUTPUT_OPTIONS], 0);
+  const parsed = parseCommandArgs("whoami", args);
   const mode = parseOutputMode(parsed);
   const root = await workspaceRoot(parsed, ctx);
-  const service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch);
+  // whoami 是诊断命令：允许接口不匹配，仍要报告双方身份。
+  const service = await resolveServiceForWorkspace(root, ctx.fetchImpl ?? fetch, {
+    requireInterface: false,
+  });
+  const cliProgram = loadProgramInfo();
+  const serviceProgram = service.identity.program;
+  const interfaceCompatible = service.interfaceCompatible;
+  const buildSame =
+    serviceProgram !== null && serviceProgram.buildId === cliProgram.buildId;
   const payload = {
     ok: true,
     command: "whoami",
     root: service.root,
     url: service.baseUrl,
+    cli: cliProgram,
+    service: serviceProgram,
+    interface: {
+      expected: INTERFACE_VERSION,
+      actual: serviceProgram?.interfaceVersion ?? null,
+      compatible: interfaceCompatible,
+    },
+    build: {
+      same: buildSame,
+      cli: cliProgram.buildId,
+      service: serviceProgram?.buildId ?? null,
+    },
     descriptor: service.descriptor,
     identity: service.identity,
     diskWorkspaceId: service.diskWorkspaceId,
   };
-  emit(ctx, mode, payload, [
+  const lines = [
     `url ${service.baseUrl}`,
     `workspaceId ${service.identity.workspaceId}`,
     `instanceId ${service.identity.instanceId}`,
     `rootPath ${service.identity.rootPath}`,
-  ]);
+    `cli ${cliProgram.program} ${cliProgram.version} interface ${String(cliProgram.interfaceVersion)} build ${cliProgram.buildId}`,
+    serviceProgram === null
+      ? "service (未声明 program：可能是旧版服务)"
+      : `service ${serviceProgram.program} ${serviceProgram.version} interface ${String(serviceProgram.interfaceVersion)} build ${serviceProgram.buildId}`,
+    `interface ${interfaceCompatible ? "compatible" : "INCOMPATIBLE"}` +
+      (serviceProgram === null ? "" : ` (expected ${String(INTERFACE_VERSION)}, actual ${String(serviceProgram.interfaceVersion)})`),
+    `build ${buildSame ? "same" : "different"}`,
+  ];
+  emit(ctx, mode, payload, lines);
   return EXIT_CODES.ok;
 }

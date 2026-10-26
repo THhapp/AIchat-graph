@@ -60,6 +60,8 @@ export interface CreateNodeOperation {
   readonly side?: NodeHeader["side"] | undefined;
   readonly order?: number | undefined;
   readonly summary?: string | undefined;
+  /** 新建即标记"值得关注"；false／缺省不写该字段。 */
+  readonly important?: boolean | undefined;
 }
 
 export interface UpdateNodeOperation {
@@ -157,6 +159,7 @@ const operationSchema = z.discriminatedUnion("op", [
     side: branchSideSchema.optional(),
     order: z.int().optional(),
     summary: singleLine("summary").optional(),
+    important: z.boolean().optional(),
   }),
   z.strictObject({
     op: z.literal("updateNode"),

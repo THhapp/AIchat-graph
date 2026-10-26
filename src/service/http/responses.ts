@@ -1,6 +1,7 @@
 /** 快照与真实磁盘详情的传输组装；不改变发布版本或源文件。 */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadProgramInfo } from "../../build-info.js";
 import { parseWorkspaceDocuments } from "../../core/index.js";
 import { readWorkspaceFiles, StorageError } from "../../storage/index.js";
 import { captureResources } from "../../export/index.js";
@@ -35,6 +36,8 @@ function runtimeAgentEntry(): { cliPath: string; skillPath: string } {
 export function workspaceResponse(runtime: WorkspaceRuntime): WorkspaceResponse {
   return {
     ...runtime.snapshotVersion(),
+    // 程序身份只增字段，不改既有 workspaceId／rootPath 等约定。
+    program: loadProgramInfo(),
     workspaceId: runtime.workspaceId,
     name: runtime.current.data.name,
     rootPath: runtime.rootReal,

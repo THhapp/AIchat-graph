@@ -13,6 +13,16 @@ export interface IoContext {
   readonly stdin: () => Promise<string>;
 }
 
+/** 统一换行：服务端按 LF 写入正文。 */
+export function normalizeText(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}
+
+/** 生成 IoContext；stdin 缺省读真实 stdin。 */
+export function ioContext(cwd: string, stdin?: (() => Promise<string>) | undefined): IoContext {
+  return { cwd, stdin: stdin ?? readStdinText };
+}
+
 export interface BodySourceFlags {
   /** 直接写在内联文本里（短正文）。 */
   readonly body?: string | undefined;

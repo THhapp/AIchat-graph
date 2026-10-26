@@ -108,21 +108,26 @@ interface OnlineNode {
   readonly truncated: boolean;
   readonly path: string;
   readonly fileHash: string;
-  readonly editRef?: { ref: string };
   readonly range: { start: number; end: number; total: number; unit: string };
 }
 
-async function readNodeJson(nodeId: string, extra: string[] = []): Promise<OnlineNode> {
+async function readNodeJson(
+  nodeId: string,
+  extra: string[] = [],
+): Promise<OnlineNode & { ref: string }> {
   const result = await main(["read", "--node", nodeId, "--workspace", root, ...extra]);
   expect(result.exitCode).toBe(0);
   const body = JSON.parse(result.stdout) as {
     source: string;
     items: OnlineNode[];
+    refs: Record<string, string> | undefined;
   };
   const node = body.items[0];
   expect(node).toBeDefined();
-  // source 现在只出现在顶层；helper 把它带进返回值，保持旧用例的阅读方式。
-  return { ...(node as OnlineNode), source: body.source };
+  // 凭据在顶层 refs；helper 把它带进返回值，模拟旧用例的阅读方式。
+  const ref = body.refs?.[nodeId];
+  expect(typeof ref).toBe("string");
+  return { ...(node as OnlineNode), source: body.source, ref: ref as string };
 }
 
 async function textOf(relativePath: string): Promise<string> {
@@ -136,9 +141,8 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     expect(node.source).toBe("online");
     expect(node.path).toBe(CHILD_PATH);
     expect(node.range.unit).toBe("utf16");
-    const ref = node.editRef?.ref;
-    expect(typeof ref).toBe("string");
-    expect(ref?.length ?? 0).toBeGreaterThan(0);
+    const ref = node.ref;
+    expect(ref.length).toBeGreaterThan(0);
 
     const appendFile = path.join(parent, "append.md");
     await fs.writeFile(appendFile, "真机追加的一段。", "utf8");
@@ -153,20 +157,22 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     ]);
     expect(edit.exitCode).toBe(0);
     const editBody = JSON.parse(edit.stdout) as Record<string, unknown>;
-    const result = editBody["result"] as Record<string, unknown>;
-    expect(result["state"]).toBe("committed");
-    expect(result["changedNodeIds"]).toContain(CHILD_NODE);
+    // 统一顶层结果：不再套 result。
+    expect(editBody["result"]).toBeUndefined();
+    expect(editBody["state"]).toBe("committed");
+    expect(editBody["changedNodeIds"]).toContain(CHILD_NODE);
 
     const after = await textOf(CHILD_PATH);
     expect(after).toContain("真机追加的一段。");
     expect(after).toContain(before.trim().split("\n").slice(-1)[0] as string);
     // 返回的新凭据可用，说明服务确实按节点文件发行。
-    expect((result["editRef"] as Record<string, unknown>)["ref"]).toBeTruthy();
+    const refreshedRefs = editBody["refs"] as Record<string, string>;
+    expect(refreshedRefs[CHILD_NODE]).toBeTruthy();
   });
 
   it("旧凭据在文件变化后被拒绝（412），不静默覆盖", async () => {
     const node = await readNodeJson(CHILD_NODE);
-    const staleRef = node.editRef?.ref as string;
+    const staleRef = node.ref;
     // 用另一条路径改同一文件，使旧凭据绑定的哈希过期。
     // 用同一凭据做一次真实修改（标题变了，文件哈希随之变化）。
     const again = await main([
@@ -202,7 +208,7 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     const result = await main([
       "branch",
       "--from-ref",
-      node.editRef?.ref as string,
+      node.ref,
       "--title",
       "真机旁支",
       "--description",
@@ -211,11 +217,13 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
       bodyFile,
       "--workspace",
       root,
+      "--verbose",
     ]);
     expect(result.exitCode).toBe(0);
     const payload = JSON.parse(result.stdout) as Record<string, unknown>;
-    const committed = payload["result"] as Record<string, unknown>;
-    const created = committed["created"] as Record<string, unknown>;
+    expect(payload["result"]).toBeUndefined();
+    expect(payload["state"]).toBe("committed");
+    const created = payload["created"] as Record<string, unknown>;
     const nodeIds = created["nodeIds"] as string[];
     expect(nodeIds.length).toBe(1);
     const newId = nodeIds[0] as string;
@@ -240,7 +248,7 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     const result = await main([
       "next",
       "--from-ref",
-      node.editRef?.ref as string,
+      node.ref,
       "--title",
       "真机后继",
       "--description",
@@ -260,7 +268,7 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     const ok = await main([
       "next",
       "--from-ref",
-      leafNode.editRef?.ref as string,
+      leafNode.ref,
       "--title",
       "真机后继",
       "--description",
@@ -269,9 +277,10 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
       bodyFile,
       "--workspace",
       root,
+      "--verbose",
     ]);
     expect(ok.exitCode).toBe(0);
-    const created = (JSON.parse(ok.stdout)["result"] as Record<string, unknown>)[
+    const created = (JSON.parse(ok.stdout) as Record<string, unknown>)[
       "created"
     ] as Record<string, unknown>;
     const newPath = (created["paths"] as string[])[0] as string;
@@ -287,7 +296,7 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     const second = await main([
       "next",
       "--from-ref",
-      leafAgain.editRef?.ref as string,
+      leafAgain.ref,
       "--title",
       "第二个后继",
       "--description",
@@ -306,7 +315,7 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     const missing = await main([
       "connect",
       "--ref",
-      node.editRef?.ref as string,
+      node.ref,
       "--flow",
       "branch",
       "--workspace",
@@ -318,7 +327,7 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     const descriptionOnly = await main([
       "connect",
       "--ref",
-      node.editRef?.ref as string,
+      node.ref,
       "--description",
       "只改描述说明",
       "--workspace",
@@ -332,7 +341,7 @@ describe("低摩擦 Agent 链路（真实服务）", () => {
     const ok = await main([
       "connect",
       "--ref",
-      refreshed.editRef?.ref as string,
+      refreshed.ref,
       "--flow",
       "branch",
       "--side",

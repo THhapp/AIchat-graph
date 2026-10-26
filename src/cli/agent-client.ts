@@ -2,14 +2,16 @@
  * 在线 Agent 通道：GET /api/agent/nodes/:id 与 POST /api/agent/changes。
  *
  * 约定：
- * - editRef 是服务实例内的短凭据，绑定工作区／节点／真实源路径／读取时哈希；
- *   CLI 原样回传，不自己补最新哈希、不按显示编号重定位；
+ * - 单节点详情（/api/agent/nodes/:id）仍返回 editRef，供 important --node 之类
+ *   需要先读后写的诊断路径；渐进读取与写响应统一用顶层 refs（nodeId → token）。
+ *   凭据由 CLI 原样回传，不自己补最新哈希、不按显示编号重定位；
  * - 外层 requestId 由 CLI 生成；同 requestId 重放由服务幂等处理；
  * - 结果不明时先查一次 status，再如实报告 unknown；不换 requestId 盲重发。
  * - fetch／超时／错误体映射统一在 transport，本模块只描述端点与响应形状。
  */
 import { randomUUID } from "node:crypto";
 import type {
+  AgentBatchCheckResponse,
   AgentChangeAction,
   AgentChangeRequest,
   AgentChangeResponse,
@@ -238,22 +240,32 @@ export async function probeRequestStatus(
   }
 }
 
-export interface AgentChangeResult {
+export interface AgentChangeResult<T = AgentChangeResponse> {
   readonly requestId: string;
   readonly httpStatus: number;
-  readonly response: AgentChangeResponse;
+  readonly response: T;
+}
+
+export interface AgentSubmitOptions {
+  /** 调用方已有 requestId 时复用（重试或测试）；默认生成 UUID。 */
+  readonly requestId?: string | undefined;
+  /** 仅 batch 支持：true 时服务只检查，不落盘、不写 agentLog。 */
+  readonly dryRun?: boolean | undefined;
 }
 
 /**
  * 提交一次低摩擦动作。CLI 负责生成 requestId；同一调用重试时必须复用同一 ID。
  * 超时／断线不自动重放：抛出 RESULT_UNKNOWN，由调用方用 status 或重读决定。
  */
-export async function submitAgentChange(
+export async function submitAgentChange<
+  T extends AgentChangeResponse | AgentBatchCheckResponse = AgentChangeResponse,
+>(
   service: ResolvedService,
   action: AgentChangeAction,
   fetchImpl: typeof fetch = fetch,
-  requestId: string = randomUUID(),
-): Promise<AgentChangeResult> {
+  options: AgentSubmitOptions = {},
+): Promise<AgentChangeResult<T>> {
+  const requestId = options.requestId ?? randomUUID();
   if (service.identity.workspaceId !== service.diskWorkspaceId) {
     throw new CliError(
       "SERVICE_IDENTITY_MISMATCH",
@@ -270,6 +282,7 @@ export async function submitAgentChange(
   const request: AgentChangeRequest = {
     workspaceId: service.identity.workspaceId,
     requestId,
+    ...(options.dryRun === true ? { dryRun: true } : {}),
     action,
   };
   const endpoint = new URL("api/agent/changes", service.baseUrl).toString();
@@ -310,6 +323,6 @@ export async function submitAgentChange(
   return {
     requestId,
     httpStatus: outcome.status,
-    response: outcome.body as unknown as AgentChangeResponse,
+    response: outcome.body as unknown as T,
   };
 }

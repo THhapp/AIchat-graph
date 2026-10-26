@@ -7,18 +7,27 @@
  */
 import { randomUUID } from "node:crypto";
 import type {
+  AgentBatchAction,
+  AgentBatchConnectOp,
+  AgentBatchCreateOp,
+  AgentBatchEditOp,
+  AgentBatchImportantOp,
   AgentChangeAction,
   AgentCreateBranchAction,
   AgentCreateNextAction,
   AgentCreateRootAction,
   AgentCreateTopicAction,
   AgentEditRef,
+  AgentInsertAction,
+  AgentNodeSelector,
   AgentPatchNodeAction,
   AgentRearrangeAction,
   AgentSetImportanceAction,
   AgentUpdateConnectionAction,
+  BranchSide,
   GraphNode,
 } from "../../shared/protocol.js";
+import type { WorkspaceNodeView } from "../../core/index.js";
 import type {
   Operation,
   PatchNodeOperation,
@@ -30,21 +39,25 @@ import { ServiceError } from "../errors.js";
 import type { EditRefStore } from "../editref.js";
 import { findParsedNode } from "./shared.js";
 
+export interface CompiledCreated {
+  topicId: string | null;
+  /** 新建主题时它的入口文件（topic.md）；追加到现有主题为 null。 */
+  topicPath: string | null;
+  nodeIds: string[];
+  paths: string[];
+  /** batch：局部名称 → 稳定 nodeId；其他动作为 {}。 */
+  aliases: Record<string, string>;
+}
+
 export interface CompiledAction {
   readonly operations: Operation[];
   /** 本次需要声明的旧哈希（相对路径 → 现有哈希或 null）。 */
   readonly expectedFiles: Record<string, string | null>;
   /** 生成的新 ID（重放时由请求记录复用，不重新生成）。 */
-  readonly created: {
-    topicId: string | null;
-    /** 新建主题时它的入口文件（topic.md）；追加到现有主题为 null。 */
-    topicPath: string | null;
-    nodeIds: string[];
-    paths: string[];
-  };
-  /** 主要受影响节点，用于返回新 editRef。 */
-  readonly primaryNodeId: string | null;
+  readonly created: CompiledCreated;
   readonly action: AgentChangeAction["action"];
+  /** 本次写入所属主题；响应顶层 topicId 直接取这里。 */
+  readonly topicId: string;
 }
 
 export interface CompileContext {
@@ -59,6 +72,14 @@ export interface CompileContext {
 function newNodeFilePath(topic: TopicSnapshot, nodeId: string): string {
   const dir = topic.path.split("/").slice(0, -1).join("/");
   return dir + "/" + nodeId + ".md";
+}
+
+function topicDirectoryPath(topic: TopicSnapshot): string {
+  return topic.path.split("/").slice(0, -1).join("/");
+}
+
+function emptyCreated(): CompiledCreated {
+  return { topicId: null, topicPath: null, nodeIds: [], paths: [], aliases: {} };
 }
 
 function newId(prefix: "n_" | "t_"): string {
@@ -190,9 +211,9 @@ export function compileAgentAction(
     return {
       operations: patchNodeOperations(action, binding as NonNullable<typeof binding>),
       expectedFiles: expected,
-      created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
-      primaryNodeId: binding?.nodeId ?? null,
+      created: emptyCreated(),
       action: action.action,
+      topicId: binding?.topicId ?? "",
     };
   }
 
@@ -245,9 +266,9 @@ export function compileAgentAction(
         },
       ],
       expectedFiles: expected,
-      created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
-      primaryNodeId: resolved.nodeId,
+      created: emptyCreated(),
       action: action.action,
+      topicId: resolved.topicId,
     };
   }
 
@@ -257,6 +278,14 @@ export function compileAgentAction(
 
   if (action.action === "setImportance") {
     return compileSetImportance(context, action);
+  }
+
+  if (action.action === "batch") {
+    return compileBatch(context, action);
+  }
+
+  if (action.action === "insert") {
+    return compileInsert(context, action);
   }
 
   return compileCreateRoot(context, action);
@@ -329,6 +358,7 @@ function compileRearrange(
 
   interface Target {
     readonly nodeId: string;
+    readonly topicId: string;
     readonly fromNodeId: string;
     readonly flow: "next" | "branch";
     readonly side: "left" | "right" | undefined;
@@ -401,6 +431,7 @@ function compileRearrange(
 
     targets.push({
       nodeId: targetBinding.nodeId,
+      topicId: targetView.topicId,
       fromNodeId: fromBinding.nodeId,
       flow: edit.flow,
       side: edit.flow === "branch" ? edit.side : undefined,
@@ -446,10 +477,10 @@ function compileRearrange(
   return {
     operations,
     expectedFiles: expected,
-    created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
-    // rearrange 是多节点操作：不签发单节点兼容 editRef，凭据统一走 editRefs。
-    primaryNodeId: null,
+    created: emptyCreated(),
     action: action.action,
+    // 多节点操作：以第一条最终入边的目标主题作为响应主题。
+    topicId: targets[0]?.topicId ?? snapshot.workspaceId,
   };
 }
 
@@ -472,9 +503,9 @@ function compileSetImportance(
       { op: "setImportance", nodeId: resolved.nodeId, important: action.important },
     ],
     expectedFiles: expected,
-    created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
-    primaryNodeId: resolved.nodeId,
+    created: emptyCreated(),
     action: action.action,
+    topicId: resolved.topicId,
   };
 }
 
@@ -493,6 +524,7 @@ function compileCreateBranch(context: CompileContext, action: AgentCreateBranchA
     body: action.body,
     description: action.description,
     state: action.state,
+    summary: action.summary,
     topicId: action.topicId,
     flow: "branch",
     side: action.side,
@@ -507,6 +539,7 @@ interface ChildInput {
   readonly body: string;
   readonly description: string;
   readonly state: AgentCreateBranchAction["state"];
+  readonly summary: string | undefined;
   readonly topicId: string | undefined;
   readonly flow: "next" | "branch";
   readonly side: AgentCreateBranchAction["side"];
@@ -560,6 +593,7 @@ function compileChild(context: CompileContext, input: ChildInput): CompiledActio
     flow: input.flow,
     state: input.state ?? "proposed",
     description: input.description.trim(),
+    ...(input.summary !== undefined ? { summary: input.summary } : {}),
     ...(input.side !== undefined ? { side: input.side } : {}),
     ...(input.order !== undefined ? { order: input.order } : {}),
   };
@@ -573,9 +607,10 @@ function compileChild(context: CompileContext, input: ChildInput): CompiledActio
       topicPath: null,
       nodeIds: [nodeId],
       paths: [newNodePath],
+      aliases: {},
     },
-    primaryNodeId: nodeId,
     action: input.action,
+    topicId: topic.topicId,
   };
 }
 
@@ -607,6 +642,7 @@ function compileCreateNext(context: CompileContext, action: AgentCreateNextActio
     body: action.body,
     description: action.description,
     state: action.state,
+    summary: action.summary,
     topicId: action.topicId,
     flow: "next",
     side: undefined,
@@ -651,6 +687,7 @@ function compileCreateRoot(context: CompileContext, action: AgentCreateRootActio
       from: null,
       flow: "root",
       state: action.state ?? "proposed",
+      ...(action.summary !== undefined ? { summary: action.summary } : {}),
     },
   ];
   const metaPath = "topics/" + dir + "/topic.md";
@@ -668,9 +705,10 @@ function compileCreateRoot(context: CompileContext, action: AgentCreateRootActio
       topicPath: metaPath,
       nodeIds: [nodeId],
       paths: [metaPath, rootNodePath],
+      aliases: {},
     },
-    primaryNodeId: nodeId,
     action: action.action,
+    topicId,
   };
 }
 
@@ -684,6 +722,716 @@ function isolatedTopicDirectory(title: string, explicit?: string): string {
     throw new ServiceError(422, "VALIDATION_FAILED", "非法主题目录：" + dir + "；" + (error instanceof Error ? error.message : String(error)), {});
   }
   return dir;
+}
+
+/* ------------------------------------------------------------------ *
+ * batch / insert：一次编译成单个 ChangeRequest
+ * ------------------------------------------------------------------ */
+
+type ResolvedBinding = NonNullable<ReturnType<EditRefStore["resolve"]>>;
+
+type BatchFlow = "next" | "branch";
+
+interface BatchExisting {
+  readonly binding: ResolvedBinding;
+  readonly view: WorkspaceNodeView;
+}
+
+interface BatchFinalRelation {
+  from: string | null;
+  flow: "root" | BatchFlow;
+  description: string | undefined;
+  side: BranchSide | undefined;
+  order: number | undefined;
+  /** 设置这条最终关系的 op 下标；原有关系为 null。 */
+  opIndex: number | null;
+}
+
+interface BatchCreateSpec {
+  readonly index: number;
+  readonly op: AgentBatchCreateOp;
+  readonly local: string;
+  readonly nodeId: string;
+  readonly path: string;
+  fromLocal: string | null;
+  fromNodeId: string;
+  final: BatchFinalRelation;
+}
+
+/** 参数／字段问题：422，details.category=parameter。 */
+function batchParameter(message: string, details: Record<string, unknown>): ServiceError {
+  return new ServiceError(422, "VALIDATION_FAILED", message, {
+    details: { category: "parameter", ...details },
+  });
+}
+
+/**
+ * 格式／结构不合法：422 VALIDATION_FAILED（跨主题连接、局部依赖环、最终重复 next、
+ * 最终连接成环）。details.category 仍是 structure，便于调用方按类别解释。
+ */
+function batchStructure(message: string, details: Record<string, unknown>): ServiceError {
+  return new ServiceError(422, "VALIDATION_FAILED", message, {
+    details: { category: "structure", ...details },
+  });
+}
+
+/**
+ * 语义／占位冲突：409 OPERATION_CONFLICT（next 槽位仍被原后继占用、
+ * insert 的 after 与 before 不是当前真实相邻 next）。
+ */
+function batchConflict(message: string, details: Record<string, unknown>): ServiceError {
+  return new ServiceError(409, "OPERATION_CONFLICT", message, {
+    details: { category: "structure", ...details },
+  });
+}
+
+/** ref 失效：409 STALE_EDIT_REF；源文件读取后被改由 expectedForBinding 报 412。 */
+function batchVersion(message: string, details: Record<string, unknown>): ServiceError {
+  return new ServiceError(409, "STALE_EDIT_REF", message, {
+    details: { category: "version", ...details },
+  });
+}
+
+/**
+ * 解析批次内已有节点：token 必须在本实例有效，且其读取哈希仍是当前快照的哈希
+ * （读取后被发布过 → 412，绝不静默补新哈希）。所有 old 文件哈希在这里累计。
+ */
+function resolveBatchRef(
+  context: CompileContext,
+  snapshot: SnapshotData,
+  topicId: string,
+  ref: string,
+  where: Record<string, unknown>,
+  expected: Record<string, string | null>,
+  cache: Map<string, BatchExisting>,
+): BatchExisting {
+  const cached = cache.get(ref);
+  if (cached !== undefined) return cached;
+  const binding = context.editRefs.resolve(ref);
+  if (binding === null) {
+    throw batchVersion(
+      "ref 无效或已过期（服务重启、凭据淘汰或旧版本）；请重新读取节点后再提交",
+      { ...where, ref: ref.slice(0, 24) },
+    );
+  }
+  mergeExpected(expected, expectedForBinding(snapshot, binding));
+  const view = snapshot.graph.nodes.find((entry) => entry.id === binding.nodeId);
+  if (view === undefined) {
+    throw batchVersion("ref 绑定的节点不在当前快照中；请重新读取节点", {
+      ...where,
+      nodeId: binding.nodeId,
+    });
+  }
+  if (view.topicId !== topicId) {
+    throw batchStructure("隔离主题不能连接其他主题的节点", {
+      ...where,
+      nodeId: view.id,
+      topicId,
+      actualTopicId: view.topicId,
+    });
+  }
+  const resolved: BatchExisting = { binding, view };
+  cache.set(ref, resolved);
+  return resolved;
+}
+
+/** 稳定拓扑排序：被引用的 create 先创建；同层按输入顺序。 */
+function orderCreatesForCreation(
+  creates: readonly BatchCreateSpec[],
+  createByLocal: ReadonlyMap<string, BatchCreateSpec>,
+): BatchCreateSpec[] {
+  const byNodeId = new Map(creates.map((spec) => [spec.nodeId, spec] as const));
+  const indegree = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+  for (const spec of creates) indegree.set(spec.nodeId, 0);
+  for (const spec of creates) {
+    if (spec.fromLocal === null) continue;
+    const dependency = createByLocal.get(spec.fromLocal);
+    if (dependency === undefined) continue;
+    indegree.set(spec.nodeId, (indegree.get(spec.nodeId) ?? 0) + 1);
+    const bucket = dependents.get(dependency.nodeId);
+    if (bucket === undefined) dependents.set(dependency.nodeId, [spec.nodeId]);
+    else bucket.push(spec.nodeId);
+  }
+  const ready = creates.filter((spec) => (indegree.get(spec.nodeId) ?? 0) === 0);
+  ready.sort((left, right) => left.index - right.index);
+  const ordered: BatchCreateSpec[] = [];
+  while (ready.length > 0) {
+    const current = ready.shift() as BatchCreateSpec;
+    ordered.push(current);
+    for (const nodeId of dependents.get(current.nodeId) ?? []) {
+      const remaining = (indegree.get(nodeId) ?? 0) - 1;
+      indegree.set(nodeId, remaining);
+      if (remaining !== 0) continue;
+      const spec = byNodeId.get(nodeId);
+      if (spec === undefined) continue;
+      ready.push(spec);
+      ready.sort((left, right) => left.index - right.index);
+    }
+  }
+  if (ordered.length !== creates.length) {
+    const pending = creates.filter((spec) => !ordered.includes(spec));
+    throw batchStructure(
+      "本批 create 的局部依赖形成环，无法确定创建顺序：" + pending.map((spec) => spec.local).join("、"),
+      {
+        ops: pending.map((spec) => spec.index),
+        locals: pending.map((spec) => spec.local),
+        conflict: "local-cycle",
+      },
+    );
+  }
+  return ordered;
+}
+
+/**
+ * batch 的唯一实现：按批前 snapshot 解释 ref，编译成一次原子 ChangeRequest。
+ *
+ * 顺序：腾空旧 next → 按依赖拓扑 create → 最终 updateConnection → patch／important。
+ * 中间结构只存在于内存候选；唯一 next／无环／根不变／主题隔离在生成操作前整图预检，
+ * 最终写盘内容仍由 prepareChanges 再校验一次。
+ */
+function compileBatch(context: CompileContext, action: AgentBatchAction): CompiledAction {
+  const snapshot = context.runtime.current.data;
+  const topic = snapshot.topics.find((entry) => entry.topicId === action.topicId);
+  if (topic === undefined) {
+    throw batchParameter("当前有效快照中没有主题 " + action.topicId + "；batch 只能维护已存在的主题", {
+      topicId: action.topicId,
+      field: "topicId",
+    });
+  }
+  const expected: Record<string, string | null> = {
+    "workspace.json": snapshot.workspaceHash,
+    [topic.path]: topic.fileHash,
+  };
+  const refCache = new Map<string, BatchExisting>();
+  const topicNodes = new Map<string, WorkspaceNodeView>();
+  for (const view of snapshot.graph.nodes) {
+    if (view.topicId === topic.topicId) topicNodes.set(view.id, view);
+  }
+  const topicDir = topicDirectoryPath(topic);
+
+  // 第一步：为 create 生成本批稳定 ID，建立局部名称表（允许前向引用）。
+  const creates: BatchCreateSpec[] = [];
+  const createByLocal = new Map<string, BatchCreateSpec>();
+  const edits: Array<{ index: number; op: AgentBatchEditOp; existing: BatchExisting }> = [];
+  const connects: Array<{
+    index: number;
+    op: AgentBatchConnectOp;
+    existing: BatchExisting;
+    fromNodeId: string | null;
+    fromLocal: string | null;
+  }> = [];
+  const importants: Array<{ index: number; op: AgentBatchImportantOp; existing: BatchExisting }> = [];
+
+  action.ops.forEach((op, index) => {
+    if (op.op !== "create") return;
+    const local = op.as.trim();
+    if (createByLocal.has(local)) {
+      throw batchParameter("batch 的局部名称重复：" + local + "；同一批内 local 必须唯一", {
+        ops: [index],
+        field: "as",
+        local,
+        conflict: "local-duplicate",
+      });
+    }
+    const nodeId = newId("n_");
+    const path = topicDir + "/" + nodeId + ".md";
+    const spec: BatchCreateSpec = {
+      index,
+      op,
+      local,
+      nodeId,
+      path,
+      fromLocal: null,
+      fromNodeId: "",
+      final: {
+        from: null,
+        flow: op.flow,
+        description: op.description.trim(),
+        side: op.flow === "branch" ? op.side : undefined,
+        order: op.flow === "branch" ? op.order : undefined,
+        opIndex: index,
+      },
+    };
+    creates.push(spec);
+    createByLocal.set(local, spec);
+    expected[path] = null;
+  });
+
+  // 选择器：ref 按批前快照解释；local 只在本输入有效。
+  const resolveSelector = (
+    selector: AgentNodeSelector,
+    where: Record<string, unknown>,
+  ): { nodeId: string; local: string | null } => {
+    if (selector.ref !== undefined) {
+      const existing = resolveBatchRef(
+        context,
+        snapshot,
+        topic.topicId,
+        selector.ref,
+        where,
+        expected,
+        refCache,
+      );
+      return { nodeId: existing.binding.nodeId, local: null };
+    }
+    if (selector.local !== undefined) {
+      const local = selector.local.trim();
+      const spec = createByLocal.get(local);
+      if (spec === undefined) {
+        throw batchParameter(
+          "local 名称未在本批 create 中声明：" + local + "；只能引用同一输入的 create.as",
+          { ...where, local, conflict: "local-unknown" },
+        );
+      }
+      return { nodeId: spec.nodeId, local };
+    }
+    throw batchParameter("from 必须给出 ref 或 local 之一", where);
+  };
+
+  for (const spec of creates) {
+    const resolved = resolveSelector(spec.op.from, { ops: [spec.index], field: "from" });
+    spec.fromLocal = resolved.local;
+    spec.fromNodeId = resolved.nodeId;
+    spec.final.from = resolved.nodeId;
+  }
+  // 局部依赖环必须在整图预检之前报出（否则会先表现为最终图成环）：
+  // 它属于 create 输入本身无法排序的结构错误。
+  const orderedCreates = orderCreatesForCreation(creates, createByLocal);
+
+  const kindsByNode = new Map<string, Set<string>>();
+  const claimKind = (nodeId: string, kind: string, index: number, field: string): void => {
+    const kinds = kindsByNode.get(nodeId) ?? new Set<string>();
+    if (kinds.has(kind)) {
+      throw batchParameter(
+        "同一节点在本批不能重复同类操作（" + kind + "）：" + nodeId,
+        { ops: [index], field, nodeId, conflict: "duplicate-op" },
+      );
+    }
+    kinds.add(kind);
+    kindsByNode.set(nodeId, kinds);
+  };
+
+  action.ops.forEach((op, index) => {
+    if (op.op !== "edit") return;
+    const existing = resolveBatchRef(
+      context,
+      snapshot,
+      topic.topicId,
+      op.target.ref,
+      { ops: [index], field: "target.ref" },
+      expected,
+      refCache,
+    );
+    claimKind(existing.binding.nodeId, "edit", index, "target.ref");
+    edits.push({ index, op, existing });
+  });
+
+  action.ops.forEach((op, index) => {
+    if (op.op !== "connect") return;
+    const existing = resolveBatchRef(
+      context,
+      snapshot,
+      topic.topicId,
+      op.target.ref,
+      { ops: [index], field: "target.ref" },
+      expected,
+      refCache,
+    );
+    claimKind(existing.binding.nodeId, "connect", index, "target.ref");
+    if (existing.view.flow === "root") {
+      throw new ServiceError(
+        422,
+        "VALIDATION_FAILED",
+        "batch 不能改接根节点；每个主题的根保持不变",
+        {
+          details: {
+            category: "structure",
+            ops: [index],
+            field: "target.ref",
+            nodeId: existing.binding.nodeId,
+            conflict: "root-immutable",
+          },
+        },
+      );
+    }
+    let fromNodeId: string | null = null;
+    let fromLocal: string | null = null;
+    if (op.from !== undefined) {
+      if (op.flow === undefined) {
+        throw batchParameter("给出 from 时必须同时给出 flow（只给 flow 才沿用当前来源）", {
+          ops: [index],
+          field: "flow",
+          nodeId: existing.binding.nodeId,
+          conflict: "from-without-flow",
+        });
+      }
+      const resolved = resolveSelector(op.from, { ops: [index], field: "from" });
+      fromNodeId = resolved.nodeId;
+      fromLocal = resolved.local;
+    }
+    connects.push({ index, op, existing, fromNodeId, fromLocal });
+  });
+
+  action.ops.forEach((op, index) => {
+    if (op.op !== "important") return;
+    const existing = resolveBatchRef(
+      context,
+      snapshot,
+      topic.topicId,
+      op.target.ref,
+      { ops: [index], field: "target.ref" },
+      expected,
+      refCache,
+    );
+    claimKind(existing.binding.nodeId, "important", index, "target.ref");
+    importants.push({ index, op, existing });
+  });
+
+  // 第二步：最终入边。已有节点从批前关系出发，create 直接以输入关系为最终关系。
+  const finalRelations = new Map<string, BatchFinalRelation>();
+  for (const [nodeId, view] of topicNodes) {
+    finalRelations.set(nodeId, {
+      from: view.from,
+      flow: view.flow,
+      description: view.description,
+      side: view.side,
+      order: view.order,
+      opIndex: null,
+    });
+  }
+  for (const spec of creates) finalRelations.set(spec.nodeId, spec.final);
+
+  // 默认 branch order：同一来源的现有最大 order + 10，按输入顺序稳定递增；
+  // 不依赖 storage 的临时默认值（否则多 create 的分配会随操作顺序漂移）。
+  const maxOrderBySource = new Map<string, number>();
+  for (const view of topicNodes.values()) {
+    if (view.from === null || view.flow !== "branch" || view.order === undefined) continue;
+    const current = maxOrderBySource.get(view.from);
+    if (current === undefined || view.order > current) maxOrderBySource.set(view.from, view.order);
+  }
+  const takeNextOrder = (sourceId: string): number => {
+    const next = (maxOrderBySource.get(sourceId) ?? 0) + 10;
+    maxOrderBySource.set(sourceId, next);
+    return next;
+  };
+  for (const spec of creates) {
+    if (spec.final.flow !== "branch" || spec.final.order !== undefined) continue;
+    spec.final.order = takeNextOrder(spec.final.from as string);
+  }
+
+  for (const connect of connects) {
+    const pre = connect.existing.view;
+    const relation = finalRelations.get(pre.id) as BatchFinalRelation;
+    const flow: BatchFlow = connect.op.flow ?? (pre.flow === "root" ? "branch" : pre.flow);
+    const from = connect.fromNodeId ?? pre.from;
+    if (from === null) {
+      throw batchParameter("连接必须有来源节点", {
+        ops: [connect.index],
+        field: "from",
+        nodeId: pre.id,
+      });
+    }
+    let side: BranchSide | undefined;
+    let order: number | undefined;
+    if (flow === "next") {
+      if (connect.op.side !== undefined || connect.op.order !== undefined) {
+        throw batchParameter("最终 flow=next 时不能带 side／order", {
+          ops: [connect.index],
+          field: connect.op.side !== undefined ? "side" : "order",
+          nodeId: pre.id,
+        });
+      }
+    } else {
+      const sameSource = from === pre.from;
+      side = connect.op.side ?? (pre.flow === "branch" && sameSource ? pre.side : undefined);
+      order = connect.op.order;
+      if (order === undefined) {
+        order = pre.flow === "branch" && sameSource ? pre.order : takeNextOrder(from);
+      }
+    }
+    relation.from = from;
+    relation.flow = flow;
+    relation.description = connect.op.description.trim();
+    relation.side = side;
+    relation.order = order;
+    relation.opIndex = connect.index;
+  }
+
+  // 第三步：整图预检——唯一 next、无环、根不变、主题隔离。
+  //
+  // 先报占位／缺省原后继最终位置（语义冲突 409）：本批新声明的 next 若撞上
+  // 批前原后继、而原后继又没有显式改接，则不能自动挤掉。仅此场景保留 409；
+  // 其余"最终图本身不合法"（没有原后继可让位却出现多个 next）是结构错误 422。
+  const preNextBySource = new Map<string, string>();
+  for (const [nodeId, view] of topicNodes) {
+    if (view.nextId !== null) preNextBySource.set(nodeId, view.nextId);
+  }
+  for (const [nodeId, relation] of finalRelations) {
+    if (relation.flow !== "next" || relation.from === null || relation.opIndex === null) continue;
+    const sourceId = relation.from;
+    const preNextId = preNextBySource.get(sourceId);
+    if (preNextId === undefined || preNextId === nodeId) continue;
+    const preNextRelation = finalRelations.get(preNextId);
+    const stillOccupies =
+      preNextRelation !== undefined &&
+      preNextRelation.from === sourceId &&
+      preNextRelation.flow === "next";
+    if (!stillOccupies) continue;
+    const ops = [
+      relation.opIndex,
+      ...(preNextRelation.opIndex !== null ? [preNextRelation.opIndex] : []),
+    ];
+    throw batchConflict(
+      "来源 " +
+        sourceId +
+        " 的 next 槽位仍被原后继 " +
+        preNextId +
+        " 占用；只有在本批显式声明原后继的最终位置才能腾出（不自动挤掉）",
+      {
+        ops: [...new Set(ops)],
+        sourceId,
+        nextId: preNextId,
+        nodeId,
+        conflict: "next-occupied",
+      },
+    );
+  }
+
+  const nextChildren = new Map<string, string[]>();
+  for (const [nodeId, relation] of finalRelations) {
+    if (relation.flow !== "next" || relation.from === null) continue;
+    const bucket = nextChildren.get(relation.from);
+    if (bucket === undefined) nextChildren.set(relation.from, [nodeId]);
+    else bucket.push(nodeId);
+  }
+  for (const [sourceId, children] of nextChildren) {
+    if (children.length <= 1) continue;
+    const ops = children
+      .map((nodeId) => finalRelations.get(nodeId)?.opIndex)
+      .filter((value): value is number => value !== null && value !== undefined);
+    throw batchStructure(
+      "来源 " +
+        sourceId +
+        " 最多只能有一个 next 后继；本批最终关系会让 " +
+        children.join("、") +
+        " 同时成为它的 next（最终图结构不合法，请改接其中一条）",
+      {
+        ops: [...new Set(ops)],
+        sourceId,
+        nodeIds: children,
+        conflict: "next-multiple",
+      },
+    );
+  }
+
+  const walkState = new Map<string, "done">();
+  for (const start of finalRelations.keys()) {
+    if (walkState.has(start)) continue;
+    const path: string[] = [];
+    let current: string | null = start;
+    while (current !== null) {
+      if (walkState.has(current)) break;
+      const indexInPath = path.indexOf(current);
+      if (indexInPath !== -1) {
+        const cycle = path.slice(indexInPath);
+        const ops = cycle
+          .map((nodeId) => finalRelations.get(nodeId)?.opIndex)
+          .filter((value): value is number => value !== null && value !== undefined);
+        throw batchStructure(
+          "本批最终连接形成环：" + cycle.concat(cycle[0] as string).join(" → "),
+          {
+            ops: [...new Set(ops)],
+            nodeIds: cycle,
+            conflict: "cycle",
+          },
+        );
+      }
+      path.push(current);
+      const relation = finalRelations.get(current);
+      current = relation?.from ?? null;
+    }
+    for (const nodeId of path) walkState.set(nodeId, "done");
+  }
+
+  // 第四步：生成操作序列。中间腾空只在内存候选里存在，最终写盘内容由最后的关系决定。
+  const operations: Operation[] = [];
+
+  for (const [nodeId, relation] of finalRelations) {
+    const pre = topicNodes.get(nodeId);
+    if (pre === undefined || pre.flow !== "next") continue;
+    // 当前 next 只要最终不再是"同一来源的 next"就先腾空；即使最终是同源 branch
+    // 也先腾一次，保证本批 create 抢占该 next 槽位时不会撞上旧后继。
+    const sameSourceNext = relation.from === pre.from && relation.flow === "next";
+    if (sameSourceNext) continue;
+    const description =
+      pre.description !== undefined && pre.description.trim().length > 0
+        ? pre.description
+        : "本批临时腾空，最终关系随后落位";
+    operations.push({ op: "updateConnection", nodeId, flow: "branch", description });
+  }
+
+  for (const spec of orderedCreates) {
+    const relation = spec.final;
+    operations.push({
+      op: "createNode",
+      nodeId: spec.nodeId,
+      topicId: topic.topicId,
+      title: spec.op.title.trim(),
+      body: spec.op.body,
+      from: relation.from,
+      flow: relation.flow === "branch" ? "branch" : "next",
+      state: spec.op.state ?? "proposed",
+      description: relation.description ?? "",
+      ...(spec.op.summary !== undefined ? { summary: spec.op.summary } : {}),
+      ...(relation.side !== undefined ? { side: relation.side } : {}),
+      ...(relation.order !== undefined ? { order: relation.order } : {}),
+      ...(spec.op.important === true ? { important: true } : {}),
+    });
+  }
+
+  for (const connect of connects) {
+    const pre = connect.existing.view;
+    const relation = finalRelations.get(pre.id) as BatchFinalRelation;
+    if (relation.from === null) continue;
+    const unchanged =
+      relation.from === pre.from &&
+      relation.flow === pre.flow &&
+      (relation.description ?? "") === (pre.description ?? "") &&
+      relation.side === pre.side &&
+      relation.order === pre.order;
+    if (unchanged) continue;
+    operations.push({
+      op: "updateConnection",
+      nodeId: pre.id,
+      from: relation.from,
+      flow: relation.flow,
+      ...(relation.flow === "branch" && relation.side !== undefined
+        ? { side: relation.side }
+        : {}),
+      ...(relation.flow === "branch" && relation.order !== undefined
+        ? { order: relation.order }
+        : {}),
+      description: relation.description,
+    });
+  }
+
+  for (const edit of edits) {
+    const patch = edit.op.patch;
+    operations.push({
+      op: "patchNode",
+      nodeId: edit.existing.binding.nodeId,
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.state !== undefined ? { state: patch.state } : {}),
+      ...(patch.summary !== undefined ? { summary: patch.summary } : {}),
+      ...(patch.replace !== undefined ? { replace: patch.replace } : {}),
+      ...(patch.append !== undefined ? { append: patch.append } : {}),
+      ...(patch.body !== undefined ? { body: patch.body } : {}),
+    });
+  }
+
+  for (const important of importants) {
+    operations.push({
+      op: "setImportance",
+      nodeId: important.existing.binding.nodeId,
+      important: important.op.important,
+    });
+  }
+
+  const aliases: Record<string, string> = {};
+  const nodeIds: string[] = [];
+  const paths: string[] = [];
+  for (const spec of creates) {
+    aliases[spec.local] = spec.nodeId;
+    nodeIds.push(spec.nodeId);
+    paths.push(spec.path);
+  }
+
+  return {
+    operations,
+    expectedFiles: expected,
+    created: { topicId: null, topicPath: null, nodeIds, paths, aliases },
+    action: action.action,
+    topicId: topic.topicId,
+  };
+}
+
+/**
+ * insert：先验证 after 与 before 是当前真实的相邻 next（after.nextId === before.id、
+ * 同主题），否则整体 409，不降级；然后复用同一 batch 编译核心。
+ */
+function compileInsert(context: CompileContext, action: AgentInsertAction): CompiledAction {
+  const snapshot = context.runtime.current.data;
+  const afterBinding = context.editRefs.resolve(action.afterRef);
+  const beforeBinding = context.editRefs.resolve(action.beforeRef);
+  if (afterBinding === null || beforeBinding === null) {
+    throw batchVersion("insert 的 afterRef／beforeRef 无效或已过期；请重新读取相邻节点", {
+      field: afterBinding === null ? "afterRef" : "beforeRef",
+      ref: (afterBinding === null ? action.afterRef : action.beforeRef).slice(0, 24),
+    });
+  }
+  const afterView = snapshot.graph.nodes.find((entry) => entry.id === afterBinding.nodeId);
+  const beforeView = snapshot.graph.nodes.find((entry) => entry.id === beforeBinding.nodeId);
+  if (afterView === undefined || beforeView === undefined) {
+    throw batchVersion("insert 的 afterRef／beforeRef 指向的节点不在当前快照中", {
+      afterId: afterBinding.nodeId,
+      beforeId: beforeBinding.nodeId,
+    });
+  }
+  if (afterView.topicId !== beforeView.topicId) {
+    throw batchStructure("insert 的 after 与 before 不属于同一主题", {
+      topicId: afterView.topicId,
+      beforeTopicId: beforeView.topicId,
+      conflict: "cross-topic",
+    });
+  }
+  if (afterView.nextId !== beforeView.id) {
+    throw batchConflict(
+      "insert 只接受当前真实相邻的 next：after(" +
+        afterView.id +
+        ") 的 next 是 " +
+        String(afterView.nextId) +
+        "，不是 before(" +
+        beforeView.id +
+        ")；不自动插入或改接其他节点",
+      {
+        afterId: afterView.id,
+        beforeId: beforeView.id,
+        actualNextId: afterView.nextId,
+        conflict: "insert-not-adjacent",
+      },
+    );
+  }
+
+  const inserted = compileBatch(context, {
+    action: "batch",
+    topicId: afterView.topicId,
+    ops: [
+      {
+        op: "create",
+        as: "inserted",
+        from: { ref: action.afterRef },
+        flow: "next",
+        title: action.title,
+        body: action.body,
+        description: action.description,
+        ...(action.summary !== undefined ? { summary: action.summary } : {}),
+        ...(action.state !== undefined ? { state: action.state } : {}),
+      },
+      {
+        op: "connect",
+        target: { ref: action.beforeRef },
+        from: { local: "inserted" },
+        flow: "next",
+        description: action.nextDescription,
+      },
+    ],
+  });
+  return {
+    ...inserted,
+    action: action.action,
+    created: { ...inserted.created, aliases: {} },
+  };
 }
 
 /** 生成新节点后的读取凭据（正文已在快照中）；找不到时返回 null。 */

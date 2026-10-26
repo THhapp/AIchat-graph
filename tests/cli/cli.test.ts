@@ -692,6 +692,7 @@ describe("服务描述与身份", () => {
       instanceId: "inst-1",
       rootPath,
       url: "http://127.0.0.1:4400/",
+      program: null,
     };
     expect(() => assertIdentity(identity, { ...descriptor, rootPath }, rootPath)).toThrow(/不一致/);
     try {
@@ -706,6 +707,7 @@ describe("服务描述与身份", () => {
       instanceId: "inst-1",
       rootPath,
       url: "http://127.0.0.1:4400/",
+      program: null,
     };
     expect(() => assertIdentity(matching, { ...descriptor, rootPath }, rootPath)).not.toThrow();
   });

@@ -6,6 +6,7 @@
  *   因此测试不会因导入而启动服务；
  * - 只有作为可执行脚本运行时才注册进程级 SIGINT/SIGTERM 并设置退出码；
  * - 默认输出 JSON；--text 为人类摘要。未知命令／标志：stderr 用法 + 非零退出。
+ * - --help／-h、help、version／--version／-V 是纯本地信息，不访问工作区与服务。
  */
 import { pathToFileURL } from "node:url";
 import { runSearch } from "./search-command.js";
@@ -21,19 +22,32 @@ import {
   runNext,
   runRearrange,
 } from "./agent-commands.js";
+import { runBatch } from "./batch-command.js";
+import { runInsert } from "./insert-command.js";
+import { runHelp } from "./help-command.js";
+import { runVersion } from "./version-command.js";
 import { runCheckOrApply, runStatus, runWhoami } from "./changes-commands.js";
+import { getCommandSpec } from "./command-specs.js";
 import { defaultIo, type CliContext } from "./context.js";
 import { CliError, errorEnvelope, EXIT_CODES, UsageError } from "./errors.js";
 import { emitErrorJson, emitText } from "./output.js";
-import { briefUsage, usageFor } from "./usage.js";
+import { briefUsage, commandHelpText, rootHelp, versionLine } from "./usage.js";
 
 export type { CliContext, CliIo, ServiceHandleLike, StartServiceLike } from "./context.js";
 export { CliError } from "./errors.js";
 export { EXIT_CODES } from "./errors.js";
 export { parseOptions } from "./args.js";
 export {
+  COMMAND_GROUPS,
+  COMMAND_SPECS,
+  getCommandSpec,
+  parseCommandArgs,
+} from "./command-specs.js";
+export {
   assertIdentity,
   assertLoopbackUrl,
+  interfaceMismatchError,
+  parseProgramInfo,
   parseServiceDescriptor,
   resolveServiceForWorkspace,
   SERVICE_DESCRIPTOR_PATH,
@@ -79,21 +93,32 @@ export async function main(
 
   const command = argv[0];
   const rest = argv.slice(1);
-  if (command === "--help" || command === "-h" || command === "help") {
-    // 帮助是显式请求，输出到 stdout 且成功退出。
-    emitText(ctx, [usageFor(rest[0])]);
-    return { exitCode: EXIT_CODES.ok, stdout, stderr };
-  }
   if (command === undefined) {
-    ctx.stderr("缺少命令\n\n" + usageFor(undefined) + "\n");
+    ctx.stderr("缺少命令\n\n" + rootHelp() + "\n");
     return { exitCode: EXIT_CODES.usage, stdout, stderr };
   }
-  if (rest.includes("--help") || rest.includes("-h")) {
-    emitText(ctx, [usageFor(command)]);
+  // 版本与根帮助是显式请求：纯本地信息，输出到 stdout 且成功退出。
+  if (command === "--version" || command === "-V") {
+    emitText(ctx, [versionLine()]);
+    return { exitCode: EXIT_CODES.ok, stdout, stderr };
+  }
+  if (command === "--help" || command === "-h") {
+    emitText(ctx, [rootHelp()]);
     return { exitCode: EXIT_CODES.ok, stdout, stderr };
   }
 
   try {
+    if (rest.includes("--help") || rest.includes("-h")) {
+      // 单命令帮助只输出该命令，不附带整份命令大全；help 自身显示根帮助。
+      if (command === "help") {
+        emitText(ctx, [rootHelp()]);
+        return { exitCode: EXIT_CODES.ok, stdout, stderr };
+      }
+      if (getCommandSpec(command) === undefined) throw new UsageError("未知命令 " + command);
+      emitText(ctx, [commandHelpText(command)]);
+      return { exitCode: EXIT_CODES.ok, stdout, stderr };
+    }
+
     let exitCode: number;
     switch (command) {
       case "init":
@@ -136,6 +161,12 @@ export async function main(
       case "connect":
         exitCode = await runConnect(rest, ctx);
         break;
+      case "insert":
+        exitCode = await runInsert(rest, ctx);
+        break;
+      case "batch":
+        exitCode = await runBatch(rest, ctx);
+        break;
       case "rearrange":
         exitCode = await runRearrange(rest, ctx);
         break;
@@ -148,15 +179,19 @@ export async function main(
       case "create-root":
         exitCode = await runCreateRoot(rest, ctx);
         break;
+      case "help":
+        exitCode = await runHelp(rest, ctx);
+        break;
+      case "version":
+        exitCode = await runVersion(rest, ctx);
+        break;
       default:
-        throw new UsageError(`未知命令 ${command}`);
+        throw new UsageError("未知命令 " + command);
     }
     return { exitCode, stdout, stderr };
   } catch (error) {
     // JSON 模式（默认）stderr 只输出一个 JSON 错误体，便于程序解析；
     // 用法错误把 usage 放进 error.usage，人类可读文本仅在 --text 模式输出。
-    // --text 模式输出单行人类可读消息（用法错误附简短用法）；
-    // JSON 模式（默认）stderr 只有一个 JSON 错误体，用法错误另带 error.usage。
     const usageError = error instanceof UsageError;
     const wantsText = argv.includes("--text");
     const { envelope, exitCode } = errorEnvelope(error);

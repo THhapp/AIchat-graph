@@ -11,6 +11,7 @@
     "sourceMap": true
   },
   "include": [
+    "src/build-info.ts",
     "src/core/**/*.ts",
     "src/storage/**/*.ts",
     "src/index/**/*.ts",

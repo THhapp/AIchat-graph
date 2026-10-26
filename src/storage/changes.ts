@@ -296,6 +296,7 @@ function applyCreateNode(ctx: Context, op: CreateNodeOperation): void {
   if (op.side !== undefined) header.side = op.side;
   if (order !== undefined) header.order = order;
   if (op.summary !== undefined) header.summary = op.summary.trim();
+  if (op.important === true) header.important = true;
   assertHeaderShape(header, "createNode");
   if (op.from !== null) {
     if (op.from === op.nodeId) throw validationError("createNode：节点不能以自身作为 from");
@@ -406,7 +407,11 @@ function applyPatchNode(ctx: Context, op: PatchNodeOperation): void {
       bodyChanged = true;
     }
   } else if (op.append !== undefined) {
-    const addition = op.append.replace(/\s+$/, "");
+    // 追加规范化在这里统一：去掉首部空行、去掉末尾空白，再在非空 base 后
+    // 插入恰好一个空行。调用方（JSON 字符串／bodyFile／appendFile）不必自己补换行。
+    const addition = op.append
+      .replace(/^(?:[ \t]*\r?\n)+/, "")
+      .replace(/\s+$/, "");
     if (addition.length > 0) {
       const base = nextBody.replace(/\s+$/, "");
       nextBody = base.length === 0 ? addition : base + "\n\n" + addition;

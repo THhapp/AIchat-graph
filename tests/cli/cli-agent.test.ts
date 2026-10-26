@@ -5,6 +5,7 @@ import path from "node:path";
 import { initWorkspace, sha256Bytes } from "../../src/storage/index.js";
 import { main } from "../../src/cli/index.js";
 import type { ServiceHandleLike, StartServiceLike } from "../../src/cli/context.js";
+import { changeResponse, workspaceResponse } from "./fixtures.js";
 
 const temporaryRoots: string[] = [];
 
@@ -124,16 +125,15 @@ function fakeService(options: FakeOptions): { fetchImpl: typeof fetch; requests:
         headers: { "content-type": "application/json" },
       });
     if (url === `${origin}/api/workspace`) {
-      return json(200, {
-        workspaceId: options.workspaceId,
-        instanceId: options.instanceId ?? "inst-1",
-        revision: 3,
-        rootPath: options.rootPath,
-        name: "agent-test",
-        activeNode: null,
-        stale: false,
-        diagnostics: [],
-      });
+      return json(
+        200,
+        workspaceResponse({
+          workspaceId: options.workspaceId,
+          rootPath: options.rootPath,
+          instanceId: options.instanceId ?? "inst-1",
+          revision: 3,
+        }),
+      );
     }
     if (url.startsWith(`${origin}/api/agent/read`)) {
       const parsed = new URL(url);
@@ -216,19 +216,9 @@ function fakeService(options: FakeOptions): { fetchImpl: typeof fetch; requests:
             truncated,
             path: options.nodePath,
             fileHash: options.fileHash,
-            editRef: {
-              ref: "ref-abc123",
-              workspaceId: options.workspaceId,
-              topicId: TOPIC_ID,
-              nodeId,
-              path: options.nodePath,
-              fileHash: options.fileHash,
-              instanceId: options.instanceId ?? "inst-1",
-              revision: 3,
-              issuedAt: "2026-10-22T05:00:00.000Z",
-            },
           },
         ],
+        refs: { [nodeId]: "ref-abc123" },
         page: { hasMore: false },
         budget: {
           unit: "utf16",
@@ -279,29 +269,24 @@ function fakeService(options: FakeOptions): { fetchImpl: typeof fetch; requests:
       });
     }
     if (url === `${origin}/api/agent/changes`) {
-      return json(options.changeState ?? 200, options.changeBody ?? {
-        ok: true,
-        requestId: "generated",
-        action: "patchNode",
-        state: "committed",
-        instanceId: options.instanceId ?? "inst-1",
-        revision: 4,
-        created: { topicId: null, topicPath: null, nodeIds: [], paths: [] },
-        changedNodeIds: [CHILD_NODE],
-        touchedFiles: [
-          {
-            path: options.nodePath,
-            beforeSha256: options.fileHash,
-            afterSha256: "b".repeat(64),
-            byteLength: 200,
-          },
-        ],
-        editRef: null,
-        summary: "1 个操作（patchNode）",
-        diagnostics: [],
-        transactionId: "tx-1",
-        journalCleaned: true,
-      });
+      return json(
+        options.changeState ?? 200,
+        options.changeBody ??
+          changeResponse({
+            workspaceId: options.workspaceId,
+            topicId: TOPIC_ID,
+            changedNodeIds: [CHILD_NODE],
+            touchedFiles: [
+              {
+                path: options.nodePath,
+                beforeSha256: options.fileHash,
+                afterSha256: "b".repeat(64),
+                byteLength: 200,
+              },
+            ],
+            summary: "1 个操作（patchNode）",
+          }),
+      );
     }
     return json(404, { error: { code: "NOT_FOUND", message: "no route" } });
   }) as typeof fetch;
@@ -333,8 +318,8 @@ function parseBody(request: Recorded | undefined): Record<string, unknown> {
   return JSON.parse(request?.body as string) as Record<string, unknown>;
 }
 
-describe("read --node 在线获取 editRef", () => {
-  it("有服务时返回线上片段、版本与 editRef，不改用磁盘快照", async () => {
+describe("read --node 在线获取 refs", () => {
+  it("有服务时返回线上片段、版本与顶层 refs，不改用磁盘快照", async () => {
     const { root, workspaceId } = await newV2Workspace();
     await writeDescriptor(root, workspaceId);
     const fake = fakeService({
@@ -365,7 +350,9 @@ describe("read --node 在线获取 editRef", () => {
     expect(item?.["range"]).toMatchObject({ start: 0, end: 10, unit: "utf16" });
     expect((item?.["body"] as string).length).toBe(10);
     expect(item?.["truncated"]).toBe(true);
-    expect((item?.["editRef"] as Record<string, unknown>)["ref"]).toBe("ref-abc123");
+    // 凭据统一在顶层 refs；content item 不再内嵌 editRef。
+    expect(item?.["editRef"]).toBeUndefined();
+    expect(body["refs"]).toEqual({ [CHILD_NODE]: "ref-abc123" });
     const call = fake.requests.find((request) => request.url.includes("/api/agent/read"));
     expect(call?.url).toContain("/api/agent/read");
     expect(call?.url).toContain("length=10");
@@ -382,7 +369,9 @@ describe("read --node 在线获取 editRef", () => {
     expect(body["source"]).toBe("disk");
     const item = (body["items"] as Array<Record<string, unknown>>)[0];
     expect(item?.["source"]).toBeUndefined();
-    expect(item?.["editRef"]).toBeNull();
+    expect(item?.["editRef"]).toBeUndefined();
+    // 离线不签发可写凭据。
+    expect(body["refs"]).toEqual({});
     expect(body["online"]).toMatchObject({
       available: false,
       code: "SERVICE_NOT_RUNNING",
@@ -408,7 +397,8 @@ describe("read --node 在线获取 editRef", () => {
     expect(body["source"]).toBe("disk");
     const item = (body["items"] as Array<Record<string, unknown>>)[0];
     expect(item?.["source"]).toBeUndefined();
-    expect(item?.["editRef"]).toBeNull();
+    expect(item?.["editRef"]).toBeUndefined();
+    expect(body["refs"]).toEqual({});
   });
 });
 
@@ -756,16 +746,9 @@ describe("低摩擦写入命令", () => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.endsWith("/api/workspace")) {
         return new Response(
-          JSON.stringify({
-            workspaceId,
-            instanceId: "inst-1",
-            revision: 1,
-            rootPath: root,
-            name: "agent-test",
-            activeNode: null,
-            stale: false,
-            diagnostics: [],
-          }),
+          JSON.stringify(
+            workspaceResponse({ workspaceId, rootPath: root, revision: 1 }),
+          ),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
@@ -849,16 +832,7 @@ describe("低摩擦写入命令", () => {
           headers: { "content-type": "application/json" },
         });
       if (url.endsWith("/api/workspace")) {
-        return json(200, {
-          workspaceId,
-          instanceId: "inst-1",
-          revision: 1,
-          rootPath: root,
-          name: "agent-test",
-          activeNode: null,
-          stale: false,
-          diagnostics: [],
-        });
+        return json(200, workspaceResponse({ workspaceId, rootPath: root, revision: 1 }));
       }
       return json(404, { error: { code: "NOT_FOUND", message: "当前快照中没有节点" } });
     }) as typeof fetch;

@@ -312,6 +312,8 @@ describe("GET /api/agent/read", () => {
     expect(wire).not.toContain('"fileHash"');
     expect(wire).not.toContain('"editRef"');
     expect(wire).not.toContain('"path"');
+    // overview/structure 不签发凭据：顶层 refs 是空对象，不是缺字段。
+    expect(body.refs).toEqual({});
 
     const pages = await collectPages(readUrl(handle.url, "topic=" + MAIN_TOPIC), 1600);
     expect(pages.length).toBeGreaterThan(1);
@@ -374,6 +376,8 @@ describe("GET /api/agent/read", () => {
       },
     ]);
     expect(JSON.stringify(subtree)).not.toContain('"editRef"');
+    expect(subtree.refs).toEqual({});
+    expect(topicBody.refs).toEqual({});
 
     const pages = await collectPages(
       readUrl(handle.url, "view=structure&topic=" + MAIN_TOPIC),
@@ -416,12 +420,12 @@ describe("GET /api/agent/read", () => {
         expect(item.range.end).toBe(item.range.start + item.body.length);
         expect(item.path).toMatch(/^topics\//);
         expect(item.fileHash).toHaveLength(64);
-        expect(item.editRef).not.toBeNull();
-        expect(item.editRef?.nodeId).toBe(id);
-        expect(item.editRef?.path).toBe(item.path);
-        expect(item.editRef?.fileHash).toBe(item.fileHash);
-        expect(item.editRef?.instanceId).toBe(handle.instanceId);
-        if (page.online.available) expect(item.editRef?.revision).toBe(page.online.revision);
+        // item 不再带 editRef；凭据统一在顶层 refs，且只覆盖本页返回的节点。
+        expect(item).not.toHaveProperty("editRef");
+        expect(page.refs[id]).toMatch(/^er_/);
+        expect(Object.keys(page.refs).sort()).toEqual(
+          [...new Set(page.items.map((entry) => (entry as ReadContentItem).node.id))].sort(),
+        );
         entry.text += item.body;
         entry.total = item.range.total;
         collected.set(id, entry);
@@ -486,8 +490,8 @@ describe("GET /api/agent/read", () => {
         expect(item.range.start).toBe(0);
         expect(item.range.end).toBe(0);
         expect(item.range.total).toBeGreaterThan(0);
-        expect(item.editRef).not.toBeNull();
-        expect(item.editRef?.nodeId).toBe(item.node.id);
+        expect(item).not.toHaveProperty("editRef");
+        expect(page.refs[item.node.id]).toMatch(/^er_/);
       }
     }
     expect(ids).toEqual(requested);

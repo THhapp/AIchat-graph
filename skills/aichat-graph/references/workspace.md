@@ -58,8 +58,8 @@ Agent 使用与实际服务相同版本的 CLI 和 Skill，先区分以下位置
 
 | 使用方式 | CLI | Skill |
 | --- | --- | --- |
-| 仓库开发 | `<repo>/dist/cli/index.js` | `<repo>/skills/aichat-graph` |
-| 日用快照 | `<repo>/.local/daily/dist/cli/index.js` | 同一快照的 `skills/aichat-graph` |
+| 仓库开发 | `<repo>/dist/cli/index.js` 或 `<repo>/aichat.cmd` | `<repo>/skills/aichat-graph` |
+| 日用快照 | `<repo>/.local/daily/dist/cli/index.js` 或 `.local/daily/aichat.cmd` | 同一快照的 `skills/aichat-graph` |
 | 已安装副本 | 本机 local.env.json 的 cli | 安装目录中的 SKILL.md、references 和 scripts |
 
 源码变化不自动更新日用快照，日用更新也不会自动同步已安装副本。
@@ -67,6 +67,7 @@ Agent 使用与实际服务相同版本的 CLI 和 Skill，先区分以下位置
 
 仓库入口缺少 dist 时，构建按当前任务授权执行。
 只构建 Node CLI 可用 `npm run build:node`；运行完整界面和导出需要完整构建。
+版本与接口用 `version`、`whoami` 核对；程序手册随程序分发，Skill 自带完整命令参考见 commands.md。
 不要仅凭仓库文档更新，就认定日用版或安装副本已支持新参数。
 
 ### Skill 自带启动脚本
@@ -105,7 +106,8 @@ local.env.json 的 workspace、source 或启动器信息可作为本机定位线
 仅整理 Skill 说明或脚本排版、且核对日用与仓库的完整 CLI 构建同版时，
 可用显式 `-Source` 和 `-Target` 单独同步日用的 skills/aichat-graph 目录。
 这不替换程序、不结束服务；不能只比较入口 index.js 就认定全部命令同版。
-CLI 能力有变化时仍先更新对应程序，不能用新说明覆盖旧版运行入口。
+CLI 能力或接口版本有变化时先更新对应程序与同版 Skill，不能用新说明覆盖旧版运行入口。
+更新后用该副本入口执行 --help、version，必要时 whoami；文件哈希一致不等于宿主已重新加载。
 
 ```powershell
 # 从仓库目录执行；只同步实际需要更新的宿主

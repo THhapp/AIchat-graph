@@ -32,6 +32,7 @@ node ./dist/cli/index.js init "../my-graph-workspace" --name "My graph"
 node ./dist/cli/index.js serve --workspace "../my-graph-workspace"
 ```
 
+Windows 也可直接使用仓库根目录的 `aichat.cmd`；日用固定版本目录同样提供 `aichat.cmd`，不需要先安装 Skill。
 打开 <http://127.0.0.1:4317>，在服务终端按 Ctrl+C 停止。服务仅监听本机环回地址；端口冲突会明确报错。
 
 ## 与 Agent 一起使用
@@ -44,7 +45,9 @@ node ./dist/cli/index.js serve --workspace "../my-graph-workspace"
 
 记录按思考单元组织：同一问题原位完善，后续问题纵向继续，独立方向形成侧枝。不逐句复制聊天，也不要求每轮新增节点。新提议、讨论认可与参考资料分别标记；认可不代表已执行、实测或掌握。
 
-实际命令、读取凭据及冲突处理见 [CLI 说明](skills/aichat-graph/references/commands.md)。Agent 应使用与服务相同版本的 CLI 和 Skill。
+程序入口、完整命令、读取凭据和冲突恢复见 [程序 CLI 手册](docs/cli.md)；
+讨论图维护流程和 Skill 自带命令参考在 [Skill](skills/aichat-graph/SKILL.md)。
+Agent 应使用与服务相同版本的 CLI 和 Skill。
 
 读取已有主题时，Agent 先取得主题概览（主线与直接分支入口），再按需读取局部结构或正文；多卡正文由程序按整次响应预算分页，续读标记原样交回即可，不要求 Agent 自行维护各卡偏移。
 

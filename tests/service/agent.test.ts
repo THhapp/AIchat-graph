@@ -597,7 +597,7 @@ describe("Agent 动作编译", () => {
     const command = ["create-topic", "--workspace", root, "--topic-title", "第二主题", "--directory", "自定义目录", "--body", "默认更新现有内容，但属于另一个主题。"];
     const created = await runCli(command);
     expect(created.exitCode, created.stderr).toBe(0);
-    const result = JSON.parse(created.stdout).result as { created: { topicId: string; nodeIds: string[] }; editRef: { ref: string } };
+    const result = JSON.parse(created.stdout) as { created: { topicId: string; nodeIds: string[] } };
     const secondId = result.created.topicId;
     const secondRoot = result.created.nodeIds[0]!;
     expect(await fs.readFile(path.join(root, "topics", "自定义目录", "topic.md"), "utf8")).toContain(secondId);
@@ -687,11 +687,11 @@ describe("Agent 动作编译", () => {
     expect(created.status).toBe(200);
     const body = (await created.json()) as {
       created: { topicId: string; topicPath: string; nodeIds: string[] };
-      editRef: { ref: string } | null;
+      refs: Record<string, string>;
     };
     expect(body.created.topicId).toMatch(/^t_[0-9a-f]{32}$/);
     expect(body.created.nodeIds[0]).toMatch(/^n_[0-9a-f]{32}$/);
-    expect(body.editRef?.ref).toMatch(/^er_/);
+    expect(body.refs[body.created.nodeIds[0] as string]).toMatch(/^er_/);
     const graph = (await (await fetch(handle.url + "/api/graph")).json()) as {
       nodes: Array<{ id: string; flow: string }>;
       topics: Array<{ id: string }>;
@@ -1045,20 +1045,17 @@ describe("rearrange：一次表达最终入边", () => {
       action: string;
       created: { nodeIds: string[]; paths: string[] };
       changedNodeIds: string[];
-      editRef: { ref: string; nodeId: string } | null;
-      editRefs?: Record<string, { ref: string; nodeId: string }>;
+      refs: Record<string, string>;
     };
     expect(firstBody.state).toBe("committed");
     expect(firstBody.action).toBe("rearrange");
-    // 多节点操作不签发单节点兼容 editRef，凭据只通过 editRefs 提供。
-    expect(firstBody.editRef).toBeNull();
     expect(firstBody.created.nodeIds).toEqual([]);
     expect(firstBody.created.paths).toEqual([]);
-    expect(Object.keys(firstBody.editRefs ?? {}).sort()).toEqual(
+    // 刷新凭据统一在顶层 refs：覆盖 changedNodeIds，且值是 opaque token。
+    expect(Object.keys(firstBody.refs).sort()).toEqual(
       [LINK_B, LINK_C, LINK_D].sort(),
     );
-    expect(firstBody.editRefs?.[LINK_C]?.nodeId).toBe(LINK_C);
-    expect(firstBody.editRefs?.[LINK_C]?.ref).toMatch(/^er_/);
+    expect(firstBody.refs[LINK_C]).toMatch(/^er_/);
 
     const graph = await chainGraph(handle.url);
     const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
@@ -1086,11 +1083,11 @@ describe("rearrange：一次表达最终入边", () => {
     }
 
     // 用响应里的 fresh refs 直接改回，不重新读取。
-    const fresh = firstBody.editRefs as Record<string, { ref: string }>;
+    const fresh = firstBody.refs;
     const back = await postRearrange(handle.url, handle.workspaceId, randomUUID(), [
-      { editRef: fresh[LINK_B]!.ref, fromRef: refs.a, flow: "next", description: "一到二" },
-      { editRef: fresh[LINK_C]!.ref, fromRef: fresh[LINK_B]!.ref, flow: "next", description: "二到三" },
-      { editRef: fresh[LINK_D]!.ref, fromRef: fresh[LINK_C]!.ref, flow: "next", description: "三到四" },
+      { editRef: fresh[LINK_B]!, fromRef: refs.a, flow: "next", description: "一到二" },
+      { editRef: fresh[LINK_C]!, fromRef: fresh[LINK_B]!, flow: "next", description: "二到三" },
+      { editRef: fresh[LINK_D]!, fromRef: fresh[LINK_C]!, flow: "next", description: "三到四" },
     ]);
     expect(back.status).toBe(200);
     const restored = await chainGraph(handle.url);
@@ -1487,8 +1484,7 @@ describe("提交刷新失败", () => {
       journalCleaned: boolean;
       diagnostics: Array<{ code: string; message: string }>;
       created: { topicPath: string | null; nodeIds: string[] };
-      editRef: unknown;
-      editRefs: unknown;
+      refs: unknown;
     };
     expect(body.state).toBe("committed_refresh_pending");
     expect(body.transactionId).not.toBeNull();
@@ -1500,8 +1496,7 @@ describe("提交刷新失败", () => {
     );
     expect(pending).toHaveLength(1);
     expect(pending[0]?.message).toContain("源文件已提交并保留事务日志");
-    expect(body.editRef).toBeNull();
-    expect(body.editRefs).toEqual({});
+    expect(body.refs).toEqual({});
 
     // 不回滚：新节点文件已落盘；写入停用；事务日志仍在等待重启核对。
     const topicDir = (body.created.topicPath ?? "").split("/")[1] ?? "";

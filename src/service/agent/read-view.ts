@@ -19,7 +19,6 @@ import type {
   ReadViewNode,
 } from "../../index/read-view.js";
 import type {
-  AgentEditRef,
   ReadOnlineInfo,
   ReadScope,
   ReadViewKind,
@@ -415,13 +414,17 @@ function contentNodes(
   return { nodes, topic };
 }
 
+/**
+ * 为本次实际可能返回的节点签发刷新凭据，只取不透明 token。
+ * 引擎按当前页 items 过滤：没返回的节点不会出现在顶层 refs。
+ */
 function issueEditRefs(
   editRefs: EditRefStore,
   runtime: WorkspaceRuntime,
   workspaceId: string,
   nodes: readonly ReadViewNode[],
-): Record<string, AgentEditRef> {
-  const refs: Record<string, AgentEditRef> = {};
+): Record<string, string> {
+  const refs: Record<string, string> = {};
   for (const node of nodes) {
     if (refs[node.id] !== undefined) continue;
     refs[node.id] = editRefs.issue({
@@ -432,7 +435,7 @@ function issueEditRefs(
       fileHash: node.fileHash ?? "",
       instanceId: runtime.instanceId,
       revision: runtime.current.revision,
-    });
+    }).ref;
   }
   return refs;
 }

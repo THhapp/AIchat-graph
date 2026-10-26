@@ -119,7 +119,7 @@ afterEach(async () => {
 });
 
 describe("aichat rearrange", () => {
-  it("从 spec.json 一次提交最终入边，输出 requestId 与刷新后的 editRefs", async () => {
+  it("从 spec.json 一次提交最终入边，输出顶层 refs 与请求身份", async () => {
     const { root, parent } = await newChainWorkspace();
     const handle = await start(root);
     const refs = {
@@ -145,35 +145,48 @@ describe("aichat rearrange", () => {
       "utf8",
     );
 
-    const outcome = await main(["rearrange", "--input", specPath, "--workspace", root]);
+    // --verbose：默认精简结果之外才输出 touchedFiles 与事务诊断。
+    const outcome = await main([
+      "rearrange",
+      "--input",
+      specPath,
+      "--workspace",
+      root,
+      "--verbose",
+    ]);
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     const body = JSON.parse(outcome.stdout) as {
+      ok: boolean;
       command: string;
+      workspaceId: string;
+      topicId: string;
       requestId: string;
-      result: {
-        state: string;
-        action: string;
-        touchedFiles: Array<{ path: string }>;
-        editRef: { ref: string; nodeId: string } | null;
-        editRefs?: Record<string, { ref: string; nodeId: string }>;
-      };
+      state: string;
+      revision: number;
+      changedNodeIds: string[];
+      refs: Record<string, string>;
+      touchedFiles: Array<{ path: string }>;
+      httpStatus: number;
+      result?: unknown;
     };
+    expect(body.ok).toBe(true);
     expect(body.command).toBe("rearrange");
+    expect(body.workspaceId).toBeTruthy();
+    expect(body.topicId).toBe(TOPIC_ID);
     expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(body.result.state).toBe("committed");
-    expect(body.result.action).toBe("rearrange");
-    // rearrange 是多节点操作：不返回单节点 editRef，只给 editRefs。
-    expect(body.result.editRef).toBeNull();
-    expect(body.result.touchedFiles.map((file) => file.path).sort()).toEqual(
+    // 统一结果在顶层：不再套 result，也不再给单节点 editRef。
+    expect(body["result"]).toBeUndefined();
+    expect(body.state).toBe("committed");
+    expect(body.revision).toBeGreaterThan(0);
+    expect(body.changedNodeIds.slice().sort()).toEqual([NODE_B, NODE_C, NODE_D].sort());
+    expect(Object.keys(body.refs).sort()).toEqual([NODE_B, NODE_C, NODE_D].sort());
+    expect(body.refs[NODE_C]).toMatch(/^er_/);
+    expect(body.httpStatus).toBe(200);
+    expect(body.touchedFiles.map((file) => file.path).sort()).toEqual(
       [NODE_B, NODE_C, NODE_D]
         .map((id) => "topics/" + TOPIC_DIR + "/" + id + ".md")
         .sort(),
     );
-    expect(Object.keys(body.result.editRefs ?? {}).sort()).toEqual(
-      [NODE_B, NODE_C, NODE_D].sort(),
-    );
-    expect(body.result.editRefs?.[NODE_C]?.nodeId).toBe(NODE_C);
-    expect(body.result.editRefs?.[NODE_C]?.ref).toMatch(/^er_/);
 
     expect(await graphNumbers(handle)).toEqual({
       [NODE_A]: "01:null",

@@ -11,7 +11,6 @@ import type {
   ReadViewNode,
 } from "../../src/index/read-view.js";
 import type {
-  AgentEditRef,
   NodeFlow,
   ReadContentItem,
   ReadOverviewItem,
@@ -284,6 +283,8 @@ describe("structure", () => {
     }
     expect(response.boundaries).toBeUndefined();
     expect(response.scope).toMatchObject({ kind: "topic", nodeCount: FIXTURE.length });
+    // overview/structure 不签发凭据：顶层 refs 恒为空对象。
+    expect(response.refs).toEqual({});
   });
 
   it("subtree 返回穿越边界的真实连接", () => {
@@ -471,24 +472,13 @@ describe("content", () => {
     expect(tailItem.truncated).toBe(false);
   });
 
-  it("meta 无正文但在线保留真实 editRef，缺失时为 null", () => {
-    const ref: AgentEditRef = {
-      ref: "er_test",
-      workspaceId: W,
-      topicId: T1,
-      nodeId: "a",
-      path: "topics/t1/a.md",
-      fileHash: "hash-a",
-      instanceId: "inst-1",
-      revision: 7,
-      issuedAt: "2026-01-01T00:00:00.000Z",
-    };
+  it("meta 无正文且 item 不再带 editRef；顶层 refs 只覆盖当前页返回的节点", () => {
     const response = contentPage(
       undefined,
       DEFAULT_READ_BUDGET,
       CONTENT_NODES,
       { meta: true },
-      { editRefs: { a: ref } },
+      { editRefs: { a: "er_a" } },
     );
     const items = response.items as ReadContentItem[];
     expect(items).toHaveLength(2);
@@ -500,31 +490,30 @@ describe("content", () => {
       path: "topics/t1/a.md",
       fileHash: "hash-a",
     });
-    expect(items[0]?.editRef).toEqual(ref);
-    expect(items[1]?.editRef).toBeNull();
+    for (const item of items) expect(item).not.toHaveProperty("editRef");
+    expect(response.refs).toEqual({ a: "er_a" });
     expect(response.budget.mode).toBe("auto");
     // meta 续读只继续元数据，不能借用“多卡正文续读”的范围说明。
     expect(response.scope.note).not.toContain("正文");
     expect(response.scope.note).not.toContain("按预算续读");
   });
 
-  it("meta 跨页续读仍只返回元数据并保留 editRef", () => {
-    const refFor = (nodeId: string, hash: string): AgentEditRef => ({
-      ref: "er_" + nodeId,
-      workspaceId: W,
-      topicId: T1,
-      nodeId,
-      path: "topics/t1/" + nodeId + ".md",
-      fileHash: hash,
-      instanceId: "inst-1",
-      revision: 7,
-      issuedAt: "2026-01-01T00:00:00.000Z",
-    });
-    const refs: Record<string, AgentEditRef> = {
-      a: refFor("a", "hash-a"),
-      b: refFor("b", "hash-b"),
+  it("meta 跨页续读仍只返回元数据，refs 只含当前页节点", () => {
+    const nodes: ReadViewNode[] = [
+      ...CONTENT_NODES,
+      makeNode("c", "主线 C", "b", "next", {
+        number: "04",
+        sourcePath: "topics/t1/c.md",
+        fileHash: "hash-c",
+      }),
+    ];
+    const refs: Record<string, string> = {
+      a: "er_a",
+      b: "er_b",
+      c: "er_c",
     };
-    const budget = 1500;
+    // refs 改为顶层短 token 后单页更紧凑：用更小预算仍应跨页。
+    const budget = 1200;
     const all: ReadContentItem[] = [];
     let cursor: string | undefined;
     let pages = 0;
@@ -535,7 +524,7 @@ describe("content", () => {
       const response = contentPage(
         cursor,
         budget,
-        CONTENT_NODES,
+        nodes,
         contentOptions,
         { editRefs: refs },
       );
@@ -547,8 +536,12 @@ describe("content", () => {
         expect(item.bodyOmitted).toBe(true);
         expect(item.body).toBe("");
         expect(item.truncated).toBe(false);
-        expect(item.editRef).toEqual(refs[item.node.id]);
+        expect(item).not.toHaveProperty("editRef");
       }
+      // 顶层 refs 只覆盖本页返回的节点，不累积旧页凭据。
+      const expectedRefs: Record<string, string> = {};
+      for (const item of items) expectedRefs[item.node.id] = refs[item.node.id] as string;
+      expect(response.refs).toEqual(expectedRefs);
       all.push(...items);
       pages += 1;
       if (!response.page.hasMore) break;
@@ -557,8 +550,8 @@ describe("content", () => {
       expect(pages).toBeLessThan(20);
     }
     expect(pages).toBeGreaterThan(1);
-    expect(all.map((item) => item.node.id)).toEqual(["a", "b"]);
-    expect(new Set(all.map((item) => item.node.id)).size).toBe(2);
+    expect(all.map((item) => item.node.id)).toEqual(["a", "b", "c"]);
+    expect(new Set(all.map((item) => item.node.id)).size).toBe(3);
   });
 
   it("BUDGET_TOO_SMALL.minimum 计入最小候选卡片", () => {
@@ -585,7 +578,7 @@ describe("content", () => {
     expect(Number(below.details?.["minimum"])).toBeGreaterThanOrEqual(minimum);
   });
 
-  it("离线 content 的 editRef 必须为 null", () => {
+  it("离线 content 的 item 无 editRef，顶层 refs 为空", () => {
     const response = contentPage(
       undefined,
       DEFAULT_READ_BUDGET,
@@ -606,7 +599,8 @@ describe("content", () => {
       },
     );
     const item = response.items[0] as ReadContentItem;
-    expect(item.editRef).toBeNull();
+    expect(item).not.toHaveProperty("editRef");
+    expect(response.refs).toEqual({});
     expect(item.bodyOmitted).toBe(true);
     expect(response.source).toBe("disk");
     expect(response.online.available).toBe(false);

@@ -143,22 +143,20 @@ describe("aichat important", () => {
     const outcome = await main(["important", "--node", NEXT_NODE, "--on", "--workspace", root]);
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     const body = JSON.parse(outcome.stdout) as {
+      ok: boolean;
       command: string;
-      nodeId: string;
-      important: boolean;
-      result: {
-        state: string;
-        editRef: { ref: string; nodeId: string } | null;
-        editRefs?: Record<string, { ref: string }>;
-      };
+      state: string;
+      changedNodeIds: string[];
+      refs: Record<string, string>;
+      result?: unknown;
     };
+    expect(body.ok).toBe(true);
     expect(body.command).toBe("important");
-    expect(body.nodeId).toBe(NEXT_NODE);
-    expect(body.important).toBe(true);
-    expect(body.result.state).toBe("committed");
-    expect(body.result.editRef?.ref).toMatch(/^er_/);
-    expect(body.result.editRef?.nodeId).toBe(NEXT_NODE);
-    expect(body.result.editRefs?.[NEXT_NODE]?.ref).toMatch(/^er_/);
+    expect(body["result"]).toBeUndefined();
+    expect(body.state).toBe("committed");
+    expect(body.changedNodeIds).toContain(NEXT_NODE);
+    // 刷新后的凭据统一在顶层 refs。
+    expect(body.refs[NEXT_NODE]).toMatch(/^er_/);
 
     const text = await fs.readFile(nodePath(root, NEXT_NODE), "utf8");
     expect(text).toContain("important: true");
@@ -200,13 +198,15 @@ describe("aichat important", () => {
     const off = await main(["important", "--ref", fresh, "--off", "--workspace", root]);
     expect(off.exitCode, off.stderr).toBe(0);
     const payload = JSON.parse(off.stdout) as {
-      nodeId: string;
-      important: boolean;
-      result: { editRef: { nodeId: string } | null };
+      state: string;
+      changedNodeIds: string[];
+      refs: Record<string, string>;
+      result?: unknown;
     };
-    expect(payload.nodeId).toBe(NEXT_NODE);
-    expect(payload.important).toBe(false);
-    expect(payload.result.editRef?.nodeId).toBe(NEXT_NODE);
+    expect(payload["result"]).toBeUndefined();
+    expect(payload.state).toBe("committed");
+    expect(payload.changedNodeIds).toContain(NEXT_NODE);
+    expect(payload.refs[NEXT_NODE]).toMatch(/^er_/);
 
     const cleared = await fs.readFile(nodePath(root, NEXT_NODE), "utf8");
     expect(cleared).not.toContain("important");

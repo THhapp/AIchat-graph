@@ -5,6 +5,7 @@ import path from "node:path";
 import { initWorkspace } from "../../src/storage/index.js";
 import { main } from "../../src/cli/index.js";
 import type { ServiceHandleLike, StartServiceLike } from "../../src/cli/context.js";
+import { workspaceResponse } from "./fixtures.js";
 
 const temporaryRoots: string[] = [];
 
@@ -62,16 +63,14 @@ function fakeFetch(options: FakeServiceOptions): {
     requests.push(request);
     if (url === origin + "/api/workspace") {
       return new Response(
-        JSON.stringify({
-          workspaceId: options.workspaceId,
-          instanceId: options.instanceId ?? "inst-1",
-          rootPath: options.rootPath,
-          name: "online-test",
-          activeNode: null,
-          revision: 1,
-          stale: false,
-          diagnostics: [],
-        }),
+        JSON.stringify(
+          workspaceResponse({
+            workspaceId: options.workspaceId,
+            instanceId: options.instanceId ?? "inst-1",
+            rootPath: options.rootPath,
+            revision: 1,
+          }),
+        ),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }

@@ -6,10 +6,10 @@
  */
 import { searchDocuments, SearchQueryError } from "../index/index.js";
 import type { SearchDocument } from "../index/index.js";
-import { parseOptions } from "./args.js";
+import { parseCommandArgs } from "./command-specs.js";
 import type { CliContext } from "./context.js";
 import { EXIT_CODES, UsageError, invalidArgument } from "./errors.js";
-import { OUTPUT_OPTIONS, WORKSPACE_OPTION, parseIntegerOption } from "./options.js";
+import { parseIntegerOption } from "./options.js";
 import { emit, parseOutputMode } from "./output.js";
 import { briefUsage } from "./usage.js";
 import { loadWorkspace, workspaceRoot } from "./workspace.js";
@@ -18,17 +18,7 @@ const DEFAULT_SEARCH_LIMIT = 10;
 const MAX_SEARCH_LIMIT = 100;
 
 export async function runSearch(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(
-    args,
-    [
-      WORKSPACE_OPTION,
-      { name: "topic" },
-      { name: "limit" },
-      { name: "page" },
-      ...OUTPUT_OPTIONS,
-    ],
-    1,
-  );
+  const parsed = parseCommandArgs("search", args);
   const mode = parseOutputMode(parsed);
   const query = parsed.positional[0]?.trim();
   if (query === undefined || query.length === 0) {

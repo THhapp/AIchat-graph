@@ -205,7 +205,7 @@ afterEach(async () => {
 });
 
 describe("read --node 统一输出", () => {
-  it("同一节点在线与离线的 content 形状一致，editRef 只在在线可用", async () => {
+  it("同一节点在线与离线的 content 形状一致，refs 只在在线可用", async () => {
     const root = await newWorkspace();
     await start(root);
 
@@ -252,10 +252,11 @@ describe("read --node 统一输出", () => {
       sourcePath: "topics/" + TOPIC_DIR + "/" + NODE_B + ".md",
     });
 
-    // 在线凭据可用且指向该节点；离线必须显式 null，不伪造。
-    expect(onlineItem.editRef?.ref).toMatch(/^er_/);
-    expect(onlineItem.editRef?.nodeId).toBe(NODE_B);
-    expect(offlineItem.editRef).toBeNull();
+    // 在线凭据统一在顶层 refs；离线为空对象，不伪造。
+    expect(onlineItem).not.toHaveProperty("editRef");
+    expect(offlineItem).not.toHaveProperty("editRef");
+    expect(online.refs[NODE_B]).toMatch(/^er_/);
+    expect(offline.refs).toEqual({});
     expect(offlineItem.path).toBe(onlineItem.path);
     expect(offlineItem.fileHash).toBe(onlineItem.fileHash);
     expect(offlineItem.range).toEqual(onlineItem.range);
@@ -297,7 +298,7 @@ describe("read --node 统一输出", () => {
     }
   });
 
-  it("--meta 在线只返回元数据与 editRef；离线同样无正文且 editRef 为 null", async () => {
+  it("--meta 在线只返回元数据与 refs；离线同样无正文且 refs 为空", async () => {
     const root = await newWorkspace();
     await start(root);
 
@@ -319,10 +320,8 @@ describe("read --node 统一输出", () => {
     }
     expect(onlineItem.range.total).toBe(offlineItem.range.total);
     expect(onlineItem.body).not.toContain("乙");
-    expect(onlineItem.editRef?.ref).toMatch(/^er_/);
-    expect(onlineItem.editRef?.nodeId).toBe(NODE_B);
-    expect(onlineItem.editRef?.path).toBe(onlineItem.path);
-    expect(offlineItem.editRef).toBeNull();
+    expect(online.refs[NODE_B]).toMatch(/^er_/);
+    expect(offline.refs).toEqual({});
     expect(online.budget.mode).toBe("auto");
     expect(offline.source).toBe("disk");
   });
@@ -360,8 +359,8 @@ describe("read --node 统一输出", () => {
     const offlineCollected = new Map<string, string>();
     for (const page of offlinePages) {
       expect(page.source).toBe("disk");
+      expect(page.refs).toEqual({});
       for (const item of contentItems(page)) {
-        expect(item.editRef).toBeNull();
         const before = offlineCollected.get(item.node.id) ?? "";
         offlineCollected.set(item.node.id, before + item.body);
       }
@@ -512,13 +511,16 @@ describe("read --node 统一输出", () => {
     }
   });
 
-  it("--section 在线与离线从同一起点切片", async () => {
+  it("--from-heading 在线与离线从同一起点切片", async () => {
     const root = await newWorkspace();
     await start(root);
 
-    const online = await read(["--node", NODE_E, "--section", "第二节", "--length", "20"], root);
+    const online = await read(
+      ["--node", NODE_E, "--from-heading", "第二节", "--length", "20"],
+      root,
+    );
     const offline = await read(
-      ["--node", NODE_E, "--section", "第二节", "--length", "20", "--offline"],
+      ["--node", NODE_E, "--from-heading", "第二节", "--length", "20", "--offline"],
       root,
     );
     const onlineItem = contentItems(online)[0];
@@ -538,7 +540,7 @@ describe("read --node 统一输出", () => {
 
     // --full 从章节起点取到底；--start 被忽略。
     const full = await read(
-      ["--node", NODE_E, "--section", "第二节", "--start", "0", "--full"],
+      ["--node", NODE_E, "--from-heading", "第二节", "--start", "0", "--full"],
       root,
     );
     const fullItem = contentItems(full)[0];
@@ -556,8 +558,8 @@ describe("read --node 统一输出", () => {
       ["--node", NODE_B, "--meta", "--length", "10"],
       ["--node", NODE_B, "--meta", "--start", "0"],
       ["--node", NODE_B, "--meta", "--full"],
-      ["--node", NODE_B, "--meta", "--section", "第二节"],
-      ["--node", NODE_B, "--meta", "--section", "第二节", "--section-index", "0"],
+      ["--node", NODE_B, "--meta", "--from-heading", "第二节"],
+      ["--node", NODE_B, "--meta", "--from-heading", "第二节", "--occurrence", "0"],
       [TOPIC_ID, "--meta"],
     ];
     for (const args of cases) {
@@ -618,23 +620,30 @@ describe("read --node 统一输出", () => {
     expect(text.stdout).not.toContain("## 第一节");
   });
 
-  it("--section-index 单独出现时统一拒绝（节点与主题、离线同样生效）", async () => {
+  it("--occurrence 单独出现时统一拒绝（节点与主题、离线同样生效）", async () => {
     // 不启动服务：若校验缺失，节点读取会静默回退磁盘而不是退出码 2。
     const root = await newWorkspace();
 
     const cases = [
-      ["--node", NODE_E, "--section-index", "0"],
-      [TOPIC_ID, "--section-index", "0"],
+      ["--node", NODE_E, "--occurrence", "0"],
+      [TOPIC_ID, "--occurrence", "0"],
     ];
     for (const args of cases) {
       const result = await cli(args, root);
       expect(result.exitCode, args.join(" ")).toBe(2);
       const error = JSON.parse(result.stderr) as { error: { message: string } };
-      expect(error.error.message).toContain("--section");
+      expect(error.error.message).toContain("--from-heading");
+    }
+
+    // 旧名不保留：--section／--section-index 直接是未知选项。
+    for (const args of [["--node", NODE_E, "--section", "第二节"], ["--node", NODE_E, "--section-index", "0"]]) {
+      const result = await cli(args, root);
+      expect(result.exitCode, args.join(" ")).toBe(2);
+      expect((JSON.parse(result.stderr) as { error: { code: string } }).error.code).toBe("USAGE");
     }
   });
 
-  it("服务不可达时全部磁盘读取，顶层给出原因且 editRef 为 null", async () => {
+  it("服务不可达时全部磁盘读取，顶层给出原因且 refs 为空", async () => {
     const root = await newWorkspace();
 
     const pages = await collectPages(["--node", NODE_A, "--node", NODE_B], root, {
@@ -650,9 +659,10 @@ describe("read --node 统一输出", () => {
       expect(payload.online.code).toBe("SERVICE_NOT_RUNNING");
       expect(payload.online.reason).toBeTruthy();
       expect(payload.budget).toMatchObject({ unit: "utf16", limit: 12000, mode: "auto" });
+      expect(payload.refs).toEqual({});
       for (const item of contentItems(payload)) {
         const before = collected.get(item.node.id) ?? "";
-        expect(item.editRef).toBeNull();
+        expect(item).not.toHaveProperty("editRef");
         expect(item.range.start).toBe(before.length);
         expect(item.body.length).toBeLessThanOrEqual(4000);
         expect(item.range.end - item.range.start).toBe(item.body.length);

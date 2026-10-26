@@ -1,10 +1,10 @@
 /** 离线工作区命令：init／serve／topics／validate。 */
 import path from "node:path";
 import { initWorkspace } from "../storage/index.js";
-import { parseOptions } from "./args.js";
+import { parseCommandArgs } from "./command-specs.js";
 import type { CliContext, ServiceHandleLike, StartServiceLike } from "./context.js";
 import { CliError, EXIT_CODES, UsageError } from "./errors.js";
-import { OUTPUT_OPTIONS, WORKSPACE_OPTION, parseIntegerOption } from "./options.js";
+import { parseIntegerOption } from "./options.js";
 import { emit, emitText, parseOutputMode } from "./output.js";
 import { DEFAULT_PORT } from "./service-client.js";
 import { briefUsage } from "./usage.js";
@@ -18,11 +18,7 @@ import {
 /* ---------------------------------- init ---------------------------------- */
 
 export async function runInit(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(
-    args,
-    [{ name: "name" }, WORKSPACE_OPTION, ...OUTPUT_OPTIONS],
-    1,
-  );
+  const parsed = parseCommandArgs("init", args);
   const mode = parseOutputMode(parsed);
   const positional = parsed.positional[0];
   const optionPath = parsed.values.get("workspace");
@@ -104,11 +100,7 @@ function waitForShutdown(ctx: CliContext): Promise<void> {
 }
 
 export async function runServe(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(
-    args,
-    [WORKSPACE_OPTION, { name: "port" }, ...OUTPUT_OPTIONS],
-    0,
-  );
+  const parsed = parseCommandArgs("serve", args);
   const mode = parseOutputMode(parsed);
   if (!parsed.values.has("workspace")) {
     throw new UsageError("serve 必须显式给出 --workspace\n\n" + briefUsage("serve"));
@@ -165,7 +157,7 @@ export async function runServe(args: readonly string[], ctx: CliContext): Promis
 /* --------------------------------- topics --------------------------------- */
 
 export async function runTopics(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(args, [WORKSPACE_OPTION, ...OUTPUT_OPTIONS], 0);
+  const parsed = parseCommandArgs("topics", args);
   const mode = parseOutputMode(parsed);
   const root = await workspaceRoot(parsed, ctx);
   const snapshot = await loadWorkspace(root);
@@ -199,7 +191,7 @@ export async function runTopics(args: readonly string[], ctx: CliContext): Promi
 /* -------------------------------- validate -------------------------------- */
 
 export async function runValidate(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(args, [WORKSPACE_OPTION, ...OUTPUT_OPTIONS], 0);
+  const parsed = parseCommandArgs("validate", args);
   const mode = parseOutputMode(parsed);
   const root = await workspaceRoot(parsed, ctx);
   const snapshot = await loadWorkspace(root);

@@ -1,4 +1,4 @@
-/** CLI 共享选项表与数值解析：命令模块只声明自己的选项，不各写一份。 */
+/** CLI 共享选项与数值解析；完整命令参数表在 command-specs（单一来源）。 */
 import type { OptionSpec } from "./args.js";
 import { UsageError, invalidArgument } from "./errors.js";
 

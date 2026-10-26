@@ -435,6 +435,30 @@ export class WorkspaceRuntime {
         source: "session",
       };
     }
+    // Agent 动作的会话记录也参与 status 查询：结果未知时先查这里，不新造永久历史。
+    const agentRecord = this.agentLog.get(requestId);
+    if (agentRecord !== undefined) {
+      const record = agentRecord as {
+        state?: unknown;
+        httpStatus?: unknown;
+        recordedAt?: unknown;
+        body?: unknown;
+      };
+      const body =
+        typeof record.body === "object" && record.body !== null
+          ? (record.body as Record<string, unknown>)
+          : ({} as Record<string, unknown>);
+      const { state: _ignoredState, ...rest } = body;
+      void _ignoredState;
+      return {
+        ...rest,
+        requestId,
+        state: typeof record.state === "string" ? record.state : "committed",
+        httpStatus: typeof record.httpStatus === "number" ? record.httpStatus : 200,
+        recordedAt: typeof record.recordedAt === "string" ? record.recordedAt : null,
+        source: "session",
+      };
+    }
     let journals;
     try {
       journals = await listTransactions(this.rootReal);

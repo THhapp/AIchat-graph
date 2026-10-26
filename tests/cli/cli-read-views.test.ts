@@ -401,7 +401,7 @@ describe("aichat read 渐进读取", () => {
     expect(text.stdout).toContain(B1N);
   });
 
-  it("content：小预算跟随 --cursor 覆盖全部正文；在线 editRef，离线为 null", async () => {
+  it("content：小预算跟随 --cursor 覆盖全部正文；在线 refs，离线为空", async () => {
     const root = await newWorkspace();
     await start(root);
 
@@ -419,10 +419,9 @@ describe("aichat read 渐进读取", () => {
         const before = collected.get(id) ?? "";
         expect(item.range.start).toBe(before.length);
         expect(item.range.end).toBe(item.range.start + item.body.length);
-        expect(item.editRef).not.toBeNull();
-        expect(item.editRef?.nodeId).toBe(id);
-        expect(item.editRef?.path).toBe(item.path);
-        expect(item.editRef?.fileHash).toBe(item.fileHash);
+        // 凭据统一在顶层 refs；content item 不再内嵌 editRef。
+        expect(item).not.toHaveProperty("editRef");
+        expect(page.refs[id]).toMatch(/^er_/);
         collected.set(id, before + item.body);
       }
     }
@@ -440,8 +439,9 @@ describe("aichat read 渐进读取", () => {
         available: false,
         code: "OFFLINE_REQUESTED",
       });
+      expect(page.refs).toEqual({});
       for (const item of page.items as ReadContentItem[]) {
-        expect(item.editRef).toBeNull();
+        expect(item).not.toHaveProperty("editRef");
         const before = offlineCollected.get(item.node.id) ?? "";
         expect(item.range.start).toBe(before.length);
         offlineCollected.set(item.node.id, before + item.body);
@@ -461,12 +461,13 @@ describe("aichat read 渐进读取", () => {
     if (fallback.online.available) throw new Error("expected offline");
     expect(fallback.online.code).toBe("SERVICE_NOT_RUNNING");
     expect(fallback.online.reason).toBeTruthy();
+    expect(fallback.refs).toEqual({});
     for (const item of fallback.items as ReadContentItem[]) {
-      expect(item.editRef).toBeNull();
+      expect(item).not.toHaveProperty("editRef");
     }
   });
 
-  it("--meta 多卡跨页仍省略正文且有 editRef；显式 --full/--length 超小预算返回 BUDGET_EXCEEDED", async () => {
+  it("--meta 多卡跨页仍省略正文且有 refs；显式 --full/--length 超小预算返回 BUDGET_EXCEEDED", async () => {
     const root = await newWorkspace();
     await start(root);
 
@@ -484,8 +485,7 @@ describe("aichat read 渐进读取", () => {
         expect(item.range.start).toBe(0);
         expect(item.range.end).toBe(0);
         expect(item.range.total).toBeGreaterThan(0);
-        expect(item.editRef).not.toBeNull();
-        expect(item.editRef?.nodeId).toBe(item.node.id);
+        expect(page.refs[item.node.id]).toMatch(/^er_/);
       }
     }
     expect(ids).toEqual(requested);
@@ -541,7 +541,7 @@ describe("aichat read 渐进读取", () => {
     expect(error.details).toBeDefined();
   });
 
-  it("参数冲突、content 无 node、overview 带 node、meta/section 冲突与非法预算 → 退出码 2", async () => {
+  it("参数冲突、content 无 node、overview 带 node、meta/heading 冲突与非法预算 → 退出码 2", async () => {
     const root = await newWorkspace();
 
     const cases: Array<{ args: string[]; messageIncludes?: string }> = [
@@ -553,7 +553,7 @@ describe("aichat read 渐进读取", () => {
       { args: [MAIN_TOPIC, "--view", "overview", "--node", R] },
       { args: ["--node", R, "--from", N1] },
       { args: ["--node", R, "--meta", "--length", "10"], messageIncludes: "--meta" },
-      { args: ["--node", R, "--section-index", "0"], messageIncludes: "--section" },
+      { args: ["--node", R, "--occurrence", "0"], messageIncludes: "--from-heading" },
       { args: [MAIN_TOPIC, "--view", "structure", "--start", "0"] },
       { args: [MAIN_TOPIC, "--budget", "0"] },
       { args: [MAIN_TOPIC, "--budget", "1000001"] },

@@ -52,8 +52,13 @@ if ($Port -eq 0) {
   $Port = 4317
   if ($Mode -eq 'Development') { $Port = 4318 }
 }
-$RequiredOutputs = @('dist\cli\index.js', 'dist\web\index.html', 'dist\offline\reader.js', 'dist\offline\reader.css')
-$InputPaths = @('src', 'index.html', 'package.json', 'package-lock.json', 'vite.config.ts', 'vite.offline.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'tsconfig.web.json', 'tsconfig.build.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'licenses', 'scripts\generate-notices.mjs')
+# 构建产物：构建后必须齐全，也是判断源码是否比产物新的基准。
+$BuildOutputs = @('dist\cli\index.js', 'dist\web\index.html', 'dist\offline\reader.js', 'dist\offline\reader.css', 'dist\build-info.json')
+# 分发文件：根入口与程序手册随每日快照复制，让使用者无需安装 Skill 也能调用。
+$DistributionFiles = @('aichat.cmd', 'docs\cli.md')
+# 日用快照完整性的必查项：全部构建产物 + 分发文件。
+$RequiredOutputs = @($BuildOutputs) + @($DistributionFiles)
+$InputPaths = @('src', 'index.html', 'package.json', 'package-lock.json', 'vite.config.ts', 'vite.offline.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'tsconfig.web.json', 'tsconfig.build.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'licenses', 'scripts\generate-notices.mjs', 'scripts\generate-build-info.mjs')
 . (Join-Path $PSScriptRoot 'daily-snapshot.ps1')
 
 # ===========================================================================
@@ -532,11 +537,11 @@ if ($Mode -eq 'Development' -and -not (Test-Path -LiteralPath (Join-Path $Projec
   }
 }
 
-# 服务运行时真正需要的产物：CLI 入口、前端页面，以及导出用的离线读者资源。
-# 只有产物缺失或源码比产物新才重建，避免每次启动都重编。
+# 服务运行时真正需要的产物：CLI 入口、前端页面、离线读者资源与构建标识。
+# 只有产物缺失或源码比产物新才重建，避免每次启动都重编；入口与手册不参与构建判断。
 $outputsMissing = $false
 $oldestOutput = [datetime]::MaxValue
-foreach ($relative in $RequiredOutputs) {
+foreach ($relative in $BuildOutputs) {
   $output = Join-Path $RuntimeRoot $relative
   if (-not (Test-Path -LiteralPath $output)) {
     $outputsMissing = $true
@@ -566,9 +571,9 @@ if ($Mode -eq 'Development' -and ($outputsMissing -or ($newestInput -gt $oldestO
   if ($buildExit -ne 0) {
     Fail ('npm run build 失败（退出码 ' + $buildExit + '）。') '请查看上方构建输出中的错误；修好后重新双击启动。'
   }
-  foreach ($relative in $RequiredOutputs) {
+  foreach ($relative in $BuildOutputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot $relative))) {
-      Fail ('构建完成但缺少产物：' + $relative) '请检查构建配置是否被改动。'
+      Fail ('构建完成但缺少产物：' + $relative) '请检查构建配置与 scripts/generate-build-info.mjs 是否被改动。'
     }
   }
 }

@@ -218,6 +218,23 @@ describe("当前格式候选：局部修改与结构", () => {
     expect(text).toContain("根节点正文。\n\n追加段落。");
   });
 
+  it("append 规范化：统一去掉首部空行与末尾空白，只在非空 base 后插一个空行", async () => {
+    const { files } = await newWorkspace({ 协作方式: BASE_TOPIC });
+    const plain = prepareChanges(
+      files,
+      request(files, [{ op: "patchNode", nodeId: ROOT_ID, append: "追加段落。" }]),
+    );
+    const padded = prepareChanges(
+      files,
+      request(files, [{ op: "patchNode", nodeId: ROOT_ID, append: "\n\n追加段落。  \n\n" }]),
+    );
+    // 同一内容无论来自 JSON 字符串还是文件（文件只多了首部空行／末尾空白），结果逐字节一致。
+    expect(padded.files[0]!.content).toBe(plain.files[0]!.content);
+    const text = plain.files[0]!.content as string;
+    expect(text).toContain("根节点正文。\n\n追加段落。");
+    expect(text).not.toContain("\n\n\n追加段落。");
+  });
+
   it("createNode 新增分支默认 max+10，description 必需非 root", async () => {
     const withBranch = {
       ...BASE_TOPIC,
@@ -248,6 +265,8 @@ describe("当前格式候选：局部修改与结构", () => {
           state: "proposed",
           description: "从根节点展开的另一条线索",
           side: "right",
+          summary: "新分支摘要",
+          important: true,
         },
       ],
       { ["topics/协作方式/" + newBranchId + ".md"]: null },
@@ -255,6 +274,9 @@ describe("当前格式候选：局部修改与结构", () => {
     const changes = prepareChanges(files, createdRequest);
     const createdFile = changes.files.find((file) => file.path.endsWith(newBranchId + ".md"))!;
     expect(createdFile.content).toContain("order: 20");
+    // createNode 支持显式摘要与 important（新节点文件直接带上这两个元数据）。
+    expect(createdFile.content).toContain("summary: 新分支摘要");
+    expect(createdFile.content).toContain("important: true");
     expect(createdFile.expectedSha256).toBeNull();
 
     let error: unknown;

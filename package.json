@@ -27,7 +27,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "prebuild:node": "npm run notices -- --copy-dist",
+    "prebuild:node": "npm run notices -- --copy-dist && node scripts/generate-build-info.mjs",
     "build:node": "tsc -p tsconfig.build.json",
     "build:web": "npm run build:web-app && npm run build:web-offline",
     "build": "npm run build:node && npm run build:web",

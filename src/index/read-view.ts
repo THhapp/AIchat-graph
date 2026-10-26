@@ -11,7 +11,6 @@
 import { createHash } from "node:crypto";
 import { DEFAULT_READ_LENGTH, locateSection, sliceBody } from "../core/index.js";
 import type {
-  AgentEditRef,
   AgentReadRange,
   BranchSide,
   GraphNode,
@@ -71,8 +70,8 @@ export interface ReadViewBuildInput {
   budget: number;
   cursor?: string;
   content?: ReadContentOptions;
-  /** 在线 content 的凭据；离线为空/缺省。 */
-  editRefs?: Readonly<Record<string, AgentEditRef | null>>;
+  /** 在线 content 的刷新凭据（nodeId → opaque token）；离线为空/缺省。 */
+  editRefs?: Readonly<Record<string, string | null>>;
   /** 由服务/CLI 提供，计入预算。 */
   envelope: { source: "online" | "disk"; root: string; online: ReadOnlineInfo };
 }
@@ -651,6 +650,23 @@ function validateBudget(budget: number): void {
   }
 }
 
+/**
+ * 当前页实际返回节点的刷新凭据：content 在线页按 item 顺序取 input.editRefs，
+ * overview／structure／离线为空。refs 进入最终序列化，budget.used 一并计入；
+ * 只覆盖本页，不携带旧页凭据。
+ */
+function pageRefs(ctx: ViewContext, items: readonly ReadViewItem[]): Record<string, string> {
+  if (ctx.input.view !== "content" || ctx.input.mode !== "online") return {};
+  const refs: Record<string, string> = {};
+  for (const item of items) {
+    const nodeId = (item as ReadContentItem).node.id;
+    if (refs[nodeId] !== undefined) continue;
+    const token = ctx.input.editRefs?.[nodeId];
+    if (token !== null && token !== undefined) refs[nodeId] = token;
+  }
+  return refs;
+}
+
 function responseOf(
   ctx: ViewContext,
   items: ReadViewItem[],
@@ -674,6 +690,7 @@ function responseOf(
     ...(ctx.boundaries !== undefined && ctx.boundaries.length > 0
       ? { boundaries: ctx.boundaries }
       : {}),
+    refs: pageRefs(ctx, items),
     page: {
       hasMore,
       ...(next !== undefined ? { next } : {}),
@@ -862,7 +879,6 @@ function navigationPage(
  * ------------------------------------------------------------------ */
 
 function contentItem(
-  input: ReadViewBuildInput,
   node: ReadViewNode,
   body: string,
   omitted: boolean,
@@ -877,7 +893,6 @@ function contentItem(
     truncated: omitted ? false : range.end < range.total,
     path: node.sourcePath ?? "",
     fileHash: node.fileHash ?? "",
-    editRef: input.mode === "online" ? input.editRefs?.[node.id] ?? null : null,
   };
 }
 
@@ -900,13 +915,12 @@ function explicitContentItem(
   const body = bodyOf(node);
   const total = body.length;
   if (options.meta === true) {
-    return contentItem(
-      input,
-      node,
-      "",
-      true,
-      { start: 0, end: 0, total, unit: "utf16" },
-    );
+    return contentItem(node, "", true, {
+      start: 0,
+      end: 0,
+      total,
+      unit: "utf16",
+    });
   }
   let start = options.start ?? 0;
   if (options.section !== undefined) {
@@ -943,13 +957,7 @@ function explicitContentItem(
     }
     throw error;
   }
-  return contentItem(
-    input,
-    node,
-    segment.text,
-    false,
-    segment.range,
-  );
+  return contentItem(node, segment.text, false, segment.range);
 }
 
 function contentExplicitPage(
@@ -1014,13 +1022,7 @@ function shrinkContentItem(
       low = mid + 1;
       continue;
     }
-    const candidate = contentItem(
-      ctx.input,
-      node,
-      segment.text,
-      false,
-      segment.range,
-    );
+    const candidate = contentItem(node, segment.text, false, segment.range);
     const position: ContentPosition | null =
       segment.range.end < total
         ? { index, start: segment.range.end }
@@ -1047,13 +1049,7 @@ function minimumContentPageLength(
   let candidate: ReadContentItem;
   let position: ContentPosition | null;
   const segment = sliceBody(body, { start, length: 1 });
-  candidate = contentItem(
-    ctx.input,
-    node,
-    segment.text,
-    false,
-    segment.range,
-  );
+  candidate = contentItem(node, segment.text, false, segment.range);
   position =
     segment.range.end < total
       ? { index, start: segment.range.end }
@@ -1099,23 +1095,16 @@ function contentAutoPage(
     let candidate: ReadContentItem;
     let nextPosition: ContentPosition | null;
     if (meta) {
-      candidate = contentItem(
-        ctx.input,
-        node,
-        "",
-        true,
-        { start: 0, end: 0, total, unit: "utf16" },
-      );
+      candidate = contentItem(node, "", true, {
+        start: 0,
+        end: 0,
+        total,
+        unit: "utf16",
+      });
       nextPosition = nextContentPosition(nodes, position.index + 1);
     } else {
       const segment = sliceBody(body, { start, length: AUTO_CONTENT_LENGTH });
-      candidate = contentItem(
-        ctx.input,
-        node,
-        segment.text,
-        false,
-        segment.range,
-      );
+      candidate = contentItem(node, segment.text, false, segment.range);
       nextPosition =
         segment.range.end < total
           ? { index: position.index, start: segment.range.end }

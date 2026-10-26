@@ -18,6 +18,8 @@ import {
 } from "../storage/index.js";
 import { CliError, EXIT_CODES } from "./errors.js";
 import { isRecord } from "../shared/guards.js";
+import { INTERFACE_VERSION, loadProgramInfo } from "../build-info.js";
+import type { ProgramInfo } from "../shared/protocol.js";
 
 export const SERVICE_DESCRIPTOR_PATH = ".aichat/runtime/service.json";
 export const CLIENT_HEADER = "X-AIchat-Client";
@@ -39,6 +41,8 @@ export interface WorkspaceIdentity {
   readonly rootPath: string;
   readonly name?: string;
   readonly url: string;
+  /** 服务声明的程序身份；旧服务缺失时为 null（whoami 仍能诊断）。 */
+  readonly program: ProgramInfo | null;
 }
 
 /** 严格解析描述文件；缺字段／类型错误一律视为陈旧描述。 */
@@ -149,6 +153,16 @@ export interface ResolvedService {
   /** 当前磁盘 workspace.json 声明的身份；写入前必须与服务一致。 */
   readonly diskWorkspaceId: string;
   readonly baseUrl: string;
+  /** 服务接口版本是否与本 CLI 一致；whoami 允许 false 继续诊断。 */
+  readonly interfaceCompatible: boolean;
+}
+
+export interface ResolveServiceOptions {
+  /**
+   * 默认 true：接口缺失或不匹配时抛 INTERFACE_MISMATCH（退出码 7），
+   * 不猜路径、不自动切换服务或工作区。whoami 传 false 以完成诊断。
+   */
+  readonly requireInterface?: boolean | undefined;
 }
 
 /**
@@ -211,6 +225,7 @@ export async function readDiskWorkspaceMeta(root: string): Promise<WorkspaceMeta
 export async function resolveServiceForWorkspace(
   workspaceRoot: string,
   fetchImpl: typeof fetch = fetch,
+  options: ResolveServiceOptions = {},
 ): Promise<ResolvedService> {
   const root = await resolveWorkspaceRoot(workspaceRoot);
   const diskMeta = await readDiskWorkspaceMeta(root);
@@ -246,7 +261,79 @@ export async function resolveServiceForWorkspace(
   const identity = await fetchWorkspaceIdentity(baseUrl, fetchImpl);
   assertIdentity(identity, descriptor, root);
   assertDiskIdentity(identity, diskMeta, root);
-  return { descriptor, identity, root, diskWorkspaceId: diskMeta.workspaceId, baseUrl };
+  const interfaceCompatible =
+    identity.program !== null && identity.program.interfaceVersion === INTERFACE_VERSION;
+  if (!interfaceCompatible && options.requireInterface !== false) {
+    throw interfaceMismatchError(identity);
+  }
+  return {
+    descriptor,
+    identity,
+    root,
+    diskWorkspaceId: diskMeta.workspaceId,
+    baseUrl,
+    interfaceCompatible,
+  };
+}
+
+/**
+ * 服务程序身份：只认明确字段；缺失或不完整时返回 null（由 whoami 报告）。
+ * 不猜其他路径，也不从版本号反推接口版本。
+ */
+export function parseProgramInfo(raw: unknown): ProgramInfo | null {
+  if (!isRecord(raw)) return null;
+  const { program, version, interfaceVersion, buildId, commit, builtAt, manifest } = raw;
+  if (
+    program !== "aichat-graph" ||
+    typeof version !== "string" ||
+    typeof interfaceVersion !== "number" ||
+    !Number.isInteger(interfaceVersion) ||
+    typeof buildId !== "string" ||
+    buildId.length === 0
+  ) {
+    return null;
+  }
+  return {
+    program: "aichat-graph",
+    version,
+    interfaceVersion,
+    buildId,
+    commit: typeof commit === "string" ? commit : null,
+    builtAt: typeof builtAt === "string" ? builtAt : null,
+    ...(manifest === "dist" || manifest === "dev" || manifest === "invalid"
+      ? { manifest }
+      : {}),
+  };
+}
+
+/**
+ * 接口版本不匹配：CLI 与服务的接口契约无法互操作。
+ * 退出码 7（service），不猜其他程序路径、不自动切换服务／工作区。
+ */
+export function interfaceMismatchError(identity: WorkspaceIdentity): CliError {
+  const serviceProgram = identity.program;
+  const reason = serviceProgram === null ? "missing" : "mismatch";
+  const message =
+    serviceProgram === null
+      ? "服务未声明程序接口版本（可能是旧版服务）；本 CLI 需要接口版本 " +
+        String(INTERFACE_VERSION) +
+        "。请重新构建并重启该工作区的服务，或运行 aichat whoami 诊断。"
+      : "服务接口版本为 " +
+        String(serviceProgram.interfaceVersion) +
+        "，本 CLI 需要接口版本 " +
+        String(INTERFACE_VERSION) +
+        "；请让 CLI 与服务使用同一构建，或运行 aichat whoami 诊断。";
+  return new CliError("INTERFACE_MISMATCH", message, EXIT_CODES.service, {
+    details: {
+      reason,
+      expectedInterfaceVersion: INTERFACE_VERSION,
+      serviceInterfaceVersion: serviceProgram?.interfaceVersion ?? null,
+      serviceProgram,
+      cliProgram: loadProgramInfo(),
+      url: identity.url,
+      workspaceId: identity.workspaceId,
+    },
+  });
 }
 
 function ensureTrailingSlash(url: URL): string {
@@ -314,6 +401,7 @@ export async function fetchWorkspaceIdentity(
     rootPath,
     url: baseUrl,
     ...(typeof body["name"] === "string" ? { name: body["name"] } : {}),
+    program: parseProgramInfo(body["program"]),
   };
 }
 

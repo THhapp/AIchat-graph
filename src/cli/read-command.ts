@@ -2,20 +2,20 @@
  * read：渐进读取入口（overview / structure / content）。
  *
  * - 默认 read <topic> 是 overview；read --node 默认 content；--from 默认 structure。
- * - 在线优先：服务可用时原样返回服务响应（含真实 editRef）；只有退出码 7 的
- *   不可达才回退磁盘，其余服务错误（409／400 等）直接抛出。
- * - 离线使用同一引擎，但 editRef 一律为 null，并明确 online.available=false 的原因。
+ * - 在线优先：服务可用时原样返回服务响应（顶层 refs 是写入凭据）；退出码 7 的
+ *   不可达或接口不匹配才回退磁盘，其余服务错误（409／400 等）直接抛出。
+ * - 离线使用同一引擎，但 refs 为 {}，并明确 online.available=false 的原因。
  * - cursor 已包含范围与 mode，续读只允许另带 budget／--offline／--workspace／输出选项。
  */
 import type { ParsedArgs } from "./args.js";
-import { parseOptions } from "./args.js";
+import { parseCommandArgs } from "./command-specs.js";
 import {
   readAgentView,
   type AgentReadViewQuery,
 } from "./agent-client.js";
 import type { CliContext } from "./context.js";
 import { CliError, EXIT_CODES, UsageError } from "./errors.js";
-import { OUTPUT_OPTIONS, WORKSPACE_OPTION, parseIntegerOption } from "./options.js";
+import { parseIntegerOption } from "./options.js";
 import { parseOutputMode } from "./output.js";
 import {
   DEFAULT_READ_BUDGET,
@@ -36,24 +36,6 @@ import {
 } from "./workspace.js";
 import { briefUsage } from "./usage.js";
 
-const READ_OPTIONS = [
-  WORKSPACE_OPTION,
-  { name: "topic" },
-  { name: "node", repeatable: true },
-  { name: "view" },
-  { name: "from" },
-  { name: "budget" },
-  { name: "cursor" },
-  { name: "start" },
-  { name: "length" },
-  { name: "full", boolean: true },
-  { name: "section" },
-  { name: "section-index" },
-  { name: "meta", boolean: true },
-  { name: "offline", boolean: true },
-  ...OUTPUT_OPTIONS,
-] as const;
-
 /** 与 service 的 agent bounded read 保持一致的上限。 */
 const MAX_READ_START = 100_000_000;
 
@@ -65,8 +47,8 @@ const CURSOR_CONFLICT_OPTIONS = [
   "start",
   "length",
   "full",
-  "section",
-  "section-index",
+  "from-heading",
+  "occurrence",
   "meta",
 ] as const;
 
@@ -91,8 +73,9 @@ function parseReadLength(raw: string | undefined): number | undefined {
   return value === undefined ? undefined : normalizeLength(value);
 }
 
-function parseSectionIndex(raw: string | undefined): number | undefined {
-  return parseIntegerOption(raw, "--section-index");
+/** --occurrence：同名标题中的第几个（0 起）；只能与 --from-heading 同用。 */
+function parseOccurrence(raw: string | undefined): number | undefined {
+  return parseIntegerOption(raw, "--occurrence");
 }
 
 function parseBudget(raw: string | undefined): number {
@@ -113,16 +96,17 @@ function parseView(raw: string | undefined): ReadViewKind | undefined {
 function contentOptions(parsed: ParsedArgs): ReadContentOptions {
   const start = parseStart(parsed.values.get("start"));
   const length = parseReadLength(parsed.values.get("length"));
-  const section = parsed.values.get("section");
-  const sectionIndex =
-    section === undefined ? undefined : parseSectionIndex(parsed.values.get("section-index"));
+  // CLI 用 --from-heading／--occurrence；服务内部查询仍是 section／section-index。
+  const heading = parsed.values.get("from-heading");
+  const occurrence =
+    heading === undefined ? undefined : parseOccurrence(parsed.values.get("occurrence"));
   return {
     ...(start !== undefined ? { start } : {}),
     ...(length !== undefined ? { length } : {}),
     ...(parsed.values.has("full") ? { full: true } : {}),
     ...(parsed.values.has("meta") ? { meta: true } : {}),
-    ...(section !== undefined ? { section } : {}),
-    ...(sectionIndex !== undefined ? { sectionIndex } : {}),
+    ...(heading !== undefined ? { section: heading } : {}),
+    ...(occurrence !== undefined ? { sectionIndex: occurrence } : {}),
   };
 }
 
@@ -169,9 +153,8 @@ function parseReadRequest(parsed: ParsedArgs): ReadRequest {
     throw new UsageError(`${locator} 是节点 ID，请使用 --node ${locator}`);
   }
 
-  const section = parsed.values.get("section");
-  if (parsed.values.has("section-index") && section === undefined) {
-    throw new UsageError("--section-index 必须与 --section 一起使用");
+  if (parsed.values.has("occurrence") && parsed.values.get("from-heading") === undefined) {
+    throw new UsageError("--occurrence 必须与 --from-heading 一起使用");
   }
 
   const explicitView = parseView(parsed.values.get("view"));
@@ -198,7 +181,7 @@ function parseReadRequest(parsed: ParsedArgs): ReadRequest {
     if (view !== "content") {
       throw new UsageError("--meta 只能用于 content 读取（需要 --node）");
     }
-    const conflicts = ["start", "length", "full", "section", "section-index"].filter((name) =>
+    const conflicts = ["start", "length", "full", "from-heading", "occurrence"].filter((name) =>
       parsed.values.has(name),
     );
     if (conflicts.length > 0) {
@@ -210,7 +193,7 @@ function parseReadRequest(parsed: ParsedArgs): ReadRequest {
   }
 
   if (view === "overview" || view === "structure") {
-    const forbidden = ["start", "length", "full", "section", "section-index"].filter((name) =>
+    const forbidden = ["start", "length", "full", "from-heading", "occurrence"].filter((name) =>
       parsed.values.has(name),
     );
     if (forbidden.length > 0) {
@@ -292,7 +275,7 @@ function offlineOptions(
 }
 
 export async function runRead(args: readonly string[], ctx: CliContext): Promise<number> {
-  const parsed = parseOptions(args, READ_OPTIONS, 1);
+  const parsed = parseCommandArgs("read", args);
   const mode = parseOutputMode(parsed);
   const request = parseReadRequest(parsed);
   const root = await workspaceRoot(parsed, ctx);

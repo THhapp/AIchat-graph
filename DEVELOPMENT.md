@@ -8,12 +8,15 @@
 | 位置 | 保存什么 | 何时更新 |
 | --- | --- | --- |
 | README.md | 用户能做什么、怎么使用、实际限制 | 用户操作或可见行为改变 |
+| docs/cli.md | 程序自身完整 CLI 手册：入口、版本、命令、参数、输入输出、错误与恢复 | 程序 CLI 接口或行为改变 |
 | DEVELOPMENT.md | 开发入口、数据流、跨模块契约与安全约束、验证方法 | 工程操作或跨模块契约改变 |
 | AGENTS.md | 角色、授权、调度和停止规则 | 协作规则改变 |
-| skills/aichat-graph/ | 外部 Agent 的记录方法与命令用法 | Agent 工作流或命令用法改变 |
+| skills/aichat-graph/ | 外部 Agent 的记录方法与随附的独立命令参考 | Agent 工作流或命令用法改变 |
 | LICENSE、SECURITY.md | 项目许可、安全维护与报告边界 | 授权或安全报告方式改变 |
 | THIRD_PARTY_NOTICES.txt、licenses/ | 自动汇集的依赖授权、经核对的补充原文 | 依赖或上游许可改变，由生成器更新声明 |
 | .local/、本机配置 | 个人路径、运行版本与本机入口 | 本机设置改变，不上传 |
+
+程序手册 docs/cli.md 与 Skill 的命令参考 skills/aichat-graph/references/commands.md 是两份独立正文；各自面向人和 Agent，允许重复接口事实，不以链接、生成或转发壳互相代替。两份都标注适用接口版本；发布时用真实 `--help` 和命令核对，不另建同步报告或历史副本。SKILL.md 只保留协作方法与对自身 references 的指引。
 
 一次内部修复可以不改说明文档。只更新受影响的主要位置，不为证明进展而同步改遍各份文件。
 字段定义在 `src/core/schema.ts`、`src/shared/protocol.ts`，参数以 CLI `--help` 为准；本文解释其语义，不复制完整类型和参数表。
@@ -61,6 +64,10 @@ node ./dist/cli/index.js init "../graph-test-workspace" --name "Graph test"
 node ./dist/cli/index.js serve --workspace "../graph-test-workspace" --port 4318
 ```
 
+命令行入口可直接用 `node ./dist/cli/index.js ...` 或根目录 `aichat.cmd ...`，不需要安装 Skill。程序完整手册在 `docs/cli.md`；`aichat version` 报告程序版本、接口版本和构建标识，`whoami` 同时报告 CLI 与运行服务的身份。
+
+构建会生成 `dist/build-info.json`（程序版本、提交号、dirty、构建时间），不得用单个 `index.js` 哈希代替整个运行版本。接口版本由 `src/build-info.ts` 的 `INTERFACE_VERSION` 决定，和 workspace.json 的 schemaVersion 无关；客户端与服务接口不匹配时拒绝普通读写并明确提示更新，不猜路径或自动切换服务。
+
 已有库不要再次初始化，真实讨论不用作写入、迁移或故障测试样例。首次准备固定版本前完成必要验证与构建：
 
 ```powershell
@@ -74,7 +81,7 @@ npm run build
 更新使用现有完整构建，不代替构建、不拉取 GitHub、不迁移资料库；运行中拒绝替换，准备失败保留旧版。
 服务控制台保持打开，Ctrl+C 停止。绑定后沿用本机配置；路径或端口冲突报错，不回退其他目录或结束别的进程。
 
-Agent 使用服务同版本的 CLI 和 Skill。固定版为 `.local/daily/dist/cli/index.js` 和 `.local/daily/skills/aichat-graph/SKILL.md`；开发版使用仓库入口。
+Agent 使用服务同版本的 CLI 和 Skill。固定版为 `.local/daily/dist/cli/index.js`（也可用 `.local/daily/aichat.cmd`）和 `.local/daily/skills/aichat-graph/SKILL.md`，程序手册随快照为 `.local/daily/docs/cli.md`；开发版使用仓库入口和 `docs/cli.md`。更新日用同时更新程序、构建标识、入口与手册；只同步 Skill 不能代替接口升级。
 安装到用户 Skill 目录的副本不依赖仓库存在：`skills/aichat-graph/scripts/aichat.ps1` 依次按 `-Cli` 参数、脚本同目录 `local.env.json` 的 `cli`、工程内相对推导定位入口，三者都不成立时明确失败并给出补配置的办法，不猜其他目录、不自动切换运行版本。仓库内相对推导只适用于仓库内副本；已安装副本以 `local.env.json` 为准。
 `local.env.json` 是本机绑定（CLI、工作区、启动器），不进仓库；`update-daily.cmd` 与手动同步只覆盖 SKILL.md、references 与脚本，保留该文件。
 已安装副本同步必须显式指定宿主（`scripts/install-skill.ps1 -Host workbuddy|codex`）或 `-Target`，不使用隐式默认；各宿主分别同步、分别核对，不能以一个副本的文件状态推断其他副本。脚本只报告来源／目标、SKILL 哈希与 `local.env.json` 的 `cli` 是否存在；实际可用性仍以该副本 CLI 的 `--help` 和必要时 `whoami` 为准。
@@ -103,6 +110,13 @@ Agent 写入 → 凭据检查 → 纯候选变换与全图校验 → 文件事�
 候选变更的公共壳逻辑在 `src/storage/changes/common.ts`；`src/storage/changes.ts` 是唯一候选实现，请求与文本处理在 `src/storage/changes/`，格式读写在 `src/storage/format.ts`。
 HTTP 请求解析与响应组装在 `src/service/http/`；服务 Agent 动作的 schema、读取和编译分在 `src/service/agent/`；导出路径防护与冻结文档组装在 `src/service/export/`，队列及覆盖时序仍由 ExportCoordinator 管理。
 布局入口在 `src/web/layout/index.ts`；搜索唯一实现是 `src/index/search.ts`，CLI 与服务端不另写匹配、排序或 snippet。
+
+CLI 由 `src/cli/` 适配产品能力，`command-specs.ts` 是参数、约束、示例和帮助 JSON
+的单一来源；命令实现消费同一张表，不再各写一份选项清单。程序接口版本和构建身份在
+`src/build-info.ts`：`INTERFACE_VERSION` 与 `dist/build-info.json` 分别表示协议版本和
+“版本 + 提交号”的构建标识。`aichat version` / `whoami` 报告两者；CLI 与运行服务的接口
+不匹配时拒绝普通读写，不猜路径或自动切服务。`aichat.cmd` 与 `.local/daily/aichat.cmd`
+提供不经 Skill 的直接程序入口。
 
 `src/web` 的阅读端分层：`App.tsx` 组合页面和用户操作；`data/` 管服务快照、详情、导出与阅读状态；`graph/` 管视图投影、边列表、布局输入和 React Flow 视口适配（`useCanvasViewport.ts`）；`components/` 只做呈现；`layout/` 只做纯几何；`offline/` 只读冻结文档；`lib/` 放跨页面 UI 辅助。实时与离线共享视图、布局输入、布局和呈现组件，各自保留服务连接、冻结数据和写入边界；页面和离线入口不重复拼布局输入或目录派生。
 
@@ -154,26 +168,43 @@ description 解释为何 A 接到 B，不自动表示证明、因果或认可；
 
 ## Agent 读写与提交边界
 
-完整操作说明只维护在 [CLI 说明](skills/aichat-graph/references/commands.md)，此处保留实现约束。
+完整命令行为见 [程序 CLI 手册](docs/cli.md)；Skill 自带的 [命令参考](skills/aichat-graph/references/commands.md) 从讨论维护流程出发独立说明同一接口。此处保留实现约束。
 Agent 根据用户主题名、目录或复制上下文核对稳定 topicId，在当前对话沿用。
 前端浏览、工作区焦点与对话写入目标独立，不通过共享 activeTopic 控制多个对话。
 查询先按主题过滤再分页；默认有界、显式请求才取全文，不因此限制源正文长度。
 
-在线 editRef 绑定实例、工作区、节点、真实路径与读取时哈希；离线读取不伪造写凭据，重启或过期后重新读取。
+在线读取在响应顶层 `refs[nodeId]` 签发 opaque token；content 只为当前页实际返回节点签发，overview／structure／离线为空。写入成功结果同样使用顶层 `refs`，不再有 editRef／editRefs 的提取位置；batch 的局部名称到稳定 ID 映射另放在 `created.aliases`。凭据绑定实例、工作区、节点、真实路径与读取时哈希；离线读取不伪造写凭据，重启或过期后重新读取。
 无关文件的 revision 变化不单独使节点凭据失效。编号只在读取时解析为稳定 ID，不在提交时重新定位。
 
-- patchNode 的片段替换须非空且唯一匹配，replace/append/body 互斥，不借修改正文重填其他字段。
-- createBranch/createNext 使用来源凭据；已有 next 时拒绝冲突，不挤掉主线。
-- updateConnection 改接须有目标 editRef、来源 fromRef 与描述，不隐式创建第二根。
-- rearrange 一次表达多条最终入边，编译为同一批 updateConnection：先在内存腾空需要让出 next 的节点，再按最终关系落位，中间状态不写盘、不产生临时说明或临时旁支。目标位置的后继须由调用方纳入同批 edits，工具不隐式覆盖；最终唯一 next 与无环由整图校验拒绝。成功后返回受影响节点的刷新 editRefs。
+- patchNode 的片段替换须非空且唯一匹配，replace/append/body 互斥，不借修改正文重填其他字段。追加段落由 storage 统一规范化为恰好一个空行，不因 JSON、文件或 stdin 产生不同正文。
+- createBranch/createNext/createRoot/createTopic 可使用来源凭据并一次给 summary；createNode 支持 important。已有 next 时拒绝冲突，不挤掉主线。
+- updateConnection 改接须有目标凭据、来源 fromRef 与描述，不隐式创建第二根；root 不允许改接。
+- rearrange 一次表达多条最终入边，编译为同一批 updateConnection：先在内存腾空需要让出 next 的节点，再按最终关系落位，中间状态不写盘、不产生临时说明或临时旁支。目标位置的后继须由调用方纳入同批 edits，工具不隐式覆盖；最终唯一 next 与无环由整图校验拒绝。成功后返回受影响节点的顶层 refs。
+- batch 在一次事务内处理一个已存在主题的 edit／create／connect／important：
+  已有凭据按批前状态解释，local 只在本输入有效并支持前向引用；先做最终关系与
+  整图预检，再按腾空→create→最终 connect→patch／important 生成一个 ChangeRequest；
+  同节点 edit／connect／important 可共存，重复同类或成环／唯一 next／占位冲突整体拒绝；
+  不发布中间结构。dry-run 只检查候选，state=checked，不落盘、不更新最近内容、
+  不签发写凭据。
+- insert 语义固定为 A→N→B→C：要求 after 与 before 当前同主题真实相邻 next，两条新关系说明由调用方给出，复用 batch 核心一次提交；不降级为 append／branch。
 - setImportance 只改节点头 important，不进入最近内容更新；CLI important 的 --ref 使用读取时哈希，--node 先做一次真实在线 meta 读取取得凭据，离线不伪造。
-- 阅读提供 overview／structure／content 三种可选粒度：主题默认 overview；structure 返回指定范围的真实连接与必要边界，不默认带正文、长路径或凭据；content 复用节点正文、章节和真实 editRef。三者不是必须逐层经过的流程，已知节点可直读。
+- 阅读提供 overview／structure／content 三种可选粒度：主题默认 overview；structure 返回指定范围的真实连接与必要边界，不默认带正文、长路径或凭据；content 复用节点正文、章节和在线凭据。三者不是必须逐层经过的流程，已知节点可直读。
 - 范围按稳定 topicId／nodeId 与真实连接计算：整主题、从起点沿 next／branch 可达的子树，或明确节点集合；子树起点在主线中段时包含其后主线延续，边界节点只用于说明归属。
-- 读取预算覆盖最终序列化输出（紧凑 JSON 加结尾换行，含 envelope、items、page.next、budget、fingerprint），默认 12000 UTF-16，可由 --budget 调整；CLI stdout 与服务读取端点复用同一字符串，budget.used 可直接与原始输出长度核对。分页和正文续读由程序组织，cursor 是不透明标记，绑定 mode／workspace／topic／view／scope／相关指纹，不建立服务端分页会话。相关节点或结构变化返回 STALE_READ 并给重新读取入口；无关主题变化不使范围失效。
-- page.hasMore 只表示当前视图还有下一页；正文 item.truncated 表示该卡还有正文未返回；overview 的分支内部未展开由 scope.note 说明，三者不能混成一个 complete 字段。显式 --full／--length／--start／--section 是精确读取，超过 budget 明确拒绝，不静默截断。
-- 在线 content 的 editRef 来自真实读取；离线读取不伪造。cursor 只承接读取，不替代 editRef，也不用于刷新旧哈希强行提交。
+- 读取预算覆盖最终序列化输出（紧凑 JSON 加结尾换行，含 envelope、items、
+  page.next、budget、fingerprint），默认 12000 UTF-16，可由 --budget 调整；
+  CLI stdout 与服务读取端点复用同一字符串，budget.used 可直接与原始输出长度核对。
+  分页和正文续读由程序组织，cursor 是不透明标记，绑定 mode／workspace／topic／
+  view／scope／相关指纹，不建立服务端分页会话。相关节点或结构变化返回 STALE_READ
+  并给重新读取入口；无关主题变化不使范围失效。
+- page.hasMore 只表示当前视图还有下一页；正文 item.truncated 表示该卡还有正文
+  未返回；overview 的分支内部未展开由 scope.note 说明，三者不能混成一个 complete 字段。
+  显式 --full／--length／--start／--from-heading／--occurrence 是精确读取，
+  超过 budget 明确拒绝，不静默截断。`--from-heading` 从该标题开始读取，不是只读一节；
+  `--occurrence` 是 0 起同名标题序号，只能与前者同用。
+- 在线 content 的凭据只在响应顶层 refs，且只覆盖当前页实际返回节点；离线 refs 为空。cursor 只承接读取，不替代凭据，也不用于刷新旧哈希强行提交。
 - createTopic 在 isolated 模式原子创建主题与根，目录冲突不覆盖；createRoot 仅用于空库。
-- 同一 requestId 重放不能生成不同 ID；高层动作进入统一 prepareChanges/commitFiles 链路。
+- 同一 requestId + 相同请求体重放返回原响应，包括全部 batch local→nodeId 映射（created.aliases）与 refs；不能只保存第一个生成 ID。高层动作进入统一 prepareChanges/commitFiles 链路，结果未知先查原 requestId。
+- dry-run 与真实提交共享候选检查，但不写源、不写最近更新、不写幂等记录；dry-run 成功不保证后续提交免于重新检查版本。
 
 expectedFiles 使用签发时哈希，不能提交时偷读最新值绕过冲突。
 已有受影响文件和决定修改所依据的来源均检查旧哈希，新文件须声明不存在。
@@ -303,8 +334,8 @@ CLI 核对运行描述、工作区/实例身份与真实根，不自行启动第
 
 ### 操作能力与当前限制
 
-- 新建节点插入已有 next 之前仍需先 `branch` 再 `rearrange` 两次提交；一步创建并入链是否值得增加，按真实使用频率决定。
-- 旧节点补充与新问题创建没有统一的高层混合批次；分开提交时，最近更新仍只显示最后一批。这是写入便利性的缺口，不改变最近更新的既定语义。
+- batch 只处理一个已存在主题，不创建主题、不跨主题；主题创建仍走 create-topic。
+- insert 只处理当前真实相邻的 next；更复杂的结构变化用 batch 或 rearrange，不能降级为 append／branch。
 - 尚无面向 Agent 的便捷合并／删除入口；底层已有 `removeLeaf`，不能描述为完全不支持删除。如何整理重复节点仍需兼顾正文保留与最终结构。
 - 界面搜索不自动展开折叠祖先，只匹配编号、标题与摘要，最多返回 60 个节点；不等于 CLI 的正文搜索。命中隐藏节点时，选中与画布定位之间仍有断点。
 - 离线成品的阅读位置、选择和折叠只保留在当前页面状态中，刷新后重置；实时版的持久化能力不应被概括为离线也支持。
@@ -332,7 +363,9 @@ CLI 核对运行描述、工作区/实例身份与真实根，不自行启动第
 | 界面 | 相关类型/现有测试，实际浏览器核对受影响目录层级、定位、卡片交互、窗口适配与阅读位置 |
 | 布局与路由 | `typecheck`、`tests/layout` 与相关 `tests/web`；代表性合成图的实际排布、标签不压卡片/干线、折叠与增长、实时与离线同结果；`npm run build` |
 | 主题与存储 | 隔离样例的身份、关系、旧凭据冲突、无效源与恢复保护 |
-| 渐进读取 | overview 主线/分支入口与范围说明；structure 边界；小预算/多卡/长文续读覆盖；cursor 相关变化失效、无关主题不失效；离线无凭据；显式 full 超预算拒绝；原始 stdout 长度与 budget.used 一致 |
+| 渐进读取 | overview 主线/分支入口与范围说明；structure 边界；小预算/多卡/长文续读覆盖；cursor 相关变化失效、无关主题不失效；离线无凭据；显式 full 超预算拒绝；原始 stdout 长度与 budget.used 一致；--from-heading/--occurrence 语义正确 |
+| CLI 接口、帮助与版本 | `typecheck`、`tests/cli`；`aichat --help`、单命令 `--help`、`help <cmd> --json` 无工作区可运行且自洽；`version`/`whoami` 区分程序、接口、构建身份；接口不匹配明确拒绝；`docs/cli.md` 与 Skill 命令参考各自完整并可独立完成定位、读取和一次写入 |
+| 批量写入 | r3 补充+新建一次提交；insert A→N→B；rearrange 复用；同 requestId 多节点重放不重复、aliases/refs 一致；过期/占位/成环/跨主题整体拒绝且源不变；noop、仅 important、混合批次 lastChanges 正确；dry-run 不落盘不签写凭据 |
 | 导出 | 完整隐藏分支、同路径更新、失败保留旧文件、重启补齐；移走单文件停服后核对新布局、标签、交互和许可入口 |
 | 运行版本 | 独立资料配置、同版本入口、固定快照更新失败保护 |
 
