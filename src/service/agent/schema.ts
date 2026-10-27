@@ -36,6 +36,11 @@ const patchNodeActionSchema = z
       .optional(),
     append: z.string().optional(),
     body: z.string().optional(),
+    // 入边与重要性：与内容字段同一动作提交；字段组合由下面的连带校验保证。
+    important: z.boolean().optional(),
+    description: singleLine("description").optional(),
+    fromRef: z.string().min(1).optional(),
+    flow: z.enum(["next", "branch"]).optional(),
   })
   .superRefine((value, ctx) => {
     const modes = [value.replace !== undefined, value.append !== undefined, value.body !== undefined]
@@ -43,11 +48,33 @@ const patchNodeActionSchema = z
     if (modes > 1) {
       ctx.addIssue({ code: "custom", message: "正文模式互斥：replace／append／body 只能选一个" });
     }
+    // 连带校验：改来源必须同时给关系类型；任何入边修改都必须重新确认说明。
+    if (value.fromRef !== undefined && value.flow === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["flow"],
+        message: "给出 fromRef 时必须同时给出 flow（只改类型时才可省略 fromRef）",
+      });
+    }
+    if (
+      (value.fromRef !== undefined || value.flow !== undefined) &&
+      value.description === undefined
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["description"],
+        message: "修改来源或关系类型时必须同时给出 description（新入边要有新的理由）",
+      });
+    }
     if (
       modes === 0 &&
       value.title === undefined &&
       value.state === undefined &&
-      value.summary === undefined
+      value.summary === undefined &&
+      value.important === undefined &&
+      value.description === undefined &&
+      value.fromRef === undefined &&
+      value.flow === undefined
     ) {
       ctx.addIssue({ code: "custom", message: "patchNode 至少需要一处修改" });
     }

@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { initWorkspace } from "../../src/storage/index.js";
 import { main } from "../../src/cli/index.js";
-import { loadProgramInfo } from "../../src/build-info.js";
+import { INTERFACE_VERSION, loadProgramInfo } from "../../src/build-info.js";
 import type { ProgramInfo, ReadViewResponse } from "../../src/shared/protocol.js";
 import { changeResponse, workspaceResponse } from "./fixtures.js";
 
@@ -411,6 +411,87 @@ describe("batch 输入层", () => {
     expect(postOf(fake.requests)).toBeUndefined();
   });
 
+  it("已知字段误放给 field／hint／help，不静默改写也不联网", async () => {
+    const { root, workspaceId } = await newWorkspace();
+    const fake = fakeService({ workspaceId, rootPath: root });
+    const cases: Array<{
+      label: string;
+      ops: unknown[];
+      field: string;
+      hintIncludes: string;
+    }> = [
+      {
+        label: "edit.patch 放 important",
+        ops: [{ op: "edit", target: { ref: "ref-a" }, patch: { important: true } }],
+        field: "ops[0].patch.important",
+        hintIncludes: "op=important",
+      },
+      {
+        label: "edit.patch 放 description",
+        ops: [{ op: "edit", target: { ref: "ref-a" }, patch: { description: "说明" } }],
+        field: "ops[0].patch.description",
+        hintIncludes: "op=connect",
+      },
+      {
+        label: "edit.patch 放 fromRef",
+        ops: [{ op: "edit", target: { ref: "ref-a" }, patch: { fromRef: "ref-b" } }],
+        field: "ops[0].patch.fromRef",
+        hintIncludes: "op=connect",
+      },
+      {
+        label: "edit.patch 放 flow",
+        ops: [{ op: "edit", target: { ref: "ref-a" }, patch: { flow: "branch" } }],
+        field: "ops[0].patch.flow",
+        hintIncludes: "op=connect",
+      },
+      {
+        label: "edit op 顶层放入边字段",
+        ops: [
+          {
+            op: "edit",
+            target: { ref: "ref-a" },
+            patch: { title: "新标题" },
+            description: "说明",
+          },
+        ],
+        field: "ops[0].description",
+        hintIncludes: "op=connect",
+      },
+      {
+        label: "connect 放 patch",
+        ops: [
+          {
+            op: "connect",
+            target: { ref: "ref-a" },
+            description: "说明",
+            patch: { title: "x" },
+          },
+        ],
+        field: "ops[0].patch",
+        hintIncludes: "op=edit",
+      },
+    ];
+    for (const entry of cases) {
+      const { file } = await writeBatchFile({ ops: entry.ops });
+      const result = await main(["batch", "--input", file, "--workspace", root], {
+        fetchImpl: fake.fetchImpl,
+      });
+      expect(result.exitCode, entry.label).toBe(2);
+      expect(result.stdout, entry.label).toBe("");
+      const payload = JSON.parse(result.stderr) as {
+        error: { code: string; message: string; details: Record<string, unknown> };
+      };
+      expect(payload.error.code, entry.label).toBe("INVALID_BATCH_INPUT");
+      expect(payload.error.message, entry.label).toContain(entry.field);
+      expect(payload.error.details["field"], entry.label).toBe(entry.field);
+      expect(String(payload.error.details["hint"]), entry.label).toContain(entry.hintIncludes);
+      expect(payload.error.details["help"], entry.label).toBe(
+        "aichat help batch --op edit --json",
+      );
+    }
+    expect(postOf(fake.requests)).toBeUndefined();
+  });
+
   it("--dry-run 发送 dryRun=true，输出只含检查结果（无 created／refs）", async () => {
     const { root, workspaceId } = await newWorkspace();
     const { file } = await writeBatchFile({
@@ -731,7 +812,7 @@ describe("接口版本与 whoami", () => {
         error: { code: string; details: Record<string, unknown> };
       };
       expect(error.error.code, label).toBe("INTERFACE_MISMATCH");
-      expect(error.error.details["expectedInterfaceVersion"]).toBe(2);
+      expect(error.error.details["expectedInterfaceVersion"]).toBe(INTERFACE_VERSION);
       expect(error.error.details["reason"]).toBe(program === null ? "missing" : "mismatch");
       expect(postOf(fake.requests), label).toBeUndefined();
     }
@@ -770,7 +851,11 @@ describe("接口版本与 whoami", () => {
     expect((oldBody["identity"] as Record<string, unknown>)["instanceId"]).toBe("inst-1");
     expect(oldBody["diskWorkspaceId"]).toBe(workspaceId);
     expect(oldBody["service"]).toBeNull();
-    expect(oldBody["interface"]).toEqual({ expected: 2, actual: null, compatible: false });
+    expect(oldBody["interface"]).toEqual({
+      expected: INTERFACE_VERSION,
+      actual: null,
+      compatible: false,
+    });
     expect(oldBody["build"]).toEqual({ same: false, cli: loadProgramInfo().buildId, service: null });
     expect((oldBody["cli"] as Record<string, unknown>)["program"]).toBe("aichat-graph");
 
@@ -784,7 +869,7 @@ describe("接口版本与 whoami", () => {
     });
     expect(mismatchedResult.exitCode).toBe(0);
     expect(jsonOf(mismatchedResult.stdout)["interface"]).toEqual({
-      expected: 2,
+      expected: INTERFACE_VERSION,
       actual: 1,
       compatible: false,
     });

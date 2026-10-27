@@ -627,6 +627,39 @@ describe("batch：一次编译提交", () => {
     expect(nText).toContain("description: 原主线改为侧枝保留");
   });
 
+  it("batch 的 edit.patch 不接受单卡 edit 的新字段（important／description／fromRef／flow）", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const refs = await readRefs(handle.url, [R, N]);
+
+    for (const patch of [
+      { important: true },
+      { description: "单卡 edit 的字段" },
+      { fromRef: refs[R] as string, flow: "next", description: "单卡 edit 的字段" },
+      { flow: "branch", description: "单卡 edit 的字段" },
+    ]) {
+      const response = await postAgent(handle.url, handle.workspaceId, randomUUID(), {
+        action: "batch",
+        topicId: TOPIC,
+        ops: [{ op: "edit", target: { ref: refs[N] as string }, patch }],
+      });
+      expect(response.status, JSON.stringify(patch)).toBe(400);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+        "BAD_REQUEST",
+      );
+    }
+
+    // 普通 batch edit 仍按 AgentBatchEditPatch 工作。
+    const ok = await postAgent(handle.url, handle.workspaceId, randomUUID(), {
+      action: "batch",
+      topicId: TOPIC,
+      ops: [{ op: "edit", target: { ref: refs[N] as string }, patch: { append: "batch 正常追加。" } }],
+    });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as AgentChangeResponse).state).toBe("committed");
+  });
+
   it("status 合并 agentLog：提交后可查回同一响应；dry-run 不产生记录", async () => {
     const root = await newWorkspace();
     const handle = await startService({ root, port: await freePort() });
@@ -679,7 +712,7 @@ describe("batch：一次编译提交", () => {
     };
     expect(workspace.workspaceId).toBe(handle.workspaceId);
     expect(workspace.rootPath.length).toBeGreaterThan(0);
-    expect(workspace.program).toMatchObject({ program: "aichat-graph", interfaceVersion: 2 });
+    expect(workspace.program).toMatchObject({ program: "aichat-graph", interfaceVersion: 3 });
     expect(workspace.program?.buildId.length).toBeGreaterThan(0);
 
     const refs = await readRefs(handle.url, [N]);

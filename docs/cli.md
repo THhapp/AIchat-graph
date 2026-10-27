@@ -1,6 +1,6 @@
 # AIchat-graph CLI 手册
 
-适用接口版本：2。程序版本以 aichat version 的实际输出为准。
+适用接口版本：3。程序版本以 aichat version 的实际输出为准。
 本手册面向人、脚本作者和任意 Agent，说明程序入口、工作区、数据流和完整 CLI 行为。
 独立运行或编写调用脚本时不需要 Skill。Skill 自带另一份独立命令参考，
 并提供讨论组织与节点写作方法；这些协作方法不作为程序校验条件。
@@ -119,11 +119,14 @@ HTML 导出目标由用户在前端指定。已绑定的主题按有效快照自
     aichat <command> --help
     aichat help <command>
     aichat help <command> --json
+    aichat help batch --op edit|create|connect|important
+    aichat help batch --op edit --json
     aichat help --json
 
-aichat --help 只给能力分组、常用命令和进一步查询方法。
+aichat --help 只给能力分组、推荐路径和进一步查询方法。
 aichat <command> --help 只解释当前命令，不附整份命令大全。
 aichat help <command> --json 返回机器可读说明，至少包含参数、必填性和默认值、互斥关系、输入结构、语义约束、最小合法示例、结果关键字段与下一步。
+aichat help batch --op <operation> 只返回该 batch 操作的字段、约束和最小示例，不返回完整批次 schema；--op 只与 batch 同用，未知操作明确失败并列出可用操作。
 这些帮助和自查不需要工作区、运行服务或安装 Skill。
 
 机器说明中的 JSON Schema 只描述结构；批次的原子性、局部名称生命周期、批前凭据、唯一 next、文件路径由 CLI 解析等语义会另行列出，不能把 JSON Schema 当作完整语义证明。
@@ -131,7 +134,7 @@ aichat help <command> --json 返回机器可读说明，至少包含参数、必
 ## 约定与输出
 
 默认输出 JSON。--text 是简短人类摘要，不保证包含所有标识和凭据。大多数命令支持 --json 与 --text 二选一。
-所有命令都按需接受 --workspace；省略时使用当前目录，serve 例外，必须显式给出。
+帮助和 version 不需要 --workspace；其他命令接受 --workspace，省略时使用当前目录，serve 必须显式给出。
 写命令的 --verbose 才输出路径、前后哈希、字节数、事务和完整服务身份；默认结果保持精简。
 
 Agent 高层写命令（edit／branch／next／connect／insert／batch／rearrange／important／create-*）的默认结果是顶层对象，不再包在
@@ -195,6 +198,12 @@ created.topicPath。
 --text 模式才输出人类可读错误。退出码相同不代表原因相同，处理时看 code、message、details 和 diagnostics。
 错误诊断不输出完整正文或整批凭据。
 
+可执行的错误提示：
+edit 的缺伴生参数、空摘要、非法 important 等会带 details.field／hint／help="aichat help edit --json"；
+batch 的已知字段误放会指出 ops[i].字段，并提示正确 op（如 important／connect）以及局部帮助入口；
+root 改入边、跨主题来源等服务端结构错误会带 field／nodeId／category=structure。
+程序不会替调用方改写错误输入后继续提交。
+
 ## 命令总览
 
 读取：topics、search、read、validate。
@@ -203,6 +212,23 @@ created.topicPath。
 底层与恢复：check、apply、status。
 自查：help、version。
 
+## 按任务选择入口
+
+先读相关内容并确认落点，再选一个高层命令；同一场景不需要叠加多个写命令。
+
+| 任务 | 入口 |
+| --- | --- |
+| 完善一张卡片 | edit |
+| 新增纵向后继 | next |
+| 新增独立方向 | branch |
+| 链中插入 | insert |
+| 仅标记重要 | important |
+| 仅整理关系 | rearrange |
+| 多卡混合修改 | batch |
+| 新建主题 | create-topic |
+
+一次完整编辑（标题、状态、摘要、正文、入边说明，以及可选的来源／flow 和重要性）用一个 edit；
+不要把同一张卡的 edit、connect、important 拆成多次提交。多张卡或一次补充旧卡并创建新卡时用 batch。
 各命令的必填参数和互斥关系以 aichat <command> --help 和 aichat help <command> --json 为准；下面是完整用法说明。
 
 
@@ -293,14 +319,37 @@ offline refs 为空；服务重启、凭据淘汰或源文件变化后旧凭据�
 
 ### 编辑已有节点
 
-    aichat edit --ref <token> [--title <标题>] [--state agreed|proposed|reference]
-                [--summary <概述>] [--body <正文>|--body-file <文件>|--body-stdin]
-                [--append-file <文件> | --replace-file <json>] [--verbose]
+    aichat edit --ref <token>
+                [--title <标题>] [--state agreed|proposed|reference]
+                [--summary <概述>|--clear-summary] [--important true|false]
+                [--body <正文>|--body-file <文件>|--body-stdin]
+                [--append-file <文件>|--replace-file <json>]
+                [--description <入边说明>] [--from-ref <token> --flow next|branch]
+                [--verbose]
 
-至少给一项修改。正文模式互斥：整篇替换、追加、局部替换只能选一种。
+至少给一项修改。未给出的字段保持原值；只有显式 --body-stdin 才读取 stdin。
+正文模式互斥：整篇替换、追加、局部替换只能选一种。
 --append-file 追加一段正文；段落分隔由程序规范化，不需要手工拼两个换行。
 --replace-file 接受 [{"old":"...","new":"..."}] 或 {"replace":[...]}；每个 old 必须非空且恰好匹配一次，不做全局替换。
-title、state、summary 可与一种正文模式同次更新。--summary 传空字符串不是删除；要删除显式概述使用底层 patchNode 的 summary:null 或重新判断。
+--summary 设置显式摘要；--clear-summary 显式删除显式摘要，两者互斥。--summary 空字符串不表示删除，会报用法错误并提示 --clear-summary。
+--important true|false 与其他字段同次提交；false 明确取消重要标记，不是裸开关。
+--description 单独给出时只改当前入边说明，不要求重给父节点或正文。
+--from-ref 必须同时给 --flow next|branch 与 --description；只给 --flow 时保留当前来源、改关系类型，也必须给 --description。
+--flow 只接受 next／branch，不接受 root；root 节点没有入边，任何 description／from-ref／flow 修改整体失败。
+内容、入边说明／来源和重要性在同一个 patchNode 动作、同一次事务提交；不通过 edit + connect + important 多次调用模拟。
+过期凭据、跨主题来源、自连、占位后继和成环由服务端统一拒绝，不自动刷新旧凭据或挤掉未声明后继。
+仅 important 变化不替换最近内容更新；内容、标题、摘要、正文或入边的真实改写才计入。
+
+一次完整编辑示例：
+
+    aichat edit --ref "<token>" --title "新的标题" --state agreed \
+      --summary "新的概述" --description "更新后的入边理由" --important true \
+      --body-file ".\正文.md" --workspace "<工作区>"
+
+只改来源和关系类型示例：
+
+    aichat edit --ref "<token>" --from-ref "<来源 token>" --flow branch \
+      --description "改接到这里更准确" --workspace "<工作区>"
 
 ### 创建节点与主题
 
@@ -447,7 +496,7 @@ insert 复用 batch 核心，是一次提交；它没有 batch 的 local 输入�
 
     aichat important (--ref <token>|--node <nodeId>) (--on|--off) --workspace <path>
 
---ref 使用已有读取版本；--node 先在线读取 meta 取得凭据，离线不伪造。
+--ref 使用已有读取版本；--node 先在线读取 meta 取得凭据，离线不伪造。--ref／--node 与 --on／--off 可自由组合。
 节点 important 只表示值得回看，不改变正文、编号或连接；取消时移除源字段。
 最近更新来自图接口 lastChanges[topicId]，普通 read 不返回。仅 important 不替换最近内容修改集合。
 
@@ -471,6 +520,10 @@ status 查询原 requestId；unknown 既不证明成功也不证明失败。结�
     .\aichat.cmd read --node "n_..." --workspace "D:\my-graph-vault"
 
 读取顶层 refs 后，用节点对应的 token 写入：
+
+    .\aichat.cmd edit --ref "<token>" --title "新的标题" --state agreed `
+      --summary "新的概述" --description "更新后的入边理由" --important true `
+      --body-file ".\正文.md" --workspace "D:\my-graph-vault"
 
     .\aichat.cmd edit --ref "<token>" --append-file ".\补充.md" --workspace "D:\my-graph-vault"
     .\aichat.cmd next --from-ref "<token>" --title "新的问题" `

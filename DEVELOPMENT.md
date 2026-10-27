@@ -87,7 +87,7 @@ node ./dist/cli/index.js serve --workspace "../graph-test-workspace" --port 4318
 
 构建会生成 `dist/build-info.json`（程序版本、提交号、dirty、构建时间），
 不得用单个 index.js 哈希代替整个运行版本。
-接口版本由 `src/build-info.ts` 的 INTERFACE_VERSION 决定，和 workspace.json 的 schemaVersion 无关。
+接口版本由 `src/build-info.ts` 的 INTERFACE_VERSION 决定（当前为 3），和 workspace.json 的 schemaVersion 无关。
 客户端与服务接口不匹配时拒绝在线连接并提示更新；read 可转为无凭据的磁盘读取，
 明确 source 与 online.reason，写入不回退，也不自动切换服务。
 
@@ -249,6 +249,13 @@ Agent 根据用户主题名、目录或复制上下文核对稳定 topicId，在
 
 - patchNode 的片段替换须非空且唯一匹配，replace/append/body 互斥，不借修改正文重填其他字段。追加段落由 storage 统一规范化为恰好一个空行，不因
   JSON、文件或 stdin 产生不同正文。
+- CLI edit 可在同一个 patchNode 动作组合内容（标题／状态／摘要／正文）、入边说明（description）、
+  来源与关系类型（fromRef+flow，或 flow 保留当前来源）和 important；compile 生成
+  patchNode → updateConnection → setImportance 的单一 ChangeRequest，一次 prepareChanges／commitFiles。
+  未给出的字段保持原值；metadata-only 不读 stdin；root 没有任何入边，任何入边字段整体 422；
+  仅 important 时只有 setImportance，不替换最近内容更新。
+- `command-specs.ts` 的 batch 操作元数据同时生成 batch JSON Schema 与 `help batch --op <op>` 的字段／约束／示例；
+  操作级帮助只含该 op，不复制完整批次结构。
 - createBranch/createNext/createRoot/createTopic 可使用来源凭据并一次给 summary；createNode 支持 important。已有
   next 时拒绝冲突，不挤掉主线。
 - updateConnection 改接须有目标凭据、来源 fromRef 与描述，不隐式创建第二根；root 不允许改接。

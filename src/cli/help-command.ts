@@ -6,16 +6,21 @@
  */
 import { loadProgramInfo } from "../build-info.js";
 import {
+  BATCH_OP_NAMES,
   COMMAND_GROUPS,
+  batchOpFieldTypeLabel,
   commandNames,
+  getBatchOpSpec,
   getCommandSpec,
   parseCommandArgs,
+  type BatchOpFieldSpec,
+  type BatchOpSpec,
   type CommandSpec,
 } from "./command-specs.js";
 import type { CliContext } from "./context.js";
 import { EXIT_CODES, UsageError } from "./errors.js";
 import { emitJson, emitText } from "./output.js";
-import { commandHelpText, rootHelp } from "./usage.js";
+import { batchOpHelpText, commandHelpText, rootHelp } from "./usage.js";
 
 export interface HelpParameterJson {
   readonly name: string;
@@ -125,6 +130,48 @@ export function catalogHelpJson(): Record<string, unknown> {
   };
 }
 
+function batchOpFieldsJson(spec: BatchOpSpec): Array<Record<string, unknown>> {
+  return spec.fields.map((field: BatchOpFieldSpec) => {
+    const group =
+      field.exactlyOneGroup === undefined
+        ? []
+        : spec.fields
+            .filter(
+              (other) =>
+                other.exactlyOneGroup === field.exactlyOneGroup && other.path !== field.path,
+            )
+            .map((other) => other.path);
+    return {
+      path: field.path,
+      type: batchOpFieldTypeLabel(field),
+      required: field.required === true,
+      ...(field.values !== undefined ? { values: [...field.values] } : {}),
+      ...(field.minimum !== undefined ? { minimum: field.minimum } : {}),
+      description: field.description,
+      ...(field.conflicts !== undefined ? { conflicts: [...field.conflicts] } : {}),
+      ...(group.length > 0 ? { exactlyOneWith: group } : {}),
+    };
+  });
+}
+
+/** 单个 batch 操作的机器说明：只含该 op，不含完整 batch schema。 */
+export function batchOpHelpJson(spec: BatchOpSpec): Record<string, unknown> {
+  const info = loadProgramInfo();
+  return {
+    ok: true,
+    command: "batch",
+    op: spec.op,
+    group: "write",
+    interfaceVersion: info.interfaceVersion,
+    programVersion: info.version,
+    summary: spec.summary,
+    fields: batchOpFieldsJson(spec),
+    constraints: [...spec.constraints],
+    example: { ...spec.example },
+    next: [...spec.next],
+  };
+}
+
 export async function runHelp(args: readonly string[], ctx: CliContext): Promise<number> {
   const parsed = parseCommandArgs("help", args);
   if (parsed.values.has("json") && parsed.values.has("text")) {
@@ -132,6 +179,29 @@ export async function runHelp(args: readonly string[], ctx: CliContext): Promise
   }
   const json = parsed.values.has("json");
   const target = parsed.positional[0];
+  const opName = parsed.values.get("op");
+  if (opName !== undefined) {
+    if (target !== "batch") {
+      throw new UsageError(
+        "--op 只能与 batch 同用；可用 op：" +
+          BATCH_OP_NAMES.join("／") +
+          "；完整批次结构见 aichat help batch --json",
+      );
+    }
+    const opSpec = getBatchOpSpec(opName);
+    if (opSpec === undefined) {
+      throw new UsageError(
+        "未知 batch 操作 op=" +
+          opName +
+          "；可用 op：" +
+          BATCH_OP_NAMES.join("／") +
+          "；查看字段说明：aichat help batch --op edit --json",
+      );
+    }
+    if (json) emitJson(ctx, batchOpHelpJson(opSpec));
+    else emitText(ctx, [batchOpHelpText(opSpec)]);
+    return EXIT_CODES.ok;
+  }
   if (target === undefined) {
     if (json) emitJson(ctx, catalogHelpJson());
     else emitText(ctx, [rootHelp()]);

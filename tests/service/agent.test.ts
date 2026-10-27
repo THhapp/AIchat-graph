@@ -1519,3 +1519,487 @@ describe("提交刷新失败", () => {
     expect(journals.length).toBeGreaterThan(0);
   });
 });
+
+describe("edit 复合动作：内容／入边／重要性同一事务", () => {
+  interface AgentGraphBody {
+    nodes: Array<{
+      id: string;
+      from: string | null;
+      flow: string;
+      description?: string;
+      important: boolean;
+      title: string;
+      state: string;
+    }>;
+    lastChanges?: Record<string, { at: string; nodeIds: string[] }>;
+  }
+
+  async function graphBody(url: string): Promise<AgentGraphBody> {
+    return (await (await fetch(url + "/api/graph")).json()) as AgentGraphBody;
+  }
+
+  async function nodeRef(url: string, nodeId: string): Promise<string> {
+    const response = await fetch(url + "/api/agent/nodes/" + nodeId + "?meta=true");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { body: string; editRef: { ref: string } };
+    expect(body.body).toBe("");
+    return body.editRef.ref;
+  }
+
+  async function postEdit(
+    url: string,
+    workspaceId: string,
+    requestId: string,
+    action: Record<string, unknown>,
+  ): Promise<Response> {
+    return fetch(url + "/api/agent/changes", {
+      method: "POST",
+      headers: agentHeaders(),
+      body: JSON.stringify({ workspaceId, requestId, action }),
+    });
+  }
+
+  async function nextNodeFile(root: string): Promise<string> {
+    return fs.readFile(path.join(root, "topics", DIR, NEXT_NODE + ".md"), "utf8");
+  }
+
+  it("内容＋入边说明＋重要性一次请求提交，生成单一事务并更新图与最近更新", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const nextRef = await nodeRef(handle.url, NEXT_NODE);
+
+    const response = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: nextRef,
+      title: "复合后的标题",
+      append: "复合追加的正文。",
+      description: "复合后的入边说明",
+      important: true,
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = (await response.json()) as {
+      state: string;
+      action: string;
+      changedNodeIds: string[];
+      refs: Record<string, string>;
+      transactionId: string | null;
+      summary: string;
+      created: { nodeIds: string[] };
+    };
+    expect(body.state).toBe("committed");
+    expect(body.action).toBe("patchNode");
+    expect(body.changedNodeIds).toEqual([NEXT_NODE]);
+    expect(body.refs[NEXT_NODE]).toMatch(/^er_/);
+    expect(body.transactionId).not.toBeNull();
+    expect(body.created.nodeIds).toEqual([]);
+    // 同一请求编译出三个操作，按内容→入边→重要性顺序。
+    expect(body.summary).toContain("patchNode");
+    expect(body.summary).toContain("updateConnection");
+    expect(body.summary).toContain("setImportance");
+
+    const text = await nextNodeFile(root);
+    expect(text).toContain("title: 复合后的标题");
+    expect(text).toContain("复合追加的正文。");
+    expect(text).toContain("description: 复合后的入边说明");
+    expect(text).toContain("important: true");
+
+    const graph = await graphBody(handle.url);
+    const node = graph.nodes.find((entry) => entry.id === NEXT_NODE);
+    expect(node).toMatchObject({
+      title: "复合后的标题",
+      description: "复合后的入边说明",
+      from: ROOT_NODE,
+      flow: "next",
+      important: true,
+    });
+    expect(graph.lastChanges?.[TOPIC_ID]?.nodeIds).toEqual([NEXT_NODE]);
+  });
+
+  it("只改说明 / 只改关系类型：各自一条 updateConnection，来源保持不变", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+
+    const firstRef = await nodeRef(handle.url, NEXT_NODE);
+    const described = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: firstRef,
+      description: "只改入边说明",
+    });
+    expect(described.status).toBe(200);
+    const describedBody = (await described.json()) as { refs: Record<string, string>; state: string };
+    expect(describedBody.state).toBe("committed");
+    let graph = await graphBody(handle.url);
+    expect(graph.nodes.find((entry) => entry.id === NEXT_NODE)).toMatchObject({
+      from: ROOT_NODE,
+      flow: "next",
+      description: "只改入边说明",
+    });
+
+    const secondRef = describedBody.refs[NEXT_NODE] as string;
+    const retyped = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: secondRef,
+      flow: "branch",
+      description: "只把关系类型改为侧枝",
+    });
+    expect(retyped.status).toBe(200);
+    graph = await graphBody(handle.url);
+    expect(graph.nodes.find((entry) => entry.id === NEXT_NODE)).toMatchObject({
+      from: ROOT_NODE,
+      flow: "branch",
+      description: "只把关系类型改为侧枝",
+    });
+    const text = await nextNodeFile(root);
+    expect(text).toContain("flow: branch");
+    expect(text).not.toContain("flow: next");
+  });
+
+  it("fromRef＋flow＋description 改接来源；来源读取后改动时 412 且不覆盖目标", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+
+    // 先在根下建一个可作为新来源的侧枝。
+    const rootRef = await nodeRef(handle.url, ROOT_NODE);
+    const created = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "createBranch",
+      editRef: rootRef,
+      title: "新的来源",
+      body: "新来源正文。",
+      description: "先建一个可改接的来源",
+    });
+    expect(created.status).toBe(200);
+    const createdBody = (await created.json()) as {
+      created: { nodeIds: string[] };
+      refs: Record<string, string>;
+    };
+    const sourceId = createdBody.created.nodeIds[0] as string;
+    const sourceRef = createdBody.refs[sourceId] as string;
+
+    const targetRef = await nodeRef(handle.url, NEXT_NODE);
+    const targetBefore = await nextNodeFile(root);
+    const response = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: targetRef,
+      fromRef: sourceRef,
+      flow: "branch",
+      description: "改接到新的来源",
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const graph = await graphBody(handle.url);
+    expect(graph.nodes.find((entry) => entry.id === NEXT_NODE)).toMatchObject({
+      from: sourceId,
+      flow: "branch",
+      description: "改接到新的来源",
+    });
+    expect(await nextNodeFile(root)).not.toBe(targetBefore);
+
+    // 再读一次来源与目标；只改来源文件并等发布，来源旧哈希必须 412，目标不被覆盖。
+    const freshTarget = (await (
+      await fetch(handle.url + "/api/agent/nodes/" + NEXT_NODE + "?meta=true")
+    ).json()) as { editRef: { ref: string } };
+    const freshSource = (await (
+      await fetch(handle.url + "/api/agent/nodes/" + sourceId + "?meta=true")
+    ).json()) as { editRef: { ref: string } };
+    const targetBytes = await nextNodeFile(root);
+    const sourcePath = path.join(root, "topics", DIR, sourceId + ".md");
+    await fs.writeFile(
+      sourcePath,
+      (await fs.readFile(sourcePath, "utf8")) + "\n外部追加。\n",
+      "utf8",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    const stale = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: freshTarget.editRef.ref,
+      fromRef: freshSource.editRef.ref,
+      flow: "branch",
+      description: "来源已变，不应写入",
+    });
+    expect(stale.status).toBe(412);
+    expect(((await stale.json()) as { error: { code: string } }).error.code).toBe("VERSION_CONFLICT");
+    expect(await nextNodeFile(root)).toBe(targetBytes);
+  });
+
+  it("根节点不接受 description／fromRef／flow：422 结构错误且不落盘", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const rootRef = await nodeRef(handle.url, ROOT_NODE);
+    const nextRef = await nodeRef(handle.url, NEXT_NODE);
+    const rootPath = path.join(root, "topics", DIR, ROOT_NODE + ".md");
+    const before = await fs.readFile(rootPath, "utf8");
+
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ description: "根没有入边" }, "description"],
+      [{ flow: "branch", description: "根没有入边" }, "flow"],
+      [{ fromRef: nextRef, flow: "branch", description: "根没有入边" }, "fromRef"],
+    ];
+    for (const [fields, field] of cases) {
+      const response = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+        action: "patchNode",
+        editRef: rootRef,
+        ...fields,
+      });
+      expect(response.status).toBe(422);
+      const body = (await response.json()) as {
+        error: { code: string; message: string; details?: Record<string, unknown> };
+      };
+      expect(body.error.code).toBe("VALIDATION_FAILED");
+      expect(body.error.details?.["category"]).toBe("structure");
+      expect(body.error.details?.["nodeId"]).toBe(ROOT_NODE);
+      expect(body.error.details?.["field"]).toBe(field);
+      expect(body.error.message).toContain("根节点没有入边");
+      expect(body.error.message).toContain("aichat help edit --json");
+    }
+    expect(await fs.readFile(rootPath, "utf8")).toBe(before);
+
+    // 根节点只改内容／重要标记仍允许。
+    const allowed = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: rootRef,
+      title: "根的标题可以改",
+      important: true,
+    });
+    expect(allowed.status).toBe(200);
+  });
+
+  it("跨主题来源／自连是 422 结构错误，不落盘", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const nextRef = await nodeRef(handle.url, NEXT_NODE);
+    const targetBefore = await nextNodeFile(root);
+
+    // 自连。
+    const self = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: nextRef,
+      fromRef: nextRef,
+      flow: "next",
+      description: "不能自连",
+    });
+    expect(self.status).toBe(422);
+    const selfBody = (await self.json()) as {
+      error: { details?: Record<string, unknown> };
+    };
+    expect(selfBody.error.details?.["category"]).toBe("structure");
+    expect(selfBody.error.details?.["field"]).toBe("fromRef");
+
+    // 另建主题，再跨主题改接。
+    const topicCreated = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "createTopic",
+      topicTitle: "另一个主题",
+      body: "另一个主题的起点。",
+    });
+    expect(topicCreated.status).toBe(200);
+    const topicBody = (await topicCreated.json()) as {
+      created: { nodeIds: string[] };
+      refs: Record<string, string>;
+    };
+    const otherRoot = topicBody.created.nodeIds[0] as string;
+    const otherRef = topicBody.refs[otherRoot] as string;
+
+    const cross = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: nextRef,
+      fromRef: otherRef,
+      flow: "branch",
+      description: "不能跨主题",
+    });
+    expect(cross.status).toBe(422);
+    const crossBody = (await cross.json()) as {
+      error: { code: string; details?: Record<string, unknown> };
+    };
+    expect(crossBody.error.code).toBe("VALIDATION_FAILED");
+    expect(crossBody.error.details?.["category"]).toBe("structure");
+    expect(crossBody.error.details?.["field"]).toBe("fromRef");
+    expect(crossBody.error.details?.["sourceTopicId"]).toBeTypeOf("string");
+    expect(await nextNodeFile(root)).toBe(targetBefore);
+  });
+
+  it("仅 important 不替换最近内容更新；内容与入边改写计入", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+
+    // 先制造一次真实内容更新作为基线。
+    const baselineRef = await nodeRef(handle.url, NEXT_NODE);
+    const baselineResponse = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: baselineRef,
+      title: "基线标题",
+    });
+    expect(baselineResponse.status).toBe(200);
+    const baseline = (await graphBody(handle.url)).lastChanges?.[TOPIC_ID];
+    expect(baseline?.nodeIds).toEqual([NEXT_NODE]);
+
+    // 只改 important：文件改写但不替换最近内容更新。
+    const importantRef = await nodeRef(handle.url, NEXT_NODE);
+    const importantOnly = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: importantRef,
+      important: true,
+    });
+    expect(importantOnly.status).toBe(200);
+    const importantBody = (await importantOnly.json()) as {
+      state: string;
+      changedNodeIds: string[];
+      refs: Record<string, string>;
+    };
+    expect(importantBody.state).toBe("committed");
+    expect(importantBody.changedNodeIds).toEqual([NEXT_NODE]);
+    expect(importantBody.refs[NEXT_NODE]).toMatch(/^er_/);
+    expect((await graphBody(handle.url)).lastChanges?.[TOPIC_ID]).toEqual(baseline);
+    expect(await nextNodeFile(root)).toContain("important: true");
+
+    // 混合入边改写：真实写文件，计入最近内容更新。
+    const mixedRef = importantBody.refs[NEXT_NODE] as string;
+    const mixed = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: mixedRef,
+      description: "混合改写的入边说明",
+      important: false,
+    });
+    expect(mixed.status).toBe(200);
+    expect((await graphBody(handle.url)).lastChanges?.[TOPIC_ID]?.nodeIds).toEqual([NEXT_NODE]);
+    expect(await nextNodeFile(root)).toContain("description: 混合改写的入边说明");
+  });
+
+  it("schema 连带校验：fromRef 缺 flow／缺 description、空 description、无修改都 400", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+    const nextRef = await nodeRef(handle.url, NEXT_NODE);
+
+    const cases: Array<Record<string, unknown>> = [
+      { fromRef: nextRef, description: "缺 flow" },
+      { flow: "branch" },
+      { description: "   " },
+      {},
+      { side: "left", description: "batch 才有的字段" },
+      { flow: "root", description: "root 不是允许的关系类型" },
+    ];
+    for (const fields of cases) {
+      const response = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+        action: "patchNode",
+        editRef: nextRef,
+        ...fields,
+      });
+      expect(response.status, JSON.stringify(fields)).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("BAD_REQUEST");
+    }
+  });
+
+  it("占位后继：目标改 next 但来源已有 next → 409，不挤掉旧后继", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+
+    const rootRef = await nodeRef(handle.url, ROOT_NODE);
+    const source = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "createBranch",
+      editRef: rootRef,
+      title: "来源 S",
+      body: "来源 S 的正文。",
+      description: "作为改接来源",
+    });
+    expect(source.status).toBe(200);
+    const sourceBody = (await source.json()) as {
+      created: { nodeIds: string[] };
+      refs: Record<string, string>;
+    };
+    const sourceId = sourceBody.created.nodeIds[0] as string;
+    const sourceRef = sourceBody.refs[sourceId] as string;
+
+    // 让 NEXT 成为 S 的 next（S 之前没有 next）。
+    const nextRef = await nodeRef(handle.url, NEXT_NODE);
+    const attached = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: nextRef,
+      fromRef: sourceRef,
+      flow: "next",
+      description: "先挂到来源 S 下",
+    });
+    expect(attached.status).toBe(200);
+
+    // 再建一个侧枝，想抢 S 的 next：必须 409，不自动挤掉 NEXT。
+    const second = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "createBranch",
+      editRef: rootRef,
+      title: "第二条",
+      body: "第二条正文。",
+      description: "再建一张",
+    });
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as {
+      created: { nodeIds: string[] };
+      refs: Record<string, string>;
+    };
+    const secondId = secondBody.created.nodeIds[0] as string;
+    const secondRef = secondBody.refs[secondId] as string;
+    const secondPath = path.join(root, "topics", DIR, secondId + ".md");
+    const secondBefore = await fs.readFile(secondPath, "utf8");
+
+    const conflict = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: secondRef,
+      fromRef: sourceRef,
+      flow: "next",
+      description: "不应挤掉已有 next",
+    });
+    expect(conflict.status).toBe(409);
+    const conflictBody = (await conflict.json()) as {
+      error: { code: string; details?: Record<string, unknown> };
+    };
+    expect(conflictBody.error.code).toBe("OPERATION_CONFLICT");
+    expect(await fs.readFile(secondPath, "utf8")).toBe(secondBefore);
+    const graph = await graphBody(handle.url);
+    expect(graph.nodes.find((entry) => entry.id === sourceId)).toMatchObject({ flow: "branch" });
+  });
+
+  it("改入边形成环 → 422 且不落盘", async () => {
+    const root = await newWorkspace();
+    const handle = await startService({ root, port: await freePort() });
+    running.push(handle);
+
+    // 在 NEXT 下建一个子节点，再把 NEXT 的来源改成该子节点，形成环。
+    const nextRef = await nodeRef(handle.url, NEXT_NODE);
+    const child = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "createBranch",
+      editRef: nextRef,
+      title: "子节点",
+      body: "子节点正文。",
+      description: "NEXT 的子节点",
+    });
+    expect(child.status).toBe(200);
+    const childBody = (await child.json()) as {
+      created: { nodeIds: string[] };
+      refs: Record<string, string>;
+    };
+    const childId = childBody.created.nodeIds[0] as string;
+    const childRef = childBody.refs[childId] as string;
+    const nextPath = path.join(root, "topics", DIR, NEXT_NODE + ".md");
+    const childPath = path.join(root, "topics", DIR, childId + ".md");
+    const nextBefore = await fs.readFile(nextPath, "utf8");
+    const childBefore = await fs.readFile(childPath, "utf8");
+
+    const cycle = await postEdit(handle.url, handle.workspaceId, randomUUID(), {
+      action: "patchNode",
+      editRef: nextRef,
+      fromRef: childRef,
+      flow: "next",
+      description: "不应形成环",
+    });
+    expect(cycle.status).toBe(422);
+    expect(((await cycle.json()) as { error: { code: string } }).error.code).toBe(
+      "VALIDATION_FAILED",
+    );
+    expect(await fs.readFile(nextPath, "utf8")).toBe(nextBefore);
+    expect(await fs.readFile(childPath, "utf8")).toBe(childBefore);
+  });
+});

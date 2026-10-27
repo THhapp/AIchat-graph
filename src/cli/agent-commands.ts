@@ -34,6 +34,25 @@ const CONNECT_FLOWS = ["next", "branch"] as const;
 
 /* ---------------------------------- edit ---------------------------------- */
 
+const EDIT_HELP = "aichat help edit --json";
+
+/** 用法错误带具体字段／下一步提示，不静默继续提交。 */
+function editUsage(message: string, field: string, hint: string): UsageError {
+  return new UsageError(message, {
+    details: { field, hint, help: EDIT_HELP },
+  });
+}
+
+/**
+ * edit：内容、入边说明／来源与重要性合成一个 patchNode 动作，一次事务提交。
+ *
+ * 规则（冻结稿第 1 节）：
+ * - 至少一项修改；未给出字段保持原值；
+ * - 只有显式 --body-stdin 才读 stdin，metadata-only 调用不触碰 stdin；
+ * - --summary 空字符串不表示删除，明确提示 --clear-summary；
+ * - --from-ref 必须带 --flow（next／branch）与 --description；
+ * - 只给 --flow 时保留当前来源、只改关系类型，也必须给 --description。
+ */
 export async function runEdit(args: readonly string[], ctx: CliContext): Promise<number> {
   const parsed = parseCommandArgs("edit", args);
   const mode = parseOutputMode(parsed);
@@ -44,14 +63,97 @@ export async function runEdit(args: readonly string[], ctx: CliContext): Promise
   const title = parsed.values.get("title");
   const state = parseEnumValue(parsed.values.get("state"), NODE_STATES, "--state");
   const summary = parsed.values.get("summary");
-  const bodyPatch = await readBodyPatchFromParsed(parsed, ctx);
+  const clearSummary = parsed.values.has("clear-summary");
+  const importantRaw = parsed.values.get("important");
+  const description = parsed.values.get("description");
+  const fromRef = parsed.values.get("from-ref");
+  const flowRaw = parsed.values.get("flow");
+
+  if (summary !== undefined && clearSummary) {
+    throw editUsage(
+      "--summary 与 --clear-summary 互斥：删除显式摘要请只给 --clear-summary",
+      "summary",
+      "--clear-summary",
+    );
+  }
+  if (summary === "") {
+    throw editUsage(
+      "--summary 不能是空字符串；删除显式摘要请用 --clear-summary",
+      "summary",
+      "--clear-summary",
+    );
+  }
+
+  let important: boolean | undefined;
+  if (importantRaw !== undefined) {
+    if (importantRaw !== "true" && importantRaw !== "false") {
+      throw editUsage(
+        "--important 只能是 true 或 false，收到 " + importantRaw + "；true 设为重要，false 明确取消",
+        "important",
+        "--important true|false",
+      );
+    }
+    important = importantRaw === "true";
+  }
+
+  let flow: "next" | "branch" | undefined;
+  if (flowRaw !== undefined) {
+    if (flowRaw !== "next" && flowRaw !== "branch") {
+      throw editUsage(
+        "--flow 只能是 next 或 branch（不接受 root），收到 " + flowRaw,
+        "flow",
+        "--flow next|branch",
+      );
+    }
+    flow = flowRaw;
+  }
+
+  if (fromRef !== undefined && flow === undefined) {
+    throw editUsage(
+      "--from-ref 必须同时给 --flow next|branch，明确最终关系类型",
+      "from-ref",
+      "--from-ref <ref> --flow next|branch --description <why>",
+    );
+  }
+  if ((flow !== undefined || fromRef !== undefined) && description === undefined) {
+    throw editUsage(
+      (fromRef !== undefined ? "--from-ref" : "--flow") +
+        " 必须同时给 --description：说明为什么改接／为什么改关系类型",
+      fromRef !== undefined ? "from-ref" : "flow",
+      "--description <why>",
+    );
+  }
+
+  // 只有显式正文参数才进入正文解析；metadata-only（如仅 --important）不读 stdin。
+  const bodyRequested =
+    parsed.values.has("body") ||
+    parsed.values.has("body-file") ||
+    parsed.values.has("body-stdin");
+  const appendRequested = parsed.values.has("append-file");
+  const replaceRequested = parsed.values.has("replace-file");
+  const bodyPatch =
+    bodyRequested || appendRequested || replaceRequested
+      ? await readBodyPatchFromParsed(parsed, ctx)
+      : {};
   const hasBody =
     bodyPatch.body !== undefined ||
     bodyPatch.append !== undefined ||
     bodyPatch.replace !== undefined;
-  if (title === undefined && state === undefined && summary === undefined && !hasBody) {
-    throw new UsageError(
-      "edit 至少需要一项修改：--title／--state／--summary／--body*／--append-file／--replace-file",
+
+  if (
+    title === undefined &&
+    state === undefined &&
+    summary === undefined &&
+    !clearSummary &&
+    important === undefined &&
+    description === undefined &&
+    fromRef === undefined &&
+    !hasBody
+  ) {
+    throw editUsage(
+      "edit 至少需要一项修改：--title／--state／--summary／--clear-summary／正文模式／--important／--description／--from-ref",
+      "modification",
+      "aichat edit --ref <ref> --title <t>",
     );
   }
 
@@ -60,10 +162,14 @@ export async function runEdit(args: readonly string[], ctx: CliContext): Promise
     editRef: ref,
     ...(title !== undefined ? { title } : {}),
     ...(state !== undefined ? { state } : {}),
-    ...(summary !== undefined ? { summary } : {}),
+    ...(clearSummary ? { summary: null } : summary !== undefined ? { summary } : {}),
     ...(bodyPatch.body !== undefined ? { body: bodyPatch.body } : {}),
     ...(bodyPatch.append !== undefined ? { append: bodyPatch.append } : {}),
     ...(bodyPatch.replace !== undefined ? { replace: [...bodyPatch.replace] } : {}),
+    ...(important !== undefined ? { important } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(fromRef !== undefined ? { fromRef } : {}),
+    ...(flow !== undefined ? { flow } : {}),
   };
   return submitWriteAction("edit", action, root, ctx, mode, verbose);
 }

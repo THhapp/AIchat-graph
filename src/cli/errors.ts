@@ -48,8 +48,8 @@ export class CliError extends Error {
 }
 
 export class UsageError extends CliError {
-  constructor(message: string) {
-    super("USAGE", message, EXIT_CODES.usage);
+  constructor(message: string, options: CliErrorOptions = {}) {
+    super("USAGE", message, EXIT_CODES.usage, options);
     this.name = "UsageError";
   }
 }

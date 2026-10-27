@@ -362,7 +362,10 @@ export interface AgentReplace {
   new: string;
 }
 
-/** Body edit modes are mutually exclusive. */
+/**
+ * 一次编辑：内容、入边说明／来源与重要性可组合给出，服务端编译成同一事务。
+ * 正文模式（replace／append／body）仍互斥。
+ */
 export interface AgentPatchNodeAction {
   action: 'patchNode';
   editRef: string;
@@ -373,6 +376,14 @@ export interface AgentPatchNodeAction {
   replace?: AgentReplace[];
   append?: string;
   body?: string;
+  /** 显式翻转重要标记；仅此项时不替换最近内容更新。 */
+  important?: boolean;
+  /** 现有入边的说明；只改说明时单独给。 */
+  description?: string;
+  /** 明确改来源时使用；必须与 flow、description 同用。 */
+  fromRef?: string;
+  /** 只改关系类型时保留当前来源；root 节点不接受任何入边字段。 */
+  flow?: 'next' | 'branch';
 }
 
 export interface AgentCreateBranchAction {

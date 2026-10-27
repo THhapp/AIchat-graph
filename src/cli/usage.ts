@@ -8,10 +8,13 @@
 import { loadProgramInfo } from "../build-info.js";
 import {
   COMMAND_GROUPS,
+  batchOpFieldTypeLabel,
   commandNames,
   getCommandSpec,
-  type CommandSpec,
+  type BatchOpFieldSpec,
+  type BatchOpSpec,
   type CommandParameter,
+  type CommandSpec,
 } from "./command-specs.js";
 
 /** 一行程序／接口／构建身份。 */
@@ -77,6 +80,16 @@ export function rootHelp(): string {
     "       aichat help <command> --json     机器可读的单命令说明",
     "       aichat help --json               机器可读的命令目录",
     "",
+    "Recommended paths — 按任务选命令:",
+    "  完善一张卡片            edit",
+    "  新增纵向后继            next",
+    "  新增独立方向            branch",
+    "  链中插入                insert",
+    "  仅标记重要              important",
+    "  仅整理关系              rearrange",
+    "  多卡混合修改            batch（单 op 说明：aichat help batch --op edit --json）",
+    "  新建主题                create-topic",
+    "",
   ];
   for (const group of COMMAND_GROUPS) {
     lines.push(group.title + " — " + group.description + ":");
@@ -140,6 +153,41 @@ export function commandHelpText(name: string): string {
   if (spec.result.next !== undefined) {
     for (const next of spec.result.next) lines.push("  next: " + next);
   }
+  return lines.join("\n");
+}
+
+function batchOpFieldLine(field: BatchOpFieldSpec): string {
+  const flags = [batchOpFieldTypeLabel(field), field.required === true ? "必填" : "可选"];
+  if (field.minimum !== undefined && field.type !== "integer") {
+    flags.push(">= " + String(field.minimum));
+  }
+  if (field.conflicts !== undefined && field.conflicts.length > 0) {
+    flags.push("与 " + field.conflicts.join("／") + " 互斥");
+  }
+  return (
+    "  " +
+    field.path.padEnd(22) +
+    flags.join("  ") +
+    "  " +
+    field.description
+  );
+}
+
+/** 单个 batch 操作的人类可读说明；与 help --op --json 使用同一份元数据。 */
+export function batchOpHelpText(spec: BatchOpSpec): string {
+  const lines: string[] = [
+    "aichat batch --op " + spec.op + " — " + spec.summary,
+    versionLine(),
+    "",
+    "Fields:",
+  ];
+  for (const field of spec.fields) lines.push(batchOpFieldLine(field));
+  lines.push("", "Constraints:");
+  for (const constraint of spec.constraints) lines.push("  - " + constraint);
+  lines.push("", "Example:");
+  lines.push("  " + JSON.stringify(spec.example));
+  lines.push("", "Next:");
+  for (const next of spec.next) lines.push("  " + next);
   return lines.join("\n");
 }
 

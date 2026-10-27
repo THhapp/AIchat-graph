@@ -703,6 +703,208 @@ describe("低摩擦写入命令", () => {
     expect(result.exitCode).toBe(2);
     expect(requests.filter((request) => request.url.endsWith("/api/agent/changes"))).toHaveLength(0);
   });
+  it("edit 一次提交内容＋入边＋重要性（只有一个 patchNode 动作）", async () => {
+    const { root, fetchImpl, requests } = await withService();
+    const result = await main(
+      [
+        "edit",
+        "--ref",
+        "ref-child",
+        "--title",
+        "综合修改",
+        "--summary",
+        "综合摘要",
+        "--important",
+        "false",
+        "--from-ref",
+        "ref-parent",
+        "--flow",
+        "branch",
+        "--description",
+        "改接到这里更准确",
+        "--workspace",
+        root,
+      ],
+      { fetchImpl },
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const posts = requests.filter((request) => request.url.endsWith("/api/agent/changes"));
+    // 一次动作、一次请求：不拆成 edit + connect + important。
+    expect(posts).toHaveLength(1);
+    const action = parseBody(posts[0])["action"] as Record<string, unknown>;
+    expect(action).toEqual({
+      action: "patchNode",
+      editRef: "ref-child",
+      title: "综合修改",
+      summary: "综合摘要",
+      important: false,
+      fromRef: "ref-parent",
+      flow: "branch",
+      description: "改接到这里更准确",
+    });
+  });
+
+  it("--clear-summary 只发 summary:null；metadata-only 不读 stdin", async () => {
+    const { root, fetchImpl, requests } = await withService();
+    let stdinCalls = 0;
+    const trap = async (): Promise<string> => {
+      stdinCalls += 1;
+      return "不应被读取的 stdin";
+    };
+    const cleared = await main(
+      ["edit", "--ref", "ref-child", "--clear-summary", "--workspace", root],
+      { fetchImpl, stdin: trap },
+    );
+    expect(cleared.exitCode, cleared.stderr).toBe(0);
+    expect(stdinCalls).toBe(0);
+    const action = parseBody(
+      requests.find((request) => request.url.endsWith("/api/agent/changes")),
+    )["action"] as Record<string, unknown>;
+    expect(action).toEqual({ action: "patchNode", editRef: "ref-child", summary: null });
+
+    // --important 是纯元数据：同样不触碰 stdin。
+    const important = await main(
+      ["edit", "--ref", "ref-child", "--important", "true", "--workspace", root],
+      { fetchImpl, stdin: trap },
+    );
+    expect(important.exitCode, important.stderr).toBe(0);
+    expect(stdinCalls).toBe(0);
+    const actions = requests.filter((request) => request.url.endsWith("/api/agent/changes"));
+    expect(
+      (parseBody(actions[actions.length - 1])["action"] as Record<string, unknown>)["important"],
+    ).toBe(true);
+
+    // 显式 --body-stdin 才读 stdin。
+    const stdinBody = await main(
+      ["edit", "--ref", "ref-child", "--body-stdin", "--workspace", root],
+      { fetchImpl, stdin: trap },
+    );
+    expect(stdinBody.exitCode, stdinBody.stderr).toBe(0);
+    expect(stdinCalls).toBe(1);
+  });
+
+  it("--summary 空串／与 --clear-summary 互斥给出字段级提示", async () => {
+    const { root, fetchImpl, requests } = await withService();
+    for (const args of [
+      ["edit", "--ref", "ref-child", "--summary=", "--workspace", root],
+      ["edit", "--ref", "ref-child", "--summary", "", "--workspace", root],
+    ]) {
+      const result = await main(args, { fetchImpl });
+      expect(result.exitCode, args.join(" ")).toBe(2);
+      const payload = JSON.parse(result.stderr) as {
+        error: { code: string; details: Record<string, unknown> };
+      };
+      expect(payload.error.code).toBe("USAGE");
+      expect(payload.error.details["field"]).toBe("summary");
+      expect(String(payload.error.details["hint"])).toContain("--clear-summary");
+      expect(payload.error.details["help"]).toBe("aichat help edit --json");
+    }
+
+    const both = await main(
+      [
+        "edit",
+        "--ref",
+        "ref-child",
+        "--summary",
+        "新摘要",
+        "--clear-summary",
+        "--workspace",
+        root,
+      ],
+      { fetchImpl },
+    );
+    expect(both.exitCode).toBe(2);
+    expect(JSON.parse(both.stderr).error.details.field).toBe("summary");
+    expect(requests.filter((request) => request.url.endsWith("/api/agent/changes"))).toHaveLength(0);
+  });
+
+  it("edit 的 --important／--flow／--from-ref 规则给出字段级错误", async () => {
+    const { root, fetchImpl, requests } = await withService();
+    const cases: Array<{ args: string[]; field: string; hintIncludes: string }> = [
+      {
+        args: ["edit", "--ref", "r", "--important", "maybe", "--workspace", root],
+        field: "important",
+        hintIncludes: "--important true|false",
+      },
+      {
+        args: ["edit", "--ref", "r", "--from-ref", "ref-parent", "--workspace", root],
+        field: "from-ref",
+        hintIncludes: "--flow",
+      },
+      {
+        args: ["edit", "--ref", "r", "--flow", "branch", "--workspace", root],
+        field: "flow",
+        hintIncludes: "--description",
+      },
+      {
+        args: [
+          "edit",
+          "--ref",
+          "r",
+          "--from-ref",
+          "ref-parent",
+          "--flow",
+          "branch",
+          "--workspace",
+          root,
+        ],
+        field: "from-ref",
+        hintIncludes: "--description",
+      },
+      {
+        args: ["edit", "--ref", "r", "--flow", "root", "--description", "x", "--workspace", root],
+        field: "flow",
+        hintIncludes: "--flow next|branch",
+      },
+    ];
+    for (const entry of cases) {
+      const result = await main(entry.args, { fetchImpl });
+      expect(result.exitCode, entry.args.join(" ")).toBe(2);
+      const payload = JSON.parse(result.stderr) as {
+        error: { code: string; details: Record<string, unknown> };
+      };
+      expect(payload.error.code, entry.args.join(" ")).toBe("USAGE");
+      expect(payload.error.details["field"], entry.args.join(" ")).toBe(entry.field);
+      expect(String(payload.error.details["hint"])).toContain(entry.hintIncludes);
+      expect(payload.error.details["help"]).toBe("aichat help edit --json");
+    }
+    expect(requests.filter((request) => request.url.endsWith("/api/agent/changes"))).toHaveLength(0);
+
+    // 只给 --description：只改现有入边说明，不要求来源或正文。
+    const descriptionOnly = await main(
+      ["edit", "--ref", "ref-child", "--description", "只改说明", "--workspace", root],
+      { fetchImpl },
+    );
+    expect(descriptionOnly.exitCode, descriptionOnly.stderr).toBe(0);
+    const action = parseBody(
+      requests.find((request) => request.url.endsWith("/api/agent/changes")),
+    )["action"] as Record<string, unknown>;
+    expect(action).toEqual({
+      action: "patchNode",
+      editRef: "ref-child",
+      description: "只改说明",
+    });
+
+    // 只给 --flow + --description：保留当前来源，只改关系类型。
+    const flowOnly = await main(
+      ["edit", "--ref", "ref-child", "--flow", "next", "--description", "改类型", "--workspace", root],
+      { fetchImpl },
+    );
+    expect(flowOnly.exitCode, flowOnly.stderr).toBe(0);
+    const flowActions = requests.filter((request) => request.url.endsWith("/api/agent/changes"));
+    const flowAction = parseBody(flowActions[flowActions.length - 1])["action"] as Record<
+      string,
+      unknown
+    >;
+    expect(flowAction).toEqual({
+      action: "patchNode",
+      editRef: "ref-child",
+      flow: "next",
+      description: "改类型",
+    });
+    expect(flowAction["fromRef"]).toBeUndefined();
+  });
+
 
   it("412／409／422 映射为 4／5／6 并保留服务错误细节", async () => {
     const { root, workspaceId } = await newV2Workspace();

@@ -206,15 +206,7 @@ export function compileAgentAction(
   const snapshot = context.runtime.current.data;
 
   if (action.action === "patchNode") {
-    const { binding } = requireEditRef(context, action.editRef);
-    const expected = expectedForBinding(snapshot, binding as NonNullable<typeof binding>);
-    return {
-      operations: patchNodeOperations(action, binding as NonNullable<typeof binding>),
-      expectedFiles: expected,
-      created: emptyCreated(),
-      action: action.action,
-      topicId: binding?.topicId ?? "",
-    };
+    return compilePatchNode(context, action);
   }
 
   if (action.action === "createBranch") {
@@ -722,6 +714,132 @@ function isolatedTopicDirectory(title: string, explicit?: string): string {
     throw new ServiceError(422, "VALIDATION_FAILED", "非法主题目录：" + dir + "；" + (error instanceof Error ? error.message : String(error)), {});
   }
   return dir;
+}
+
+/**
+ * edit 复合动作：内容 patchNode → 入边 updateConnection → 重要性 setImportance
+ * 编译成同一个 ChangeRequest，一次 prepareChanges／commitFiles。
+ *
+ * - 未给出的字段不生成操作；只 important 时 setImportance 是唯一操作，
+ *   storage 的 contentNodeIds 会排除该节点（不替换最近内容更新）；
+ * - fromRef 的来源必须按读取时哈希声明，跨主题／自连／根节点入边在这里明确拒绝；
+ * - 占位后继、成环等最终结构仍由候选层整图校验，不重复实现。
+ */
+function compilePatchNode(
+  context: CompileContext,
+  action: AgentPatchNodeAction,
+): CompiledAction {
+  const snapshot = context.runtime.current.data;
+  const { binding } = requireEditRef(context, action.editRef);
+  const resolved = binding as NonNullable<typeof binding>;
+  const expected = expectedForBinding(snapshot, resolved);
+  const node = snapshot.graph.nodes.find((entry) => entry.id === resolved.nodeId);
+  if (node === undefined) {
+    throw new ServiceError(409, "STALE_EDIT_REF", "editRef 指向的节点不在当前快照中", {
+      details: { nodeId: resolved.nodeId },
+    });
+  }
+
+  // 入边字段：description／fromRef／flow 任一出现即视为"改入边"。
+  const hasConnection =
+    action.description !== undefined || action.fromRef !== undefined || action.flow !== undefined;
+  if (node.flow === "root" && hasConnection) {
+    const field =
+      action.fromRef !== undefined ? "fromRef" : action.flow !== undefined ? "flow" : "description";
+    throw new ServiceError(
+      422,
+      "VALIDATION_FAILED",
+      "根节点没有入边，不能修改 description／fromRef／flow；只能改内容或重要标记" +
+        "（可用 aichat help edit --json 查看 edit 字段）",
+      { details: { category: "structure", nodeId: node.id, topicId: node.topicId, field } },
+    );
+  }
+
+  let fromNodeId: string | undefined;
+  if (action.fromRef !== undefined) {
+    const sourceBinding = context.editRefs.resolve(action.fromRef);
+    if (sourceBinding === null) {
+      throw new ServiceError(409, "STALE_EDIT_REF", "fromRef 无效或已过期；请重新读取来源节点", {
+        details: { category: "version", field: "fromRef", fromRef: action.fromRef.slice(0, 24) },
+      });
+    }
+    // 来源文件必须声明读取时哈希；读取后被改过由 expectedForBinding 报 412。
+    mergeExpected(expected, expectedForBinding(snapshot, sourceBinding));
+    const source = snapshot.graph.nodes.find((entry) => entry.id === sourceBinding.nodeId);
+    if (source === undefined) {
+      throw new ServiceError(409, "STALE_EDIT_REF", "fromRef 指向的节点不在当前快照中", {
+        details: { category: "version", field: "fromRef", fromRef: action.fromRef.slice(0, 24) },
+      });
+    }
+    if (source.id === node.id) {
+      throw new ServiceError(
+        422,
+        "VALIDATION_FAILED",
+        "节点不能把自己作为来源（自连）；请选择另一个节点作为入边来源" +
+          "（可用 aichat help edit --json）",
+        { details: { category: "structure", field: "fromRef", nodeId: node.id } },
+      );
+    }
+    if (source.topicId !== node.topicId) {
+      throw new ServiceError(
+        422,
+        "VALIDATION_FAILED",
+        "隔离主题不能把入边改接到其他主题的来源；请在同一主题内选择来源" +
+          "（可用 aichat help edit --json）",
+        {
+          details: {
+            category: "structure",
+            field: "fromRef",
+            nodeId: node.id,
+            topicId: node.topicId,
+            sourceNodeId: source.id,
+            sourceTopicId: source.topicId,
+          },
+        },
+      );
+    }
+    fromNodeId = source.id;
+  }
+
+  const operations: Operation[] = [];
+  const hasContent =
+    action.title !== undefined ||
+    action.state !== undefined ||
+    action.summary !== undefined ||
+    action.replace !== undefined ||
+    action.append !== undefined ||
+    action.body !== undefined;
+  if (hasContent) operations.push(...patchNodeOperations(action, resolved));
+  if (hasConnection) {
+    if (action.description === undefined) {
+      // schema 已保证；保留防御，避免绕过 HTTP 层时写出没有理由的入边。
+      throw new ServiceError(422, "VALIDATION_FAILED", "修改入边时必须给出 description", {
+        details: { category: "parameter", field: "description", nodeId: node.id },
+      });
+    }
+    operations.push({
+      op: "updateConnection",
+      nodeId: resolved.nodeId,
+      ...(fromNodeId !== undefined ? { from: fromNodeId } : {}),
+      ...(action.flow !== undefined ? { flow: action.flow } : {}),
+      description: action.description.trim(),
+    });
+  }
+  if (action.important !== undefined) {
+    operations.push({
+      op: "setImportance",
+      nodeId: resolved.nodeId,
+      important: action.important,
+    });
+  }
+
+  return {
+    operations,
+    expectedFiles: expected,
+    created: emptyCreated(),
+    action: action.action,
+    topicId: resolved.topicId,
+  };
 }
 
 /* ------------------------------------------------------------------ *

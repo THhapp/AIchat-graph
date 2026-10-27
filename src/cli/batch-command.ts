@@ -83,13 +83,55 @@ function batchError(message: string, details?: Record<string, unknown>): CliErro
   });
 }
 
+/** 已知字段放错位置：单行消息 + 字段路径／hint／help，不静默改写后提交。 */
+function batchMisplacedError(
+  fieldPath: string,
+  hint: string,
+  help = "aichat help batch --op edit --json",
+): CliError {
+  return batchError(fieldPath + " 不属于该操作；" + hint, { field: fieldPath, hint, help });
+}
+
+interface MisplacedHint {
+  readonly hint: string;
+}
+
+/** 单卡 edit 的字段被误放进 batch edit.patch。 */
+const EDIT_PATCH_MISPLACED: Readonly<Record<string, MisplacedHint>> = {
+  important: {
+    hint: '应放到 op=important：{"op":"important","target":{"ref":"..."},"important":true}；单卡也可 aichat edit --important true',
+  },
+  description: {
+    hint: "应放到 op=connect.description；单卡也可 aichat edit --description <why>",
+  },
+  fromRef: {
+    hint: "应放到 op=connect.from（同时给 flow 与 description）；单卡也可 aichat edit --from-ref <ref> --flow next|branch --description <why>",
+  },
+  flow: {
+    hint: "应放到 op=connect.flow（同时给 description）；单卡也可 aichat edit --flow next|branch --description <why>",
+  },
+};
+
+/** 单卡 edit 的入边／重要性字段被误放在 edit op 顶层。 */
+const EDIT_OP_MISPLACED: Readonly<Record<string, MisplacedHint>> = {
+  important: EDIT_PATCH_MISPLACED["important"] as MisplacedHint,
+  description: EDIT_PATCH_MISPLACED["description"] as MisplacedHint,
+  fromRef: EDIT_PATCH_MISPLACED["fromRef"] as MisplacedHint,
+  flow: EDIT_PATCH_MISPLACED["flow"] as MisplacedHint,
+};
+
 function assertFields(
   record: Record<string, unknown>,
   allowed: ReadonlySet<string>,
   label: string,
 ): void {
   for (const key of Object.keys(record)) {
-    if (!allowed.has(key)) throw batchError(label + " 未知字段: " + key, { field: key });
+    if (!allowed.has(key)) {
+      throw batchError(label + " 未知字段: " + key, {
+        field: label + "." + key,
+        help: "aichat help batch --json",
+      });
+    }
   }
 }
 
@@ -182,7 +224,7 @@ function existingTarget(raw: unknown, label: string): { ref: string } {
   if ("local" in raw) {
     throw batchError(
       label + " 不能使用 local；target 只能是 {ref}（local 只用于 create.from／connect.from）",
-      { field: "target" },
+      { field: label + ".local", help: "aichat help batch --op edit --json" },
     );
   }
   assertFields(raw, new Set(["ref"]), label);
@@ -210,6 +252,13 @@ async function inlineReplace(raw: unknown, label: string): Promise<AgentReplace[
 async function patchFrom(raw: unknown, index: number, io: IoContext): Promise<AgentBatchEditPatch> {
   const label = "ops[" + String(index) + "].patch";
   if (!isRecord(raw)) throw batchError(label + " 必须是对象");
+  for (const key of Object.keys(raw)) {
+    if (EDIT_PATCH_FIELDS.has(key)) continue;
+    const misplaced = EDIT_PATCH_MISPLACED[key];
+    if (misplaced !== undefined) {
+      throw batchMisplacedError(label + "." + key, misplaced.hint);
+    }
+  }
   assertFields(raw, EDIT_PATCH_FIELDS, label);
 
   const body = optionalString(raw, "body", label);
@@ -223,16 +272,18 @@ async function patchFrom(raw: unknown, index: number, io: IoContext): Promise<Ag
   const appendMode = append !== undefined || appendFile !== undefined;
   const replaceMode = replace !== undefined || replaceFile !== undefined;
   if ([bodyMode, appendMode, replaceMode].filter(Boolean).length > 1) {
-    throw batchError(label + " body／append／replace 三种正文修改模式互斥", { field: "patch" });
+    throw batchError(label + " body／append／replace 三种正文修改模式互斥", {
+      field: label + ".patch",
+    });
   }
   if (body !== undefined && bodyFile !== undefined) {
-    throw batchError(label + " body 与 bodyFile 互斥", { field: "body" });
+    throw batchError(label + " body 与 bodyFile 互斥", { field: label + ".body" });
   }
   if (append !== undefined && appendFile !== undefined) {
-    throw batchError(label + " append 与 appendFile 互斥", { field: "append" });
+    throw batchError(label + " append 与 appendFile 互斥", { field: label + ".append" });
   }
   if (replace !== undefined && replaceFile !== undefined) {
-    throw batchError(label + " replace 与 replaceFile 互斥", { field: "replace" });
+    throw batchError(label + " replace 与 replaceFile 互斥", { field: label + ".replace" });
   }
 
   const title = optionalString(raw, "title", label);
@@ -279,6 +330,12 @@ async function patchFrom(raw: unknown, index: number, io: IoContext): Promise<Ag
 
 async function editOp(raw: Record<string, unknown>, index: number, io: IoContext): Promise<AgentBatchEditOp> {
   const label = "ops[" + String(index) + "]";
+  for (const key of Object.keys(raw)) {
+    const misplaced = EDIT_OP_MISPLACED[key];
+    if (misplaced !== undefined) {
+      throw batchMisplacedError(label + "." + key, misplaced.hint);
+    }
+  }
   assertFields(raw, new Set(["op", "target", "patch"]), label);
   const target = existingTarget(raw["target"], label + ".target");
   const patch = await patchFrom(raw["patch"], index, io);
@@ -287,6 +344,12 @@ async function editOp(raw: Record<string, unknown>, index: number, io: IoContext
 
 async function createOp(raw: Record<string, unknown>, index: number, io: IoContext): Promise<AgentBatchCreateOp> {
   const label = "ops[" + String(index) + "]";
+  if ("patch" in raw) {
+    throw batchMisplacedError(
+      label + ".patch",
+      "内容修改请用 op=edit 的 patch；create 只创建新卡片",
+    );
+  }
   assertFields(raw, CREATE_FIELDS, label);
   const asName = requiredString(raw, "as", label);
   const from = selectorFrom(raw["from"], label + ".from");
@@ -313,7 +376,11 @@ async function createOp(raw: Record<string, unknown>, index: number, io: IoConte
   const side = optionalEnum(raw, "side", SIDES, label);
   const order = optionalNonNegativeInteger(raw, "order", label);
   if (flow === "next" && (side !== undefined || order !== undefined)) {
-    throw batchError(label + " flow=next 不能带 side／order", { field: flow });
+    throw batchError(label + " flow=next 不能带 side／order", {
+      field: label + ".flow",
+      hint: "side／order 只在 flow=branch 时允许",
+      help: "aichat help batch --op create --json",
+    });
   }
   return {
     op: "create",
@@ -333,6 +400,12 @@ async function createOp(raw: Record<string, unknown>, index: number, io: IoConte
 
 function connectOp(raw: Record<string, unknown>, index: number): AgentBatchConnectOp {
   const label = "ops[" + String(index) + "]";
+  if ("patch" in raw) {
+    throw batchMisplacedError(
+      label + ".patch",
+      "内容修改请用 op=edit 的 patch；connect 只改最终入边",
+    );
+  }
   assertFields(raw, CONNECT_FIELDS, label);
   const target = existingTarget(raw["target"], label + ".target");
   const rawFrom = raw["from"];
@@ -342,7 +415,11 @@ function connectOp(raw: Record<string, unknown>, index: number): AgentBatchConne
   const side = optionalEnum(raw, "side", SIDES, label);
   const order = optionalNonNegativeInteger(raw, "order", label);
   if (flow === "next" && (side !== undefined || order !== undefined)) {
-    throw batchError(label + " flow=next 不能带 side／order", { field: "flow" });
+    throw batchError(label + " flow=next 不能带 side／order", {
+      field: label + ".flow",
+      hint: "side／order 只在最终 flow=branch 时允许",
+      help: "aichat help batch --op connect --json",
+    });
   }
   return {
     op: "connect",

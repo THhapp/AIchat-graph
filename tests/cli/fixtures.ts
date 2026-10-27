@@ -4,12 +4,13 @@ import type {
   AgentCreatedIds,
   ProgramInfo,
 } from "../../src/shared/protocol.js";
+import { INTERFACE_VERSION } from "../../src/build-info.js";
 
 export function testProgram(overrides: Partial<ProgramInfo> = {}): ProgramInfo {
   return {
     program: "aichat-graph",
     version: "0.1.0",
-    interfaceVersion: 2,
+    interfaceVersion: INTERFACE_VERSION,
     buildId: "test-build",
     commit: null,
     builtAt: null,

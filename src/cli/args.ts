@@ -16,6 +16,8 @@ export interface OptionSpec {
   readonly boolean?: boolean;
   /** 该值可重复出现（如多次 --node）。 */
   readonly repeatable?: boolean;
+  /** 允许空字符串值；由命令自行解释（如 --summary 空串要给出专门提示）。 */
+  readonly allowEmpty?: boolean;
 }
 
 export interface ParsedArgs {
@@ -43,14 +45,18 @@ function recordValue(
   state: MutableState,
 ): void {
   if (spec.repeatable) {
-    if (value.length === 0) throw new UsageError("选项 --" + name + " 的值不能为空");
+    if (value.length === 0 && spec.allowEmpty !== true) {
+      throw new UsageError("选项 --" + name + " 的值不能为空");
+    }
     const bucket = state.lists.get(name);
     if (bucket) bucket.push(value);
     else state.lists.set(name, [value]);
     return;
   }
   if (state.values.has(name)) throw new UsageError("选项 --" + name + " 不能重复");
-  if (value.length === 0) throw new UsageError("选项 --" + name + " 的值不能为空");
+  if (value.length === 0 && spec.allowEmpty !== true) {
+    throw new UsageError("选项 --" + name + " 的值不能为空");
+  }
   state.values.set(name, value);
 }
 

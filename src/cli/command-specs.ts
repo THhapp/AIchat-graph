@@ -160,10 +160,43 @@ const SUMMARY_PARAMETER = stringParameter(
   "卡片摘要；省略时由正文首段派生",
 );
 
-/** edit：摘要已经存在，不传时保持现状，不按正文重建。 */
+/** edit：摘要已经存在，不传时保持现状；空字符串不表示删除。 */
 const EDIT_SUMMARY_PARAMETER = stringParameter(
   "summary",
-  "新摘要；不传则保持现有显式概述，不按正文重建",
+  "新摘要；不传则保持现有显式概述；删除显式摘要请用 --clear-summary",
+  { allowEmpty: true, conflicts: ["clear-summary"] },
+);
+
+const CLEAR_SUMMARY_PARAMETER = booleanParameter(
+  "clear-summary",
+  "显式删除已有摘要；与 --summary 互斥",
+  { conflicts: ["summary"] },
+);
+
+/** edit 的重要性翻转：不用裸开关，false 才是明确取消。 */
+const EDIT_IMPORTANT_PARAMETER = enumParameter(
+  "important",
+  ["true", "false"],
+  "true 设为重要，false 明确取消重要标记（不用裸开关）",
+);
+
+/** edit 的入边说明：只改说明时可单独给出。 */
+const EDIT_DESCRIPTION_PARAMETER = stringParameter(
+  "description",
+  "当前入边的说明；只改说明时可单独给出",
+);
+
+const EDIT_FROM_REF_PARAMETER = stringParameter(
+  "from-ref",
+  "新的来源节点凭据；必须与 --flow 和 --description 同用",
+  { requires: ["flow", "description"] },
+);
+
+const EDIT_FLOW_PARAMETER = enumParameter(
+  "flow",
+  ["next", "branch"],
+  "关系类型；只给 --flow 时保留当前来源，改类型必须同时给 --description",
+  { requires: ["description"] },
 );
 
 const BRANCH_SIDE_PARAMETER = enumParameter(
@@ -247,96 +280,457 @@ const REPLACE_ITEM_SCHEMA = {
   },
 } as const;
 
-const EDIT_PATCH_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    title: { type: "string" },
-    state: { enum: ["agreed", "proposed", "reference"] },
-    summary: { type: ["string", "null"], description: "null 表示移除显式摘要" },
-    body: { type: "string", description: "整篇替换正文" },
-    bodyFile: {
-      type: "string",
-      description: "CLI 读取文件内容作为 body（相对输入文件目录）；不发送给服务",
-    },
-    append: { type: "string", description: "追加片段" },
-    appendFile: {
-      type: "string",
-      description: "CLI 读取文件内容作为 append（相对输入文件目录）；不发送给服务",
-    },
-    replace: { type: "array", minItems: 1, items: REPLACE_ITEM_SCHEMA },
-    replaceFile: {
-      type: "string",
-      description: "CLI 读取 [{old,new}] 或 {replace:[...]} 作为 replace；不发送给服务",
-    },
+/* ------------------------------------------------------------------ *
+ * batch 操作元数据：操作级帮助与输入 JSON Schema 共用同一份定义。
+ * 字段写在 BatchOpSpec.fields，schema 由 buildBatchOpSchema 生成，
+ * 避免 aichat help batch --op <op> 与 batch 输入结构各自漂移。
+ * ------------------------------------------------------------------ */
+
+export type BatchOpName = "edit" | "create" | "connect" | "important";
+
+export type BatchOpFieldType =
+  | "const"
+  | "string"
+  | "stringOrNull"
+  | "boolean"
+  | "integer"
+  | "enum"
+  | "selector"
+  | "ref"
+  | "array"
+  | "object";
+
+export interface BatchOpFieldSpec {
+  /** 相对操作对象的字段路径，例如 "target"、"patch.title"。 */
+  readonly path: string;
+  readonly type: BatchOpFieldType;
+  /** 该字段在其所在对象里是否必填。 */
+  readonly required?: boolean;
+  readonly values?: readonly string[];
+  readonly minimum?: number;
+  readonly items?: Record<string, unknown>;
+  readonly description: string;
+  /** 帮助里的互斥关系（字段路径，不是 CLI 参数名）。 */
+  readonly conflicts?: readonly string[];
+  /** 同组字段在 schema 里用 oneOf 表达"恰好给一个"（如 body／bodyFile）。 */
+  readonly exactlyOneGroup?: string;
+}
+
+export interface BatchOpSpec {
+  readonly op: BatchOpName;
+  readonly summary: string;
+  readonly fields: readonly BatchOpFieldSpec[];
+  readonly constraints: readonly string[];
+  /** 最小合法示例（不含 topicId／ops 外壳）。 */
+  readonly example: Record<string, unknown>;
+  readonly next: readonly string[];
+}
+
+const BATCH_EDIT_FIELDS: readonly BatchOpFieldSpec[] = [
+  { path: "op", type: "const", values: ["edit"], required: true, description: "操作类型：edit" },
+  {
+    path: "target",
+    type: "ref",
+    required: true,
+    description: "已有节点：{ref: <同一主题批前在线读取的 ref>}",
   },
-} as const;
+  { path: "patch", type: "object", required: true, description: "修改内容；至少给出一个字段" },
+  { path: "patch.title", type: "string", description: "新标题" },
+  {
+    path: "patch.state",
+    type: "enum",
+    values: ["agreed", "proposed", "reference"],
+    description: "节点状态",
+  },
+  {
+    path: "patch.summary",
+    type: "stringOrNull",
+    description: "新摘要；null 删除显式摘要",
+  },
+  {
+    path: "patch.body",
+    type: "string",
+    description: "整篇替换正文；与 append／replace 互斥",
+  },
+  {
+    path: "patch.append",
+    type: "string",
+    description: "追加片段；与 body／replace 互斥",
+  },
+  {
+    path: "patch.replace",
+    type: "array",
+    items: REPLACE_ITEM_SCHEMA,
+    description: "局部替换 [{old,new}]；old 非空且唯一匹配",
+  },
+  {
+    path: "patch.bodyFile",
+    type: "string",
+    description: "CLI 读取文件内容作为 body（相对输入文件目录）；不发送给服务",
+    conflicts: [
+      "patch.body",
+      "patch.append",
+      "patch.appendFile",
+      "patch.replace",
+      "patch.replaceFile",
+    ],
+  },
+  {
+    path: "patch.appendFile",
+    type: "string",
+    description: "CLI 读取文件内容作为 append（相对输入文件目录）；不发送给服务",
+    conflicts: [
+      "patch.append",
+      "patch.body",
+      "patch.bodyFile",
+      "patch.replace",
+      "patch.replaceFile",
+    ],
+  },
+  {
+    path: "patch.replaceFile",
+    type: "string",
+    description: "CLI 读取 [{old,new}] 或 {replace:[...]} 作为 replace；不发送给服务",
+    conflicts: [
+      "patch.replace",
+      "patch.body",
+      "patch.bodyFile",
+      "patch.append",
+      "patch.appendFile",
+    ],
+  },
+];
+
+const BATCH_CREATE_FIELDS: readonly BatchOpFieldSpec[] = [
+  { path: "op", type: "const", values: ["create"], required: true, description: "操作类型：create" },
+  {
+    path: "as",
+    type: "string",
+    required: true,
+    description: "本批唯一的局部名称；同批其他 op 可用 {local: 名称} 引用",
+  },
+  {
+    path: "from",
+    type: "selector",
+    required: true,
+    description: "来源：ref 指向批前已有节点；local 指向本批 create（二选一）",
+  },
+  {
+    path: "flow",
+    type: "enum",
+    values: ["next", "branch"],
+    required: true,
+    description: "纵向后继 next 或旁支 branch",
+  },
+  { path: "title", type: "string", required: true, description: "新卡片标题" },
+  {
+    path: "body",
+    type: "string",
+    description: "整篇正文；与 bodyFile 恰好给一个",
+    exactlyOneGroup: "body-source",
+  },
+  {
+    path: "bodyFile",
+    type: "string",
+    description: "CLI 读取文件内容作为 body（相对输入文件目录）；不发送给服务",
+    exactlyOneGroup: "body-source",
+  },
+  {
+    path: "description",
+    type: "string",
+    required: true,
+    description: "为什么接到来源（非空单行）",
+  },
+  { path: "summary", type: "string", description: "卡片摘要；省略时由正文首段派生" },
+  {
+    path: "state",
+    type: "enum",
+    values: ["agreed", "proposed", "reference"],
+    description: "节点状态",
+  },
+  { path: "important", type: "boolean", description: "新卡片是否重要" },
+  {
+    path: "side",
+    type: "enum",
+    values: ["left", "right"],
+    description: "仅 flow=branch 允许",
+  },
+  {
+    path: "order",
+    type: "integer",
+    minimum: 0,
+    description: "仅 flow=branch 允许；缺省由编译器按输入顺序稳定分配",
+  },
+];
+
+const BATCH_CONNECT_FIELDS: readonly BatchOpFieldSpec[] = [
+  {
+    path: "op",
+    type: "const",
+    values: ["connect"],
+    required: true,
+    description: "操作类型：connect",
+  },
+  {
+    path: "target",
+    type: "ref",
+    required: true,
+    description: "要改接入边的已有节点：{ref: <ref>}",
+  },
+  {
+    path: "from",
+    type: "selector",
+    description: "最终来源；出现时 flow 必须一起出现；只给 flow 时沿用当前来源（二选一）",
+  },
+  {
+    path: "flow",
+    type: "enum",
+    values: ["next", "branch"],
+    description: "最终关系类型；root 不可改接",
+  },
+  {
+    path: "description",
+    type: "string",
+    required: true,
+    description: "最终连接说明；只改说明时也要给",
+  },
+  {
+    path: "side",
+    type: "enum",
+    values: ["left", "right"],
+    description: "仅最终 flow=branch 允许",
+  },
+  {
+    path: "order",
+    type: "integer",
+    minimum: 0,
+    description: "仅最终 flow=branch 允许",
+  },
+];
+
+const BATCH_IMPORTANT_FIELDS: readonly BatchOpFieldSpec[] = [
+  {
+    path: "op",
+    type: "const",
+    values: ["important"],
+    required: true,
+    description: "操作类型：important",
+  },
+  { path: "target", type: "ref", required: true, description: "已有节点：{ref: <ref>}" },
+  {
+    path: "important",
+    type: "boolean",
+    required: true,
+    description: "true 设为重要，false 取消重要",
+  },
+];
+
+const BATCH_OP_SPECS_LIST: readonly BatchOpSpec[] = [
+  {
+    op: "edit",
+    summary: "按 {ref} 修改一张已有卡片的内容：标题、状态、摘要或正文。",
+    fields: BATCH_EDIT_FIELDS,
+    constraints: [
+      "target 只能是 {ref}；local 只用于 create.from／connect.from。",
+      "patch 至少给一个字段；正文模式 body／append／replace 互斥。",
+      "bodyFile／appendFile／replaceFile 由 CLI 读取并转成 body／append／replace，服务端不读本机路径。",
+      "失败不部分落盘；同一批只提交一次事务。",
+    ],
+    example: { op: "edit", target: { ref: "er_..." }, patch: { append: "补充一段。" } },
+    next: ["aichat help batch --json", "aichat read --node <nodeId> --workspace <path>"],
+  },
+  {
+    op: "create",
+    summary: "从来源节点新建一张卡片（纵向 next 或旁支 branch），用局部名称 as 供本批引用。",
+    fields: BATCH_CREATE_FIELDS,
+    constraints: [
+      "from 必须是 {ref} 或 {local}；local 只能引用本批 create。",
+      "body 与 bodyFile 必须且只能给一个；bodyFile 由 CLI 读取转换。",
+      "flow=next 不得带 side／order；side／order 只在 flow=branch 时出现。",
+      "同一批 create 的 as 必须唯一；本批其他 op 可以前向引用。",
+      "create 的 branch order 缺省由编译器按输入顺序稳定分配。",
+    ],
+    example: {
+      op: "create",
+      as: "新卡",
+      from: { ref: "er_..." },
+      flow: "branch",
+      title: "新卡",
+      description: "旁支说明",
+      body: "正文",
+    },
+    next: ["aichat help batch --op connect --json", "aichat help batch --json"],
+  },
+  {
+    op: "connect",
+    summary: "改接已有节点或只改其入边说明／flow；target 只能是已有节点。",
+    fields: BATCH_CONNECT_FIELDS,
+    constraints: [
+      "target 必须是已有节点；root 节点没有入边，不能改接（结构错误 422）。",
+      "from 出现时 flow 必须出现；只给 flow 时沿用当前来源。",
+      "description 必填；只改说明时也要给。",
+      "最终 flow=next 不得带 side／order。",
+    ],
+    example: {
+      op: "connect",
+      target: { ref: "er_..." },
+      from: { ref: "er_..." },
+      flow: "branch",
+      description: "改接到这里更准确",
+    },
+    next: ["aichat help batch --op edit --json", "aichat help batch --json"],
+  },
+  {
+    op: "important",
+    summary: "设置或取消一张已有卡片的重要标记；只翻转标记，不改内容。",
+    fields: BATCH_IMPORTANT_FIELDS,
+    constraints: [
+      "target 必须是已有节点。",
+      "只翻转重要标记；仅此变化不替换最近内容更新集合。",
+    ],
+    example: { op: "important", target: { ref: "er_..." }, important: true },
+    next: ["aichat help batch --op edit --json", "aichat help batch --json"],
+  },
+];
+
+export const BATCH_OP_NAMES: readonly BatchOpName[] = BATCH_OP_SPECS_LIST.map(
+  (spec) => spec.op,
+);
+
+export const BATCH_OP_SPECS: Readonly<Record<BatchOpName, BatchOpSpec>> = Object.freeze(
+  Object.fromEntries(BATCH_OP_SPECS_LIST.map((spec) => [spec.op, spec])) as Record<
+    BatchOpName,
+    BatchOpSpec
+  >,
+);
+
+export function getBatchOpSpec(name: string): BatchOpSpec | undefined {
+  return (BATCH_OP_SPECS as Record<string, BatchOpSpec>)[name];
+}
+
+/** 字段类型的人类／机器标签（操作级帮助只此一处映射）。 */
+export function batchOpFieldTypeLabel(field: BatchOpFieldSpec): string {
+  switch (field.type) {
+    case "const":
+      return "const " + String(field.values?.[0] ?? "");
+    case "enum":
+      return (field.values ?? []).join("|");
+    case "integer":
+      return field.minimum === undefined ? "integer" : "integer>=" + String(field.minimum);
+    case "selector":
+      return "ref|local";
+    case "ref":
+      return "ref";
+    case "stringOrNull":
+      return "string|null";
+    case "array":
+      return "array";
+    case "object":
+      return "object";
+    default:
+      return field.type;
+  }
+}
+
+/** 字段类型对应的 JSON Schema 片段。 */
+function batchFieldSchema(field: BatchOpFieldSpec): Record<string, unknown> {
+  switch (field.type) {
+    case "const":
+      return { const: field.values?.[0] };
+    case "string":
+      return { type: "string" };
+    case "stringOrNull":
+      return { type: ["string", "null"] };
+    case "boolean":
+      return { type: "boolean" };
+    case "integer":
+      return {
+        type: "integer",
+        ...(field.minimum !== undefined ? { minimum: field.minimum } : {}),
+      };
+    case "enum":
+      return { enum: [...(field.values ?? [])] };
+    case "ref":
+      return BATCH_TARGET_SCHEMA;
+    case "selector":
+      return NODE_SELECTOR_SCHEMA;
+    case "array":
+      return { type: "array", minItems: 1, items: field.items ?? {} };
+    case "object":
+      return { type: "object", additionalProperties: false, properties: {}, required: [] };
+  }
+}
+
+interface BatchSchemaObject {
+  type: "object";
+  additionalProperties: false;
+  properties: Record<string, unknown>;
+  required: string[];
+  oneOf?: Array<{ required: string[] }>;
+}
+
+/** 由字段元数据生成操作对象的 JSON Schema（字段与帮助同源）。 */
+function buildBatchOpSchema(spec: BatchOpSpec): Record<string, unknown> {
+  const root: BatchSchemaObject = {
+    type: "object",
+    additionalProperties: false,
+    properties: {},
+    required: [],
+  };
+  const objects = new Map<string, BatchSchemaObject>([["", root]]);
+  const oneOfGroups = new Map<string, string[]>();
+  const objectAt = (segments: readonly string[]): BatchSchemaObject => {
+    const key = segments.join(".");
+    const cached = objects.get(key);
+    if (cached !== undefined) return cached;
+    const parent = objectAt(segments.slice(0, -1));
+    const name = segments[segments.length - 1] as string;
+    const node: BatchSchemaObject = {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+      required: [],
+    };
+    parent.properties[name] = node;
+    objects.set(key, node);
+    return node;
+  };
+  for (const field of spec.fields) {
+    const segments = field.path.split(".");
+    if (segments.length === 1) {
+      root.properties[field.path] = batchFieldSchema(field);
+      if (field.required === true) root.required.push(field.path);
+    } else {
+      const parent = objectAt(segments.slice(0, -1));
+      const name = segments[segments.length - 1] as string;
+      parent.properties[name] = batchFieldSchema(field);
+      if (field.required === true) {
+        parent.required.push(name);
+        // 必填叶子会让整条祖先路径都变成必填。
+        for (let depth = segments.length - 1; depth > 0; depth -= 1) {
+          const ancestor = segments.slice(0, depth);
+          const grand = objectAt(ancestor.slice(0, -1));
+          const key = ancestor[ancestor.length - 1] as string;
+          if (!grand.required.includes(key)) grand.required.push(key);
+        }
+      }
+    }
+    if (field.exactlyOneGroup !== undefined) {
+      const bucket = oneOfGroups.get(field.exactlyOneGroup) ?? [];
+      bucket.push(field.path);
+      oneOfGroups.set(field.exactlyOneGroup, bucket);
+    }
+  }
+  if (oneOfGroups.size > 0) {
+    root.oneOf = [...oneOfGroups.values()].map((group) => ({ required: group }));
+  }
+  return root as unknown as Record<string, unknown>;
+}
 
 const BATCH_OPS_SCHEMA = {
   type: "array",
   minItems: 1,
-  items: {
-    oneOf: [
-      {
-        type: "object",
-        required: ["op", "target"],
-        additionalProperties: false,
-        properties: {
-          op: { const: "edit" },
-          target: BATCH_TARGET_SCHEMA,
-          patch: EDIT_PATCH_SCHEMA,
-        },
-      },
-      {
-        type: "object",
-        required: ["op", "as", "from", "flow", "title", "description"],
-        additionalProperties: false,
-        oneOf: [{ required: ["body"] }, { required: ["bodyFile"] }],
-        properties: {
-          op: { const: "create" },
-          as: { type: "string", description: "本批唯一的局部名称" },
-          from: NODE_SELECTOR_SCHEMA,
-          flow: { enum: ["next", "branch"] },
-          title: { type: "string" },
-          body: { type: "string" },
-          bodyFile: {
-            type: "string",
-            description: "CLI 读取文件内容作为 body（相对输入文件目录）；不发送给服务",
-          },
-          description: { type: "string" },
-          summary: { type: "string" },
-          state: { enum: ["agreed", "proposed", "reference"] },
-          important: { type: "boolean" },
-          side: { enum: ["left", "right"] },
-          order: { type: "integer", minimum: 0 },
-        },
-      },
-      {
-        type: "object",
-        required: ["op", "target", "description"],
-        additionalProperties: false,
-        properties: {
-          op: { const: "connect" },
-          target: BATCH_TARGET_SCHEMA,
-          from: NODE_SELECTOR_SCHEMA,
-          flow: { enum: ["next", "branch"] },
-          description: { type: "string" },
-          side: { enum: ["left", "right"] },
-          order: { type: "integer", minimum: 0 },
-        },
-      },
-      {
-        type: "object",
-        required: ["op", "target", "important"],
-        additionalProperties: false,
-        properties: {
-          op: { const: "important" },
-          target: BATCH_TARGET_SCHEMA,
-          important: { type: "boolean" },
-        },
-      },
-    ],
-  },
+  items: { oneOf: BATCH_OP_SPECS_LIST.map((spec) => buildBatchOpSchema(spec)) },
 } as const;
 
 const BATCH_INPUT: JsonInputSpec = {
@@ -604,14 +998,31 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "edit",
     group: "write",
-    summary: "按在线读取得到的 ref 原位修改一张卡片（标题／状态／摘要／正文）。",
+    summary:
+      "按在线读取得到的 ref 原位修改一张卡片（标题／状态／摘要／正文／入边说明／重要性）。",
     usage: [
-      "aichat edit --ref <ref> [--title <t>] [--state agreed|proposed|reference] [--summary <s>]",
+      "aichat edit --ref <ref> [--title <t>] [--state agreed|proposed|reference]",
+      "            [--summary <s>|--clear-summary] [--important true|false]",
       "            [--body <text>|--body-file <file>|--body-stdin]",
-      "            [--append-file <file>|--replace-file <json>] [--workspace <path>] [--verbose]",
+      "            [--append-file <file>|--replace-file <json>]",
+      "            [--description <why>] [--from-ref <ref> --flow next|branch]",
+      "            [--workspace <path>] [--verbose]",
     ],
     requiredOneOf: [
-      ["title", "state", "summary", "body", "body-file", "body-stdin", "append-file", "replace-file"],
+      [
+        "title",
+        "state",
+        "summary",
+        "clear-summary",
+        "body",
+        "body-file",
+        "body-stdin",
+        "append-file",
+        "replace-file",
+        "important",
+        "description",
+        "from-ref",
+      ],
     ],
     parameters: [
       WORKSPACE,
@@ -619,6 +1030,11 @@ const COMMANDS: readonly CommandSpec[] = [
       stringParameter("title", "新标题"),
       NODE_STATE_PARAMETER,
       EDIT_SUMMARY_PARAMETER,
+      CLEAR_SUMMARY_PARAMETER,
+      EDIT_IMPORTANT_PARAMETER,
+      EDIT_DESCRIPTION_PARAMETER,
+      EDIT_FROM_REF_PARAMETER,
+      EDIT_FLOW_PARAMETER,
       ...BODY_SOURCE_PARAMETERS,
       stringParameter("append-file", "追加片段文件；内容追加到正文末尾", {
         valueName: "<file>",
@@ -632,14 +1048,23 @@ const COMMANDS: readonly CommandSpec[] = [
       ...OUTPUT_PARAMETERS,
     ],
     constraints: [
-      "至少给出 title／state／summary／body 系列／append-file／replace-file 中一项修改。",
+      "至少给出 title／state／summary／--clear-summary／正文模式／--important／--description／--from-ref 中一项修改。",
+      "未给出的字段保持原值；不隐式读取 stdin，只有显式 --body-stdin 才读正文。",
+      "--summary 与 --clear-summary 互斥；--summary 空字符串不表示删除，会报用法错误并提示 --clear-summary。",
+      "--important 必须取 true／false（不用裸开关）；false 明确取消重要标记。",
+      "--from-ref 必须同时给 --flow（next／branch）与 --description；只给 --flow 时保留当前来源、只改关系类型，也必须给 --description。",
+      "--description 单独给出时只调整现有入边说明，不要求重给来源或正文；--flow 只接受 next／branch，不接受 root。",
+      "root 节点没有入边：任何 description／from-ref／flow 修改由服务端整体拒绝（结构错误 422）；不自动改写输入。",
+      "内容、入边说明／来源与重要性在同一个 patchNode 动作、同一次事务提交，不拆成多次调用。",
       "整篇替换、追加、局部替换三种正文模式互斥；append 的空白规范化由 storage 统一处理。",
       "replace-file 的 old 必须非空且唯一匹配；不提供全局替换。",
       ...WRITE_CONSTRAINTS,
     ],
     examples: [
       'aichat edit --ref <ref> --append-file 补充.md --workspace .',
-      'aichat edit --ref <ref> --title "新的标题" --state agreed --workspace .',
+      'aichat edit --ref <ref> --title "新的标题" --important true --workspace .',
+      'aichat edit --ref <ref> --from-ref <ref> --flow branch --description "改接到这里更准确" --workspace .',
+      'aichat edit --ref <ref> --clear-summary --workspace .',
     ],
     result: WRITE_RESULT,
   },
@@ -801,6 +1226,7 @@ const COMMANDS: readonly CommandSpec[] = [
     constraints: [
       "--input 与 --input-stdin 必须且只能给一个。",
       "输入限定一个已存在 topic；不创建主题、不跨主题。",
+      "单操作字段说明用 aichat help batch --op edit|create|connect|important --json；本命令帮助给完整批次结构。",
       "已有节点的 ref 全部按批前快照解释；同节点可分别 edit／connect／important，但同类操作不能重复。",
       "一批只 commit 一次；结构错误 422、占位／语义冲突 409、过期 ref 412，均整体拒绝、不部分落盘。",
       ...WRITE_CONSTRAINTS,
@@ -808,6 +1234,7 @@ const COMMANDS: readonly CommandSpec[] = [
     examples: [
       "aichat batch --input batch.json --workspace .",
       "aichat batch --input-stdin --dry-run --workspace . < batch.json",
+      "aichat help batch --op edit --json",
     ],
     result: {
       fields: [
@@ -1190,18 +1617,36 @@ const COMMANDS: readonly CommandSpec[] = [
       "aichat <command> --help",
       "aichat help <command>",
       "aichat help <command> --json",
+      "aichat help batch --op edit|create|connect|important",
+      "aichat help batch --op edit --json",
       "aichat help --json",
     ],
     positionals: [
       { name: "<command>", required: false, description: "要查看的命令名；省略时显示总目录" },
     ],
-    parameters: [JSON_FLAG, TEXT_FLAG],
+    parameters: [
+      stringParameter(
+        "op",
+        "与 batch 同用：只看 edit／create／connect／important 中一个操作的局部说明",
+        { valueName: "<op>" },
+      ),
+      JSON_FLAG,
+      TEXT_FLAG,
+    ],
     constraints: [
       "帮助是纯本地信息：不解析 --workspace、不连接服务、不需要有效工作区。",
       "未知命令明确失败（退出码 2），不输出半份帮助。",
       "单命令帮助只包含该命令，不附带整份命令大全。",
+      "--op 只与 batch 同用；省略 --op 时输出完整命令说明。",
+      "操作级帮助只含该 op 的字段／约束／示例与下一步，不输出完整 batch schema（不返回 topicId／ops 全量结构）。",
+      "未知 op 或 --op 用于非 batch 命令时退出码 2，并列出可用 op 与 aichat help batch --json。",
     ],
-    examples: ["aichat --help", "aichat batch --help", "aichat help batch --json"],
+    examples: [
+      "aichat --help",
+      "aichat batch --help",
+      "aichat help batch --json",
+      "aichat help batch --op edit --json",
+    ],
     result: {
       fields: [
         "ok",
@@ -1228,7 +1673,7 @@ const COMMANDS: readonly CommandSpec[] = [
     parameters: [...OUTPUT_PARAMETERS],
     constraints: [
       "构建信息缺失时回退 package 版本并标记 manifest=dev；损坏时 manifest=invalid，不抛不可诊断异常。",
-      "接口版本固定为 2；与服务的接口不匹配时由 resolve 阶段报 INTERFACE_MISMATCH。",
+      "接口版本由程序构建身份给出；与服务的接口不匹配时由 resolve 阶段报 INTERFACE_MISMATCH。",
     ],
     examples: ["aichat --version", "aichat version --json"],
     result: {
@@ -1282,6 +1727,7 @@ export function optionSpecsFor(spec: CommandSpec): readonly OptionSpec[] {
     name: parameter.name,
     ...(parameter.boolean === true ? { boolean: true as const } : {}),
     ...(parameter.repeatable === true ? { repeatable: true as const } : {}),
+    ...(parameter.allowEmpty === true ? { allowEmpty: true as const } : {}),
   }));
 }
 

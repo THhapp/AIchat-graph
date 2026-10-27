@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import type { ProgramInfo } from "./shared/protocol.js";
 
 /** 与 CLI／service 对外的接口版本；缺失或不匹配时普通读写报 INTERFACE_MISMATCH。 */
-export const INTERFACE_VERSION = 2;
+export const INTERFACE_VERSION = 3;
 
 /** 对外程序名，也写入 ProgramInfo.program。 */
 export const PROGRAM_NAME = "aichat-graph";

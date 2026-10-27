@@ -33,6 +33,27 @@ describe("帮助（不访问工作区与服务）", () => {
     expect(result.stdout).toContain("interface " + String(INTERFACE_VERSION));
     expect(result.stdout).toContain("aichat <command> --help");
     expect(result.stdout).toContain("aichat help <command> --json");
+
+    // 推荐路径：按任务给一套入口，不在根帮助里罗列等价写法。
+    expect(result.stdout).toContain("Recommended paths");
+    const lines = result.stdout.split("\n");
+    const recommended: Array<[string, string]> = [
+      ["完善一张卡片", "edit"],
+      ["新增纵向后继", "next"],
+      ["新增独立方向", "branch"],
+      ["链中插入", "insert"],
+      ["仅标记重要", "important"],
+      ["仅整理关系", "rearrange"],
+      ["多卡混合修改", "batch"],
+      ["新建主题", "create-topic"],
+    ];
+    for (const [task, command] of recommended) {
+      expect(
+        lines.some((line) => line.includes(task) && line.includes(command)),
+        task,
+      ).toBe(true);
+    }
+    expect(result.stdout).toContain("aichat help batch --op edit --json");
   });
 
   it("aichat <command> --help 只输出该命令，不附整份命令大全", async () => {
@@ -195,6 +216,46 @@ describe("帮助（不访问工作区与服务）", () => {
     expect(notes).toContain("create 的 body 与 bodyFile 恰好给一个");
   });
 
+  it("edit 帮助暴露新参数、单动作原子性与字段级提示入口", async () => {
+    const human = await main(["edit", "--help"], { cwd: NO_WORKSPACE_CWD });
+    expect(human.exitCode).toBe(0);
+    for (const fragment of [
+      "--clear-summary",
+      "--important true|false",
+      "--description",
+      "--from-ref",
+      "--flow next|branch",
+      "Required (at least one):",
+    ]) {
+      expect(human.stdout, fragment).toContain(fragment);
+    }
+    expect(human.stdout).toContain("同一个 patchNode 动作、同一次事务提交");
+
+    const machine = jsonOf(
+      (await main(["help", "edit", "--json"], { cwd: NO_WORKSPACE_CWD })).stdout,
+    );
+    const parameters = machine["parameters"] as Array<Record<string, unknown>>;
+    const important = parameters.find((item) => item["name"] === "--important");
+    expect(important).toMatchObject({ type: "enum", values: ["true", "false"] });
+    const clearSummary = parameters.find((item) => item["name"] === "--clear-summary");
+    expect(clearSummary?.conflicts).toContain("--summary");
+    const fromRef = parameters.find((item) => item["name"] === "--from-ref");
+    expect(fromRef?.requires).toEqual(["--flow", "--description"]);
+    const flow = parameters.find((item) => item["name"] === "--flow");
+    expect(flow).toMatchObject({ values: ["next", "branch"], requires: ["--description"] });
+    const constraints = (machine["constraints"] as string[]).join("\n");
+    expect(constraints).toContain("同一个 patchNode 动作");
+    expect(constraints).toContain("不隐式读取 stdin");
+
+    // batch 完整帮助指明操作级帮助入口，且不混淆为 --op 属于 batch 参数。
+    const batch = jsonOf(
+      (await main(["help", "batch", "--json"], { cwd: NO_WORKSPACE_CWD })).stdout,
+    );
+    expect((batch["constraints"] as string[]).join("\n")).toContain(
+      "aichat help batch --op edit|create|connect|important --json",
+    );
+  });
+
   it("read usage 把 --from-heading／--occurrence 与 --meta 拆成独立行", async () => {
     const machine = await main(["help", "read", "--json"], { cwd: NO_WORKSPACE_CWD });
     expect(machine.exitCode).toBe(0);
@@ -306,6 +367,118 @@ describe("帮助（不访问工作区与服务）", () => {
     expect(human.stdout).toContain("空工作区");
     expect(human.stdout).toContain("第二根");
     expect(human.stdout).not.toContain("目标主题必须已存在");
+  });
+
+
+  it("help batch --op <op> 给局部说明，不输出完整 batch schema", async () => {
+    for (const op of ["edit", "create", "connect", "important"]) {
+      const human = await main(["help", "batch", "--op", op], { cwd: NO_WORKSPACE_CWD });
+      expect(human.exitCode, op).toBe(0);
+      expect(human.stdout, op).toContain("aichat batch --op " + op);
+      expect(human.stdout, op).toContain("Fields:");
+      expect(human.stdout, op).toContain("Example:");
+      expect(human.stdout, op).not.toContain("topicId");
+
+      const machine = jsonOf(
+        (await main(["help", "batch", "--op", op, "--json"], { cwd: NO_WORKSPACE_CWD })).stdout,
+      );
+      expect(machine["ok"], op).toBe(true);
+      expect(machine["command"], op).toBe("batch");
+      expect(machine["op"], op).toBe(op);
+      expect(machine["group"], op).toBe("write");
+      expect(machine["interfaceVersion"], op).toBe(INTERFACE_VERSION);
+      expect(typeof machine["programVersion"], op).toBe("string");
+      expect(typeof machine["summary"], op).toBe("string");
+      expect(Array.isArray(machine["fields"]), op).toBe(true);
+      expect(Array.isArray(machine["constraints"]), op).toBe(true);
+      expect(Array.isArray(machine["next"]), op).toBe(true);
+      // 操作级帮助不含完整 batch schema。
+      expect(machine["input"], op).toBeUndefined();
+      expect(machine["schema"], op).toBeUndefined();
+      const wire = JSON.stringify(machine);
+      expect(wire, op).not.toContain('"topicId"');
+      expect(wire, op).not.toContain('"ops"');
+      expect((machine["example"] as Record<string, unknown>)["op"], op).toBe(op);
+    }
+
+    const edit = jsonOf(
+      (await main(["help", "batch", "--op", "edit", "--json"], { cwd: NO_WORKSPACE_CWD })).stdout,
+    );
+    const editFields = edit["fields"] as Array<Record<string, unknown>>;
+    expect(editFields.find((field) => field["path"] === "target")).toMatchObject({
+      type: "ref",
+      required: true,
+    });
+    expect(editFields.find((field) => field["path"] === "patch.bodyFile")).toMatchObject({
+      type: "string",
+      required: false,
+    });
+
+    const create = jsonOf(
+      (await main(["help", "batch", "--op", "create", "--json"], { cwd: NO_WORKSPACE_CWD })).stdout,
+    );
+    const createFields = create["fields"] as Array<Record<string, unknown>>;
+    const bodyField = createFields.find((field) => field["path"] === "body");
+    expect(bodyField?.["exactlyOneWith"]).toEqual(["bodyFile"]);
+  });
+
+  it("--op 只与 batch 同用；未知 op 明确失败并列出可用 op", async () => {
+    const wrongCommand = await main(["help", "read", "--op", "edit", "--json"], {
+      cwd: NO_WORKSPACE_CWD,
+    });
+    expect(wrongCommand.exitCode).toBe(2);
+    expect(wrongCommand.stdout).toBe("");
+    const wrong = JSON.parse(wrongCommand.stderr) as { error: { message: string } };
+    expect(wrong.error.message).toContain("--op 只能与 batch 同用");
+    expect(wrong.error.message).toContain("edit／create／connect／important");
+    expect(wrong.error.message).toContain("aichat help batch --json");
+
+    const unknown = await main(["help", "batch", "--op", "remove", "--json"], {
+      cwd: NO_WORKSPACE_CWD,
+    });
+    expect(unknown.exitCode).toBe(2);
+    const unknownError = JSON.parse(unknown.stderr) as { error: { message: string } };
+    expect(unknownError.error.message).toContain("未知 batch 操作");
+    expect(unknownError.error.message).toContain("edit／create／connect／important");
+    expect(unknownError.error.message).toContain("aichat help batch --op edit --json");
+  });
+
+  it("操作级帮助字段与 batch schema 同源（路径集合一致）", async () => {
+    const full = jsonOf(
+      (await main(["help", "batch", "--json"], { cwd: NO_WORKSPACE_CWD })).stdout,
+    );
+    const schema = (full["input"] as Record<string, unknown>)["schema"] as Record<string, unknown>;
+    const schemaProperties = schema["properties"] as Record<string, Record<string, unknown>>;
+    const opsSchema = schemaProperties["ops"] as Record<string, unknown>;
+    const items = opsSchema["items"] as Record<string, unknown>;
+    const opSchemas = items["oneOf"] as Array<Record<string, unknown>>;
+    expect(opSchemas).toHaveLength(4);
+
+    const flatten = (node: Record<string, unknown>, prefix: string): string[] => {
+      const result: string[] = [];
+      const properties = node["properties"] as Record<string, Record<string, unknown>> | undefined;
+      if (properties === undefined) return result;
+      for (const [key, value] of Object.entries(properties)) {
+        const path = prefix === "" ? key : prefix + "." + key;
+        result.push(path);
+        // target／from 是 {ref}／{ref,local} 选择对象；帮助把它们当作单字段。
+        if (value["type"] === "object" && key !== "target" && key !== "from") {
+          result.push(...flatten(value, path));
+        }
+      }
+      return result;
+    };
+
+    for (const [index, op] of ["edit", "create", "connect", "important"].entries()) {
+      const machine = jsonOf(
+        (await main(["help", "batch", "--op", op, "--json"], { cwd: NO_WORKSPACE_CWD })).stdout,
+      );
+      const helpPaths = (machine["fields"] as Array<Record<string, unknown>>)
+        .map((field) => field["path"])
+        .sort();
+      const schemaPaths = flatten(opSchemas[index] as Record<string, unknown>, "").sort();
+      expect(helpPaths, op).toEqual(schemaPaths);
+    }
   });
 });
 
