@@ -1,106 +1,159 @@
 # 开发与工程约束
 
-本文是工程与验证约束；产品、命令和 Agent 协作分别见 README、[程序 CLI 手册](docs/cli.md) 和 [Skill](skills/aichat-graph/SKILL.md)。
+产品见 [README](README.md)，程序命令见 [CLI 手册](docs/cli.md)，
+协作记录方法见 [Skill](skills/aichat-graph/SKILL.md)。本文件按任务查阅。
 
 ## 文档维护边界
 
-- 先读 README 了解产品；本文件按任务查阅，不要求每次全读。
-- 文档按职责维护，不复制产品命令表。主控负责设计、调度、集成、验收和收尾文档；实现者只改任务授权文件。
-- 不按轮次新增 REPORT、HANDOFF、状态副本或历史备份；移动或删除文档时检查源码注释和入链。
-- 公开仓库不得含本机用户名、私人绝对路径、真实用户内容、凭据或本机运行配置。
-- AGENTS.md 的协作规则只留本机，不上传公开仓库。
+| 文档 | 职责 |
+| --- | --- |
+| README.md | 产品、开始使用、限制、隐私与许可入口 |
+| docs/workspace.md | 工作区位置、配置、成品与旧资料一次导入 |
+| docs/cli.md | 程序独立的 CLI 使用手册 |
+| DEVELOPMENT.md | 工程操作、模块边界和实现约束 |
+| skills/aichat-graph/ | 协作方法与随 Skill 分发的独立命令参考 |
+| 本机 AGENTS.md | 个人角色、调度、授权与停止规则 |
+
+程序手册与 Skill 命令参考分别自足，允许重复接口事实，各自服务其读者。
+安装与快照维护不进入每轮讨论流程；Skill 方法不作为程序存储格式校验。
+只更新实际受影响的文档，不新增逐轮 REPORT、HANDOFF、状态副本或历史备份。
+移动文件时检查入链含义；本机路径、配置和真实资料不进入公开仓库。
+根目录 AGENTS.md 及私有设计笔记仍留本机。
 
 ## 开发与固定运行版本
 
-环境以 package.json 的 engines 和锁文件为准，统一用 npm ci。已验证 Node.js 24.17.0、npm 11.13.0；node:sqlite 在这个 Node 版本是 release candidate，项目不承诺旧 Node。
+环境以 package.json 和锁文件为准。当前为 Node.js 24.17.0、npm 11.13.0；
+node:sqlite 使用该版本自带实现，不要求额外数据库驱动。
 
-| 用途 | 程序位置 | 资料与配置 | Windows 入口 |
+| 用途 | 程序 | 资料与配置 | 入口 |
 | --- | --- | --- | --- |
-| 源码开发 | 仓库 src/、dist/ | .local/development-workspace、独立本机配置 | start-dev.cmd，4318 |
-| 固定版本 | .local/daily、独立运行依赖 | 仓库外资料库、launcher.local.json | start.cmd，4317 |
+| 开发 | 仓库 src/、dist/ | .local/development-workspace、独立开发配置 | start-dev.cmd，4318 |
+| 日用 | .local/daily 固定构建 | 仓库外资料库、launcher.local.json | start.cmd，4317 |
 
-固定版本是本机构建快照，不是源码分支或安装包；源码变化不自动更新它，讨论资料不复制进去。两套配置互不继承，开发入口拒绝与已绑定正式库相同或相互包含的目录。
+~~~powershell
+npm ci
+./start-dev.cmd
+~~~
 
-    npm ci
-    ./start-dev.cmd
-    # -NoBrowser 只启动服务；-Help 查看选项
+-NoBrowser 可只启动服务。启动器复用已运行的匹配服务，不因源码变化自动替换它。
+试用新代码时先停止开发服务，再运行开发入口；正式日用可继续使用。
+开发库不能与正式库相同或相互包含。
 
-启动器发现同一测试库已有同接口服务时直接复用。试用源码改动时先停开发服务窗口，再运行 start-dev.cmd；日用窗口可继续运行。update-daily 只在构建完成且服务停止时执行；不能强停其他进程。
+源码构建不自动更新日用。更新顺序是：完成改动与必要检查 → npm run build →
+停止日用服务 → update-daily.cmd → 启动日用，再同步已安装 Skill。
+更新器不迁移讨论资料，不强停其他进程，准备失败保留原程序快照。
+
+CLI 的默认目录来自本程序 .aichat/default.json；Windows 启动器有自己的本机配置，
+两者目前不自动同步。开发与临时命令显式传工作区，避免继承日用默认值。
+当前快照更新器也不接受日用根新增的 .aichat/default.json 目录；
+因此固定版的 CLI 默认配置尚不能完整衔接更新流程，日用调用宜显式传目录。
+这是现有接入限制，不应通过直接删除用户配置绕过。
 
 ## 模块与数据流
 
-- src/next/protocol.ts、model.ts、store.ts、read.ts 是当前领域、SQLite 边界和读取投影的核心；interfaceVersion 由 build-info 统一报告为 4。
-- CLI 的命令、参数、help 和错误模型在 src/next/args.ts、cli.ts、client.ts、config.ts；凭据、写入动作和读取结果与协议共享类型。
-- 本机服务在 src/next/server.ts、runtime.ts：打开 GraphStore，持有 instanceId 和 SSE，写/删 descriptor，协调导出；没有源 MD watcher、writer.lock 或文件事务恢复。
-- HTML 导出在 src/next/export.ts；领域文档直接来自 GraphStore 快照，复用 src/export 的 render/capture/reader 资源。
-- 旧 V2 文件只为 src/next/import.ts 一次性读取保留；正常 CLI、服务和读取链不导入旧解析器。
+| 模块 | 职责 |
+| --- | --- |
+| src/next/protocol.ts、model.ts | 领域记录、输入输出、图校验和编号 |
+| src/next/store.ts | SQLite、最终候选、差异提交与请求结果 |
+| src/next/read.ts | overview / structure / content / resume、预算与游标 |
+| src/next/cli.ts、args.ts、client.ts、config.ts | 命令、帮助、输入、服务接入和工作区定位 |
+| src/next/server.ts、runtime.ts | 本机 HTTP / SSE、服务描述、发布和导出调度 |
+| src/next/export.ts、src/export/ | 领域成品、资源捕获和独立 HTML 封装 |
+| src/web/ | 实时及离线阅读组件、布局和视口状态 |
+| src/next/import.ts | 旧 V2 资料的一次性导入 |
 
-主进程可以同时打开一个 GraphStore 写连接；SQLite WAL、BEGIN IMMEDIATE 和 busy timeout 负责本地串行。无多进程写锁；后启动实例覆盖 descriptor，先启动实例停止时只清理自己的描述文件。
+读取直接打开同一 SQLite；普通写入通过本机服务进入统一 GraphStore.commit。
+成功提交后广播 SSE 并安排成品更新；没有源 MD watcher、文件事务或 writer.lock。
+SQLite WAL、BEGIN IMMEDIATE 和 busy timeout 协调数据库写入。
+当前没有多实例通知机制，日常使用维持一个服务；不把“可打开多个连接”当作协同能力。
+
+旧解析模块仅供导入使用，不能再接回正常读写链。
+Markdown AST 章节读取、正文渲染及确有调用者的 IO / 资源辅助仍保留。
 
 ## 存储与版本
 
-workspace 目录：
+工作区由 graph.sqlite、resources/ 和 .aichat/ 下的本机状态组成。
+数据库包含 meta、workspace、topics、nodes、requests：
+workspace 保存身份及总 revision；topics 保存 key、标题、版本和各自最近一批；
+nodes 保存正文、摘要、状态、连接、重要性及节点版本；
+requests 保存有限的请求结果，用于幂等和 status。
 
-    graph.sqlite
-    resources/
-    .aichat/runtime/service.json
-    .aichat/local/exports.json
+- 节点真实变化才增加其 revision；重要性变化也增加，但不替换内容更新集合。
+- 主题和工作区版本随实际变化更新；noop 不增加；服务重启不重置持久版本。
+- summary 为 null 表示没有显式摘要，读取时按正文首段派生。
+- 编号、坐标和 children 是派生值；side 只保留已有元数据，界面统一向右。
+- schemaVersion 为数据库格式版本，interfaceVersion 为 CLI / 服务协议版本，两者独立。
 
-graph.sqlite 表：workspace、topics、nodes、requests。workspace 有持久 workspaceId、name、activeNode、revision；topics 有稳定 topicId、key、title、revision、last_change_at/last_change_ids；nodes 有稳定 nodeId、topicId、title、body、可空显式 summary、state、from、flow、description、side、order、important、revision；requests 保存 requestId、请求体哈希、最终结果和状态。
+## 写入、读取与提交边界
 
-- node revision 只在该节点真实变化时递增；重要性变化也递增，但不进入最近内容更新。
-- topic revision 只在该主题节点或主题标题变化时递增；workspace revision 只在有真实提交时递增。
-- 服务重启不重置任何 revision；无关主题不使其他节点失效。
-- 显式 summary 为空用 null 表示，读取时沿用从正文首段派生的摘要；不把派生摘要写成显式摘要。
-- 编号、坐标、children、布局缓存不进入主存储；side 作为既有元数据保留，不恢复左右布局。
-- 数据库 schemaVersion 独立于程序版本和 interfaceVersion，目前为 1；本轮从 Markdown 一次导入，不建设旧数据库迁移平台。
+单卡与 batch 使用同一 NodePatch：内容、状态、摘要、important 和 incoming。
+已有节点按调用者提供的 id / revision 检查，不能预读最新值静默覆盖。
+important 的独立设值允许仅给节点 ID；给版本时则检查版本。
 
-## Agent 写入与读取边界
+候选一次表达最终结构，校验独立主题、唯一 root / next、无环、无自连和无跨主题父边。
+insert 要求真实相邻；delete 只删最终叶卡且不删 root；不自动挤走未声明的 next。
+正文 body / append / replace 互斥，片段替换必须唯一命中；summary:null 清除显式摘要。
 
-单卡 edit 与 batch edit 共用 NodePatch：title、state、summary（null 清除）、body、append、replace、important、incoming（from/flow/description/order）。所有节点修改使用读取所得的 {id,revision}；服务不能预读最新版本静默代填旧修改。
+GraphStore.commit 在同一事务保存节点差异、版本、每主题最近一批和请求响应。
+普通写入按 ID 执行 INSERT / UPDATE / DELETE，不重建全库；全量导入仅留在 importState。
+最终值没有变化时为 noop，业务行不写。仅重要性、纯删除和被动编号不替换最近内容更新，
+删除时移除集合中已不存在的节点。
 
-写入动作包括 createTopic、createNext/createBranch、batch（edit/create/delete）、insert、rearrange、setImportance、delete。最终候选在同一事务校验并写入：唯一 root、唯一 next、无环、同主题、不可自连、不可跨主题；删除只允许叶卡，root 不可删。不得自动挤掉已有 next 后继。
+成功响应的 revision 是工作区版本，nodeRevisions 给实际目标的持久节点版本，
+可直接用于下一次写入；新建、修改和 noop 的目标均适用，删除节点省略。
+映射随响应保存，幂等重放不拼入最新版本；dry-run 不伪造提交后版本。
+insert 的 after 仅为相邻前置条件，不作为修改目标返回。
 
-batch 支持话题内 edit/create/delete 与 local 别名；insert 只接受当前真实相邻 after→before；rearrange 表达最终连接；dry-run 只返回 checked/changes。请求按 requestId+请求体哈希幂等；同 id 不同请求体 409；请求结果存 requests 表。
+事务内不夹 HTTP、模型调用或 HTML 渲染。提交成功后通知 / 导出失败不能声称数据回滚。
+请求结果有限保留，status=unknown 不等于写入失败，不能据此盲目重发。
 
-读取视图 overview/structure/content/resume 都是同一快照上的纯投影。content 的正文按 UTF-16 安全切片；cursor 绑定相关节点 revision，变化后返回 409 STALE_READ。resume 只给 anchor 正文、必要来路、直接邻居和少量 important/最近节点，不倾倒全图，不生成模型摘要。
+读取视图共用预算和正文切片，预算计入整次序列化输出。
+当前 cursor 指纹包含主题 revision 和所选节点版本：同主题变化可能使其过期，
+其他主题变化不影响。此规则与单卡写入版本检查分别处理。
+resume 优先给 anchor 正文，来路和邻居为摘要级；较长内容按预算续读，不生成模型摘要。
 
-## 事务、SSE 与导出
+## 阅读器与导出
 
-GraphStore.commit 在一个 BEGIN IMMEDIATE 中完成候选计算、校验、revision、最近更新和持久化；失败整体回滚。是否提交由 before/candidate 的最终字段差异决定，rearrange 写入相同最终值时为 noop。正常提交按 ID 差异写库：新节点/主题 INSERT、真实变化 UPDATE ... WHERE id、缺失行 DELETE ... WHERE id；未变化的节点和主题不写。全表重建只保留在一次性 importState。成功响应同时返回工作区 revision 与 nodeRevisions（nodeId → 持久节点版本；新建、真实修改、明确操作且仍存在的目标；删除省略；replay 原样；dry-run 不伪造），调用方可直接拿它继续写。提交成功后 runtime 计算受影响主题，广播 snapshot SSE，并调度导出。
+保留现有主线、分支、卡片、连线、目录、重要性、最近更新和阅读位置。
+Web 接收领域 DTO，不查询 SQL，也不依赖源 MD 路径、哈希或源码范围。
+实例身份只用于服务连接等运行状态，不决定节点版本有效性。
 
-导出用同一已提交快照组装 OfflineTopicDocument；目标从 .aichat/local/exports.json 读取。要求：
+资源由 resources/... 键定位；内部链接为 `aichat:node/<id>`，
+外部链接和 Markdown 保留现有渲染边界。
+实时资源使用同源 URL，离线成品内联资源；不额外抓取远程图片。
 
-- 目标只能是工作区与应用根之外的绝对 .html；拒绝符号链接逃逸、目录、UNC/设备路径和无关已有文件。
-- 先计算、后写盘；同一路径原子替换，失败保留旧成品，外部改动拒绝覆盖。
-- 解绑只删配置，不删已有成品；资源只从 workspace/resources 读取并内联 data URI。
-- 独立 HTML 完整自包含；实时页面和离线页面共用现有布局与阅读组件。
+导出目标保存在 .aichat/local/exports.json，由页面选择：
+目标位于工作区与应用根之外，保存完整主题；取消绑定不删除文件。
+沿用先生成后替换、失败保留旧文件、拒绝覆盖外部改动和安全资源处理。
+没有绑定时不生成 HTML；独立文件不会主动联网刷新。
 
-## 前端排版规则
+## 文档与 Skill 分发
 
-保留既有主题目录、主线/分支、卡片、连线、标签、重要标记、最近更新、阅读位置、折叠和独立 HTML 视觉。Web 只依赖领域 DTO（GraphNode/GraphTopic/详情 body/revision/resources），不依赖 SQLite、文件路径、文件哈希或源码 ranges。
+~~~powershell
+pwsh scripts/install-skill.ps1 -Daily -Host codex
+pwsh scripts/install-skill.ps1 -Daily -Host workbuddy
+~~~
 
-- 每个主题 root 在最左；next 向下；branch 向右；同一来源多个分支右侧上下排列并共用干线。
-- 标题完整显示；连接说明在自己的支线旁；编号由服务派生，不用于 ID。
-- 正文 Markdown 支持代码、表格、公式、受限本地图片；链接只解释 #anchor、http(s)、aichat:node/<id> 和 resources/ 键，不把任意相对文件路径当可读文件。
-- 详情显示主题 key、节点 revision 和数据来源；不显示源 MD 路径或哈希。
-- 实时和离线资源映射分开：实时是同源 /api/resources URL，离线是内联 data URI；不在浏览器发起任意网络请求。
+日用更新与宿主同步是独立操作。安装器同步通用文件，默认保留 local.env.json；
+其中 cli 应指向真实 JS 入口 dist/next/cli.js，不再转换旧入口。
+需要修正安装位置时只修改实际需要的配置字段，不能为保留失效值添加兼容层。
 
-## 验证与交付
+程序手册和 Skill 参考必须对应实际运行接口。
+只更新说明不会升级 CLI；文件已同步也不证明宿主已重新加载。
+纯文档 / Skill 指引调整可同步其文本，不替换运行中的 dist 或中断服务。
 
-按实际改动选择验证，优先复用现有测试：
+## 检查与交付
 
-- 领域 / store：npx vitest run tests/next/import.test.ts tests/next/server.test.ts；新规则补针对性测试。
-- CLI：npx vitest run tests/next/cli.test.ts；真实命令在临时库执行 init/topics/create-topic/edit/read/resume/status。
-- Web：npm run typecheck:web、npx vitest run tests/web、npm run build:web。
-- 导出：npx vitest run tests/next/export.test.ts；真实服务绑定临时 .html，改内容后确认自动重建且失败保留旧成品。
-- 全量构建：npm run typecheck（node）与 npm run build；需要更完整回归时再跑全量 vitest。
+以构建和集成为主，按改动复用现有检查：
+核心 store / CLI 在 tests/next，阅读器在 tests/web，布局在 tests/layout。
+有具体缺陷或关键规则缺口再补最小回归，不把独立审查和材料清单设为固定交付。
 
-不追求覆盖率、全故障矩阵、哈希清单或截图材料；正文保真、版本冲突、导入完整性、导出失败保留等关键新规则必须有具体检查。主控核对真实文件和命令结果，不以子任务结论代替验收。
+源码改动收尾通常使用 npm run typecheck、受影响测试和 npm run build；
+依赖变化沿用 notices 生成与检查。文档整理只需核对真实命令、示例和链接。
+通过后停止，不为证明稳定性重复全量运行、生成哈希清单或截图矩阵。
 
 ## 开源分发
 
-- 仓库含源码和 Skill；不提交 .local/、*.local.json、依赖、dist 或本机配置。
-- 根 aichat.cmd 指向 dist/next/cli.js；固定版本目录由 daily-snapshot 复制新入口、docs/cli.md 和 aichat.cmd。
-- 本机 Codex/WorkBuddy 安装副本安装前先更新日用构建；新版 Skill 不指向旧版 CLI。
-- Git 提交和推送到既有 origin/main 需在正常验证后进行；不强推、不改远程、不建正式 Release。
+项目使用 MIT，依赖和字体原文通过既有声明生成器汇集。
+不提交 .local/、本机配置、dist、依赖或真实资料。
+按本机约定正常提交推送到既有远程，不强推、不改远程、不自动发布 Release。
