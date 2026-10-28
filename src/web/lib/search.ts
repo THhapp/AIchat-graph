@@ -1,4 +1,4 @@
-import type { GraphNode, GraphResponse, GraphTopic } from '../../shared/protocol.js';
+import type { GraphNode, GraphResponse, GraphTopic } from '../../next/protocol.js';
 
 export interface SearchResults {
   nodes: GraphNode[];
@@ -15,7 +15,7 @@ export function searchGraph(graph: GraphResponse, rawQuery: string): SearchResul
     return haystack.includes(query);
   });
   const topics = graph.topics.filter((topic) => {
-    return (topic.title + ' ' + topic.path).toLocaleLowerCase('zh-CN').includes(query);
+    return (topic.title + ' ' + topic.key).toLocaleLowerCase('zh-CN').includes(query);
   });
   return { nodes: nodes.slice(0, 60), topics: topics.slice(0, 20), trimmed: rawQuery.trim() };
 }

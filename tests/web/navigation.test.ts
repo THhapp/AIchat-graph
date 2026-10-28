@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { GraphNode, GraphResponse, WorkspaceResponse } from '../../src/shared/protocol.js';
+import type { GraphNode, GraphResponse, WorkspaceResponse } from '../../src/next/protocol.js';
 import {
   emptyReadingState,
   leftPanelOpenFor,
@@ -16,14 +16,14 @@ import {
 } from '../../src/web/data/readingState.js';
 import { hiddenTreeCounts, treeChildCounts, visibleTreeNodes } from '../../src/web/components/directoryTree.js';
 import { buildGraphView } from '../../src/web/graph/viewModel.js';
-import { absoluteWorkspacePath, buildLocateText } from '../../src/web/lib/locate.js';
+import { buildLocateText } from '../../src/web/lib/locate.js';
 import { recentNodeIds } from '../../src/web/lib/recent.js';
 import { importanceErrorMessage, importanceOf } from '../../src/web/lib/importance.js';
 import { ApiError } from '../../src/web/data/client.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string, topicId = 't_1'): GraphNode {
   return {
-    id, topicId, title, summary: title + ' 摘要', number, from, flow, state: 'agreed', important: false,
+    id, topicId, title, summary: title + ' 摘要', number, from, flow, state: 'agreed', important: false, revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, order: 10 } : {}),
   };
 }
@@ -49,8 +49,8 @@ const graph: GraphResponse = {
   diagnostics: [],
   nodes: [...tree, node('nX', null, 'root', '01', '另一个主题', 't_2')],
   topics: [
-    { id: 't_1', title: '协作方式', path: 'topics/协作方式/topic.md', nodeIds: tree.map((item) => item.id), fileHash: 'aaa' },
-    { id: 't_2', title: '记录的分寸', path: 'topics/记录的分寸/topic.md', nodeIds: ['nX'], fileHash: 'bbb' },
+    { id: 't_1', key: '协作方式', title: '协作方式', nodeIds: tree.map((item) => item.id), revision: 4 },
+    { id: 't_2', key: '记录的分寸', title: '记录的分寸', nodeIds: ['nX'], revision: 2 },
   ],
 };
 
@@ -214,36 +214,32 @@ describe('card locator', () => {
     agentEntry: { cliPath: 'D:/daily/dist/cli/index.js', skillPath: 'D:/daily/skills/aichat-graph/SKILL.md' },
   };
 
-  it('writes the ids, the real node file and the entry paths', () => {
-    const target = { ...tree[1]!, sourcePath: 'topics/协作方式/n_06.md' };
-    const text = buildLocateText({ workspace, graph, topic: graph.topics[0]!, node: target });
+  it('writes the stable ids, revisions and the actual entry paths', () => {
+    const text = buildLocateText({ workspace, graph, topic: graph.topics[0]!, node: tree[1]! });
     expect(text.split('\n')).toEqual([
-      '工作区：示例库（D:\\vault\\示例）  workspaceId=w_1',
-      'topicId=t_1  nodeId=n06',
-      '源文件：D:\\vault\\示例\\topics\\协作方式\\n_06.md',
+      '工作区：示例库  workspaceId=w_1',
+      '主题：协作方式  topicId=t_1  r4',
+      '节点：06 排版约定  nodeId=n06  revision=1',
+      '快照：inst / r7',
       'CLI：D:/daily/dist/cli/index.js   Skill：D:/daily/skills/aichat-graph/SKILL.md',
       '当前：06 排版约定',
     ]);
   });
 
-  it('says which files are missing instead of inventing paths', () => {
+  it('states the missing entry paths instead of inventing a file path', () => {
     const text = buildLocateText({ workspace: { ...graph, name: '库', rootPath: '/srv/vault' }, graph, topic: graph.topics[0]!, node: tree[1]! });
-    expect(text).toContain('源文件：未提供该节点的独立源文件；主题文件 /srv/vault/topics/协作方式/topic.md');
+    expect(text).toContain('工作区：库  workspaceId=w_1');
     expect(text).toContain('CLI：使用与本服务同版本的入口   Skill：使用与本服务同版本的入口');
     expect(text).not.toContain('D:/daily');
+    expect(text).not.toContain('/srv/vault');
+    expect(text).not.toContain('源文件');
   });
 
   it('never leaks body text or another topic', () => {
-    const text = buildLocateText({ workspace, graph, topic: graph.topics[0]!, node: { ...tree[1]!, sourcePath: 'topics/a.md' } });
+    const text = buildLocateText({ workspace, graph, topic: graph.topics[0]!, node: tree[1]! });
     expect(text).not.toContain('摘要');
     expect(text).not.toContain('另一个主题');
     expect(text).not.toContain('t_2');
-  });
-
-  it('joins paths with the separator the root actually uses', () => {
-    expect(absoluteWorkspacePath('D:\\vault\\', 'topics/a.md')).toBe('D:\\vault\\topics\\a.md');
-    expect(absoluteWorkspacePath('/srv/vault/', 'topics/a.md')).toBe('/srv/vault/topics/a.md');
-    expect(absoluteWorkspacePath('/srv/vault', '/topics/a.md')).toBe('/srv/vault/topics/a.md');
   });
 });
 

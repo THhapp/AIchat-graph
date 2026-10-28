@@ -5,7 +5,7 @@ import type {
   NodeDetailResponse,
   OfflineTopicDocument,
   TopicDetailResponse,
-} from '../../shared/protocol.js';
+} from '../../next/protocol.js';
 
 export interface OfflineDetailView {
   nodeDetail: NodeDetailResponse | null;
@@ -28,7 +28,9 @@ export interface OfflineDetailInput {
 /**
  * Detail body for the selected offline tab. The exported document is already the
  * frozen snapshot, so this only projects it into the same response shapes the
- * detail panel reads; it never fetches, retries or writes.
+ * detail panel reads; it never fetches, retries or writes. The frozen resource
+ * map is attached to both detail kinds: in the offline reader it holds inline
+ * data URIs, exactly what MarkdownBody can render without a network.
  */
 export function deriveOfflineDetails(input: OfflineDetailInput): OfflineDetailView {
   const { graph, doc, bodies, tab, node, topic } = input;
@@ -45,28 +47,26 @@ export function deriveOfflineDetails(input: OfflineDetailInput): OfflineDetailVi
       topicDetail: {
         instanceId: graph.instanceId,
         revision: graph.revision,
-        source: 'snapshot',
+        source: 'database',
         valid: true,
         topic: topic ?? doc.topic,
-        raw: '',
-        fileHash: doc.topic.fileHash,
         nodes,
         diagnostics: graph.diagnostics,
+        resources: doc.resources,
       },
       detailVersion,
     };
   }
 
   if (node === null) return EMPTY;
+  const frozen = doc.nodes.find((item) => item.id === node.id);
   return {
     nodeDetail: {
       instanceId: graph.instanceId,
       revision: graph.revision,
       node,
-      body: bodies.get(node.id) ?? '',
-      topicId: node.topicId,
-      path: topic?.path ?? '',
-      fileHash: topic?.fileHash ?? '',
+      body: bodies.get(node.id) ?? frozen?.body ?? '',
+      resources: doc.resources,
     },
     topicDetail: null,
     detailVersion,

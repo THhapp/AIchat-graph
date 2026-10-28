@@ -93,7 +93,7 @@ export function AppBanners(props: AppBannersProps): React.JSX.Element {
       {props.stale ? (
         <div className="banner banner--stale" role="status">
           <span className="banner__text">
-            <strong>显示上一份有效内容。</strong> 磁盘上的源文件当前不合法或无法读取，图与详情来自同一份有效快照，不是当前磁盘事实。
+            <strong>显示上一份有效内容。</strong> 图与详情来自同一份有效快照，可能不是最新写入结果。
           </span>
           <button type="button" onClick={props.onRefresh}>重新检查</button>
         </div>

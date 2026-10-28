@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { GraphNode, ImportanceRequest, ImportanceResponse } from '../../shared/protocol.js';
+import type { GraphNode, ImportanceRequest, ImportanceResponse } from '../../next/protocol.js';
 import { ApiError, errorMessage, requestJson } from '../data/client.js';
 
-/** The flag is a source field; the reader only ever reads it. */
+/** The flag is a domain field; the reader only ever reads it. */
 export function importanceOf(node: Pick<GraphNode, 'important'> | null | undefined): boolean {
   return node?.important === true;
 }
 
 /**
- * POST /api/importance. Same transport shape as the existing export writes
- * (`src/web/data/exports.ts`): JSON body, the client header the service requires
- * on writes, and `ApiError` carrying the service error code and status.
+ * POST /api/importance. Same transport shape as the export writes: JSON body and
+ * the client header the service requires on writes; ApiError carries the service
+ * error code and status.
  */
 export async function writeImportance(request: ImportanceRequest, signal: AbortSignal): Promise<ImportanceResponse> {
   const body = await requestJson<Partial<ImportanceResponse>>('/api/importance', {
@@ -24,7 +24,7 @@ export async function writeImportance(request: ImportanceRequest, signal: AbortS
       topicId: request.topicId,
       nodeId: request.nodeId,
       important: request.important,
-      ...(request.expectedHash !== undefined ? { expectedHash: request.expectedHash } : {}),
+      ...(request.revision !== undefined ? { revision: request.revision } : {}),
     },
   });
   if (typeof body !== 'object' || body === null || body.node === undefined) {
@@ -44,10 +44,10 @@ export function importanceErrorMessage(error: unknown): string {
     if (error.status === 412 || error.code === 'VERSION_CONFLICT' || error.code === 'STALE_SNAPSHOT') {
       return '内容已变化，需要重新读取这张卡片后再设置重要性。';
     }
-    if (error.status === 409 || error.code === 'NOT_FOUND') {
+    if (error.status === 404 || error.code === 'NODE_NOT_FOUND' || error.code === 'NOT_FOUND') {
       return '这张卡片已不存在（可能被删除），请刷新后重试。';
     }
-    if (error.status === 400 || error.code === 'BAD_REQUEST' || error.code === 'VALIDATION_FAILED') {
+    if (error.status === 400 || error.status === 422 || error.code === 'BAD_REQUEST' || error.code === 'VALIDATION_FAILED') {
       return '设置被拒绝：' + error.message;
     }
     if (error.code === 'NETWORK') return '无法连接到本地服务，重要性未改变。';
@@ -72,10 +72,10 @@ export interface ImportanceState {
   /** Latest failed write, if any; independent from the current selection. */
   error: ImportanceError | null;
   /**
-   * Writes one node's flag. `expectedHash` is optional: the detail panel supplies
-   * the body hash it actually displayed, a card operation submits without one.
+   * Writes one node's flag. `revision` is optional: the detail panel supplies the
+   * persistent revision it actually displayed; a card operation submits without one.
    */
-  set: (node: GraphNode, important: boolean, expectedHash?: string | null) => void;
+  set: (node: GraphNode, important: boolean, revision?: number | null) => void;
   clearError: () => void;
 }
 
@@ -107,7 +107,7 @@ export function useImportance({ onApplied, onRefresh }: UseImportanceOptions): I
 
   const clearError = useCallback(() => { setError(null); }, []);
 
-  const set = useCallback((node: GraphNode, important: boolean, expectedHash: string | null = null) => {
+  const set = useCallback((node: GraphNode, important: boolean, revision: number | null = null) => {
     const nodeId = node.id;
     const previous = aborts.current.get(nodeId);
     previous?.abort();
@@ -120,7 +120,7 @@ export function useImportance({ onApplied, onRefresh }: UseImportanceOptions): I
         topicId: node.topicId,
         nodeId,
         important,
-        ...(expectedHash !== null ? { expectedHash } : {}),
+        ...(revision !== null ? { revision } : {}),
       },
       controller.signal,
     ).then(
@@ -129,7 +129,7 @@ export function useImportance({ onApplied, onRefresh }: UseImportanceOptions): I
         if (aborts.current.get(nodeId) === controller) aborts.current.delete(nodeId);
         markBusy(nodeId, false);
         onApplied(result.node);
-        // The service owns the source; the local snapshot only mirrors the answer.
+        // The service owns the data; the local snapshot only mirrors the answer.
         onRefresh();
       },
       (cause: unknown) => {

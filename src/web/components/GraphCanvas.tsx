@@ -13,7 +13,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { LayoutResult } from '../layout/types.js';
-import type { GraphNode } from '../../shared/protocol.js';
+import type { GraphNode } from '../../next/protocol.js';
 import type { GraphView } from '../graph/viewModel.js';
 import { buildFlowEdges } from '../graph/flowEdges.js';
 import { useCanvasViewport } from '../graph/useCanvasViewport.js';

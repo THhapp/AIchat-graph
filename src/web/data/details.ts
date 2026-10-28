@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type {
-  GraphResponse,
-  NodeDetailResponse,
-  SnapshotQuery,
-  TopicDetailResponse,
-} from '../../shared/protocol.js';
+import type { GraphResponse, NodeDetailResponse, TopicDetailResponse } from '../../next/protocol.js';
 import { ApiError, errorMessage, getJson } from './client.js';
 
 export interface DetailState {
@@ -15,7 +10,7 @@ export interface DetailState {
   detailTopicId: string | null;
   loading: boolean;
   error: string | null;
-  /** Exactly the snapshot the displayed detail came from, or null. */
+  /** Exactly the snapshot the displayed detail was fetched for, or null. */
   detailVersion: string | null;
 }
 
@@ -33,15 +28,11 @@ function versionOf(instanceId: string, revision: number): string {
   return instanceId + ':' + String(revision);
 }
 
-function queryOf(graph: GraphResponse): string {
-  const query: SnapshotQuery = { instanceId: graph.instanceId, revision: graph.revision };
-  return '?instanceId=' + encodeURIComponent(query.instanceId) + '&revision=' + encodeURIComponent(String(query.revision));
-}
-
 /**
- * Detail requests always carry the graph's instanceId/revision. When the snapshot
+ * Detail requests always follow the graph's instanceId/revision. When the snapshot
  * changes, details are re-fetched; outdated ones are aborted and never merged into
- * the new graph. STALE_SNAPSHOT detaches the detail instead of showing mismatched text.
+ * the new graph. A service answer from another instance is detached instead of
+ * being shown as current text.
  */
 export function useDetails(
   graph: GraphResponse | null,
@@ -79,7 +70,6 @@ export function useDetails(
     abort.current?.abort();
     abort.current = controller;
     const version = versionOf(graph.instanceId, graph.revision);
-    const query = queryOf(graph);
 
     setState((current) => ({
       // A different card must never show the previous card's body while loading.
@@ -94,20 +84,43 @@ export function useDetails(
         current.detailNodeId === nodeId && current.detailTopicId === topicId ? current.detailVersion : null,
     }));
 
-    const nodePromise = nodeId === null ? Promise.resolve(null) : getJson<NodeDetailResponse>('/api/nodes/' + encodeURIComponent(nodeId) + query, controller.signal);
-    const topicPromise = topicId === null ? Promise.resolve(null) : getJson<TopicDetailResponse>('/api/topics/' + encodeURIComponent(topicId) + query, controller.signal);
+    const nodePromise =
+      nodeId === null
+        ? Promise.resolve(null)
+        : getJson<NodeDetailResponse>('/api/nodes/' + encodeURIComponent(nodeId), controller.signal);
+    const topicPromise =
+      topicId === null
+        ? Promise.resolve(null)
+        : getJson<TopicDetailResponse>('/api/topics/' + encodeURIComponent(topicId), controller.signal);
 
     Promise.all([nodePromise, topicPromise]).then(
       ([nodeDetail, topicDetail]) => {
         if (controller.signal.aborted) return;
-        setState({ nodeDetail, topicDetail, detailNodeId: nodeId, detailTopicId: topicId, loading: false, error: null, detailVersion: version });
+        // 服务端按当前快照作答；若实例已变化，旧连接的内容不能当成当前正文。
+        const responseInstance = nodeDetail?.instanceId ?? topicDetail?.instanceId ?? graph.instanceId;
+        if (responseInstance !== graph.instanceId) {
+          requestKey.current = '';
+          activeKey.current = '';
+          setState(EMPTY);
+          onStale();
+          return;
+        }
+        setState({
+          nodeDetail,
+          topicDetail,
+          detailNodeId: nodeId,
+          detailTopicId: topicId,
+          loading: false,
+          error: null,
+          detailVersion: version,
+        });
       },
       (cause: unknown) => {
         if (controller.signal.aborted) return;
         if (cause instanceof ApiError && cause.code === 'STALE_SNAPSHOT') {
           requestKey.current = '';
           activeKey.current = '';
-          setState({ nodeDetail: null, topicDetail: null, detailNodeId: null, detailTopicId: null, loading: false, error: null, detailVersion: null });
+          setState(EMPTY);
           onStale();
           return;
         }

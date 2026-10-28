@@ -174,8 +174,8 @@ if ($configExisted) {
 } else {
   Write-Output '  local.env.json：不存在（未生成）。本副本无法定位已安装的 CLI（仓库内或 .local/daily 内的副本靠相对路径定位，可忽略此项）。'
   Write-Output '  若这是宿主 Skill 目录，请确认后自行创建，脚本不会代写：'
-  $repoCli = Join-Path $repoRoot '.local\daily\dist\cli\index.js'
-  if (-not (Test-Path -LiteralPath $repoCli)) { $repoCli = Join-Path $repoRoot 'dist\cli\index.js' }
+  $repoCli = Join-Path $repoRoot '.local\daily\dist\next\cli.js'
+  if (-not (Test-Path -LiteralPath $repoCli)) { $repoCli = Join-Path $repoRoot 'dist\next\cli.js' }
   $suggested = [ordered]@{
     _comment = '本机安装绑定。显式 -Cli 优先于此处默认值。'
     cli      = $repoCli

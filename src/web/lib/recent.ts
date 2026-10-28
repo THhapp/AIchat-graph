@@ -1,4 +1,4 @@
-import type { GraphResponse, LastChange } from '../../shared/protocol.js';
+import type { GraphResponse, LastChange } from '../../next/protocol.js';
 
 /**
  * Nodes the graph reports as changed by the latest write, per topic.

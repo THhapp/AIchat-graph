@@ -6,23 +6,29 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 
 /**
- * Resolve a Markdown link found in a topic file.
- * - '#anchor' stays in the current card.
- * - external http(s) opens in the browser.
- * - relative '.md' links inside topics/ open the topic reader.
- * - everything else (javascript:, file:, absolute paths, '..' escapes) is refused.
+ * 协议 4 的正文链接只有两类稳定目标：
+ * - '#anchor' 留在当前页面；
+ * - 'aichat:node/<nodeId>' 指向同一工作区中的另一张卡片。
+ * http(s) 外链在新窗口打开；相对路径、本地文件路径和其他协议一律拒绝。
+ * 领域 DTO 不含源文件路径，因此这里不再把相对 .md 链接解释成文件。
  */
 export type LinkTarget =
   | { kind: 'anchor'; href: string }
   | { kind: 'external'; href: string }
-  | { kind: 'topic'; path: string }
+  | { kind: 'node'; nodeId: string }
   | { kind: 'blocked'; reason: string };
 
 const EXTERNAL = /^https?:\/\//i;
+const AICHAT = /^aichat:/i;
+const NODE_LINK = /^aichat:node\/([^/?#\s]+)(?:#[^/?#\s]*)?$/i;
 const BLOCKED_PROTOCOL = /^(javascript|data|vbscript|file|blob):/i;
 const HAS_PROTOCOL = /^[a-z][a-z0-9+.-]*:/i;
+/** 稳定节点 ID 只含这些字符；其他 aichat:node 目标按无效链接处理。 */
+const NODE_ID = /^[A-Za-z0-9_-]+$/;
 /** Only inline raster images may be rendered; SVG and other types never are. */
 const SAFE_RASTER_DATA = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+=*$/i;
+/** 同源资源 URL：以单个 '/' 开头的站内路径，不能变成协议或外部主机。 */
+const SAME_ORIGIN = /^\/(?!\/)/;
 
 /** decodeURIComponent that leaves malformed input untouched instead of throwing. */
 function safeDecodeUri(value: string): string {
@@ -33,48 +39,42 @@ function safeDecodeUri(value: string): string {
   }
 }
 
-function splitFragment(href: string): [string, string] {
-  const index = href.indexOf('#');
-  if (index < 0) return [href, ''];
-  return [href.slice(0, index), href.slice(index + 1)];
-}
-
-export function resolveLink(rawHref: string, topicPath: string): LinkTarget {
+/**
+ * Resolves a Markdown link found in a node body.
+ *
+ * Only 'aichat:node/<id>' may open another card. Anything that looks like a
+ * workspace path (relative, absolute, drive letter) is refused: the domain
+ * stores no source files, so such a link has no reader-side meaning.
+ */
+export function resolveLink(rawHref: string): LinkTarget {
   const href = rawHref.trim();
   if (href.length === 0) return { kind: 'blocked', reason: '空链接' };
   if (href.startsWith('#')) return { kind: 'anchor', href };
   if (BLOCKED_PROTOCOL.test(href)) return { kind: 'blocked', reason: '不允许的链接协议' };
   if (EXTERNAL.test(href)) return { kind: 'external', href };
+  const nodeMatch = NODE_LINK.exec(href);
+  if (nodeMatch !== null) {
+    const nodeId = safeDecodeUri(nodeMatch[1] ?? '').trim();
+    if (nodeId.length === 0 || !NODE_ID.test(nodeId)) {
+      return { kind: 'blocked', reason: '节点链接缺少有效 ID' };
+    }
+    return { kind: 'node', nodeId };
+  }
+  if (AICHAT.test(href)) return { kind: 'blocked', reason: '不支持的 aichat 链接目标' };
   if (HAS_PROTOCOL.test(href)) return { kind: 'blocked', reason: '不允许的链接协议' };
   if (href.startsWith('/') || href.startsWith('\\') || /^[a-z]:/i.test(href)) {
-    return { kind: 'blocked', reason: '不打开工作区外或本地文件路径' };
+    return { kind: 'blocked', reason: '不打开本地文件路径' };
   }
-
-  const [rawPath = '', fragment = ''] = splitFragment(href);
-  if (!rawPath.toLowerCase().endsWith('.md')) return { kind: 'blocked', reason: '仅支持工作区内主题文件链接' };
-  const base = topicPath.split('/').slice(0, -1);
-  const resolved: string[] = [];
-  for (const segment of [...base, ...rawPath.split('/')]) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') {
-      if (resolved.length === 0) return { kind: 'blocked', reason: '链接超出工作区 topics 目录' };
-      resolved.pop();
-      continue;
-    }
-    resolved.push(segment);
-  }
-  const path = resolved.join('/');
-  if (!path.startsWith('topics/')) return { kind: 'blocked', reason: '仅支持 topics/ 内的主题文件' };
-  return { kind: 'topic', path: fragment.length > 0 ? path + '#' + fragment : path };
+  return { kind: 'blocked', reason: '仅支持 aichat:node/<id> 形式的卡片链接' };
 }
 
 /**
  * react-markdown urlTransform.
  *
  * This runs before the renderers, so it must not discard what they need:
- * relative paths are kept intact for link resolution and resource lookup, and
- * safe raster data images are kept for the image renderer. Links never render a
- * data: URL, and images are re-checked when rendered.
+ * 'aichat:node/<id>' links, relative resource references and safe raster data
+ * images are kept for the renderers to validate. Everything else dangerous is
+ * emptied here.
  *
  * @param key the attribute being transformed ('href' for links, 'src' for images)
  */
@@ -82,48 +82,97 @@ export function safeUrlTransform(url: string, key?: string): string {
   const value = url.trim();
   if (value.length === 0) return '';
   if (value.startsWith('#') || value.startsWith('?')) return value;
-  if (EXTERNAL.test(value) || /^mailto:/i.test(value)) return value;
+  if (EXTERNAL.test(value) || /^mailto:/i.test(value) || AICHAT.test(value)) return value;
   if (value.startsWith('//')) return '';
   if (/^data:/i.test(value)) {
     // Only images may carry inline data, and only supported raster formats.
     return key === 'src' && SAFE_RASTER_DATA.test(value) ? value : '';
   }
   if (BLOCKED_PROTOCOL.test(value) || HAS_PROTOCOL.test(value)) return '';
-  // Relative workspace paths: resolveLink() and resolveResourceKey() decide.
+  // Relative resource references: resolveLink()/resolveImageUrl() decide.
   return value;
 }
 
-/**
- * Maps a Markdown image src to the key used by the frozen resource map.
- * Resolves relative to the node's own file, accepts a root-relative fallback,
- * and refuses escapes above the workspace root.
- */
-export function resolveResourceKey(rawSrc: string, nodePath: string): string | null {
+interface ResourceReference {
+  /** Decoded reference without query/fragment, backslashes normalized. */
+  path: string;
+  /** Same as path but before trailing punctuation cleanup. */
+  decoded: string;
+}
+
+function parseResourceReference(rawSrc: string): ResourceReference | null {
   const src = rawSrc.trim();
   if (src.length === 0) return null;
   if (src.startsWith('//') || HAS_PROTOCOL.test(src)) return null;
-  // react-markdown percent-encodes some characters; decode before matching the
-  // capture-side key so "图（1）.png" and "my pic.png" still resolve.
-  const decoded = safeDecodeUri(src);
-  const normalized = decoded.replace(/\\/g, '/');
-  const base = nodePath.split('/').slice(0, -1);
-  const segments = normalized.startsWith('/') ? normalized.slice(1).split('/') : [...base, ...normalized.split('/')];
-  const resolved: string[] = [];
-  for (const segment of segments) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') {
-      if (resolved.length === 0) return null;
-      resolved.pop();
-      continue;
-    }
-    resolved.push(segment);
-  }
-  return resolved.length === 0 ? null : resolved.join('/');
+  const decoded = safeDecodeUri(src).replace(/\\/g, '/');
+  const path = (decoded.split(/[?#]/)[0] ?? '').replace(/[.,;:!?，。；：！？、》】"'`]+$/, '');
+  if (path.length === 0) return null;
+  return { path, decoded };
 }
 
 /**
- * Removes hidden node-id comments if a service ever sends them in body text.
- * The parser should already strip them; this is a display-level safety net.
+ * Candidate resource keys for one Markdown image src, most specific first.
+ *
+ * Body references use workspace-relative keys such as 'resources/x.png'. A
+ * reference written as '../resources/x.png' normalizes to the same key; anything
+ * that does not stay below 'resources/' is not a resource reference at all.
+ */
+export function resourceKeyCandidates(rawSrc: string): string[] {
+  const reference = parseResourceReference(rawSrc);
+  if (reference === null) return [];
+  const keys: string[] = [];
+  const addFrom = (value: string): void => {
+    const index = value.indexOf('resources/');
+    if (index < 0) return;
+    const tail = value.slice(index + 'resources/'.length);
+    const segments = tail.split('/');
+    if (segments.length === 0 || segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) return;
+    const key = 'resources/' + segments.join('/');
+    if (keys.length === 0 || keys[keys.length - 1] !== key) {
+      if (!keys.includes(key)) keys.push(key);
+    }
+  };
+  addFrom(reference.path);
+  addFrom(reference.decoded);
+  return keys;
+}
+
+/** Primary resource key for a Markdown image src, or null when it is not a key. */
+export function resolveResourceKey(rawSrc: string): string | null {
+  return resourceKeyCandidates(rawSrc)[0] ?? null;
+}
+
+/** Only raster data URIs and root-relative same-origin URLs may be rendered. */
+function safeResourceUrl(value: string): string | null {
+  const url = value.trim();
+  if (url.length === 0) return null;
+  if (SAFE_RASTER_DATA.test(url)) return url;
+  if (SAME_ORIGIN.test(url) && !/[\\\u0000-\u001f]/.test(url)) return url;
+  return null;
+}
+
+/**
+ * Maps a Markdown image src to the rendered URL from the resource map.
+ * The map comes from the same detail response as the body: live details carry
+ * same-origin URLs, exported documents carry inline data URIs.
+ */
+export function resolveImageUrl(
+  rawSrc: string,
+  resources: Readonly<Record<string, string>> | undefined,
+): string | null {
+  if (resources === undefined) return null;
+  for (const key of resourceKeyCandidates(rawSrc)) {
+    const value = resources[key];
+    if (typeof value !== 'string') continue;
+    const safe = safeResourceUrl(value);
+    if (safe !== null) return safe;
+  }
+  return null;
+}
+
+/**
+ * Removes hidden node-id comments if a body still carries them.
+ * Import already strips them; this is a display-level safety net.
  */
 export function stripNodeComments(source: string): string {
   return source.replace(/<!--\s*node:[^>]*?-->/gi, '').replace(/\n{3,}/g, '\n\n');
@@ -132,20 +181,14 @@ export function stripNodeComments(source: string): string {
 export interface MarkdownBodyProps {
   source: string;
   /**
-   * Workspace-relative path of the node this body belongs to. Format 2 stores one
-   * node per file, so relative links resolve against this path, not a topic file.
+   * Opens the card referenced by 'aichat:node/<id>'. When omitted (offline
+   * read-only contexts without another card) the link is rendered inert.
    */
-  topicPath: string;
-  onOpenTopic: (path: string) => void;
-  /**
-   * Resolves a workspace-relative .md path to a stable node id. When it returns an
-   * id, the reader opens that card instead of navigating to a file path.
-   */
-  resolvePathToNode?: (path: string) => string | null;
   onOpenNode?: (nodeId: string) => void;
   /**
-   * Resource map (Markdown src key → data URI) for offline exports and live details.
-   * An empty map means images are not available and are shown as placeholders.
+   * Resource map for the same detail response: Markdown src key (for example
+   * 'resources/x.png') to a same-origin URL or raster data URI. An absent or
+   * empty map shows an explicit placeholder instead of fetching anything.
    */
   resources?: Readonly<Record<string, string>>;
   compact?: boolean;
@@ -153,16 +196,13 @@ export interface MarkdownBodyProps {
 
 export function MarkdownBody({
   source,
-  topicPath,
-  onOpenTopic,
-  resolvePathToNode,
   onOpenNode,
   resources,
   compact = false,
 }: MarkdownBodyProps): React.JSX.Element {
   const components = useMemo<Components>(() => {
     const link: Components['a'] = ({ href, children }) => {
-      const target = resolveLink(href ?? '', topicPath);
+      const target = resolveLink(href ?? '');
       if (target.kind === 'blocked') {
         return (
           <span className="md-link-blocked" title={target.reason}>
@@ -179,17 +219,20 @@ export function MarkdownBody({
           </a>
         );
       }
-      const path = target.path;
-      // A #fragment identifies a position inside the target, not part of its path.
-      const cleanPath = path.split('#')[0] ?? path;
-      const nodeId = resolvePathToNode?.(cleanPath) ?? null;
+      if (onOpenNode === undefined) {
+        return (
+          <span className="md-link-blocked" title="当前页面不能打开其他卡片">
+            {children}
+          </span>
+        );
+      }
+      const nodeId = target.nodeId;
       return (
         <a
           href={'#'}
           onClick={(event) => {
             event.preventDefault();
-            if (nodeId !== null && onOpenNode !== undefined) onOpenNode(nodeId);
-            else onOpenTopic(path);
+            onOpenNode(nodeId);
           }}
         >
           {children}
@@ -202,18 +245,11 @@ export function MarkdownBody({
       if (SAFE_RASTER_DATA.test(raw)) {
         return <img src={raw} alt={alt ?? ''} loading="lazy" className="md-image" />;
       }
-      // 2. A captured resource, resolved relative to this node's file.
-      // react-markdown resolves reference-style images to their final src, so this
-      // covers both inline and ![alt][ref] forms without special cases.
-      const key = raw === '' ? null : resolveResourceKey(raw, topicPath);
-      let dataUri = key !== null ? resources?.[key] : undefined;
-      if (dataUri === undefined) {
-        // Fall back to the raw src as captured, for keys stored with their literals.
-        const literal = raw.replace(/^\.\//, '');
-        dataUri = resources?.[literal] ?? resources?.[safeDecodeUri(literal)];
-      }
-      if (dataUri !== undefined && SAFE_RASTER_DATA.test(dataUri)) {
-        return <img src={dataUri} alt={alt ?? ''} loading="lazy" className="md-image" />;
+      // 2. A resource key from the same detail response. react-markdown resolves
+      // reference-style images to their final src, so both forms are covered.
+      const resolved = resolveImageUrl(raw, resources);
+      if (resolved !== null) {
+        return <img src={resolved} alt={alt ?? ''} loading="lazy" className="md-image" />;
       }
       // 3. Anything else is never fetched: no network request, no arbitrary file.
       return (
@@ -228,7 +264,7 @@ export function MarkdownBody({
       </div>
     );
     return { a: link, img: image, table };
-  }, [topicPath, onOpenTopic, resolvePathToNode, onOpenNode, resources]);
+  }, [onOpenNode, resources]);
 
   return (
     <div className={compact ? 'md-body md-body--compact' : 'md-body'}>

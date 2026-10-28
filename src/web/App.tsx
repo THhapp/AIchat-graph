@@ -31,7 +31,7 @@ import { GraphCanvas } from './components/GraphCanvas.js';
 import { EmptyState } from './components/States.js';
 import { ExportPanel } from './components/ExportPanel.js';
 import { AppBanners, AppFooter, AppHeader, type AppStatus } from './components/AppChrome.js';
-import type { GraphNode, GraphResponse } from '../shared/protocol.js';
+import type { GraphNode, GraphResponse } from '../next/protocol.js';
 
 /** Panels are independent: either, both, or neither may be open. */
 function columnTemplate(leftOpen: boolean, detailOpen: boolean, detailWidth: number): string {
@@ -156,8 +156,13 @@ export function App(): React.JSX.Element {
     setReading((current) => (current === null ? current : toggleNavNode(current, node.topicId, nodeId)));
   }, [graph]);
 
-  const selectedDetailHash = selectedNode !== null && details.nodeDetail !== null && details.nodeDetail.node.id === selectedNode.id
-    ? details.nodeDetail.fileHash
+  /**
+   * Persistent node revision of the body actually on screen. The importance write
+   * uses it as the optimistic-concurrency check; a card write without a detail
+   * stays revision-less and lets the service answer.
+   */
+  const selectedDetailRevision = selectedNode !== null && details.nodeDetail !== null && details.nodeDetail.node.id === selectedNode.id
+    ? details.nodeDetail.node.revision
     : null;
   const applyImportanceNode = useCallback((node: GraphNode) => {
     setNodeOverrides((current) => ({ ...current, [node.id]: node }));
@@ -207,13 +212,6 @@ export function App(): React.JSX.Element {
     if (node.topicId !== currentTopicId) setQuery('');
   }, [graph, currentTopicId]);
 
-  const openTopicByPath = useCallback((path: string) => {
-    if (graph === null) return;
-    const clean = path.split('#')[0] ?? path;
-    const topic = graph.topics.find((candidate) => candidate.path === clean);
-    if (topic !== undefined) openTopic(topic.id);
-  }, [graph, openTopic]);
-
   const toggleCollapse = useCallback((id: string) => {
     const node = graph?.nodes.find((candidate) => candidate.id === id);
     if (node === undefined) return;
@@ -247,8 +245,8 @@ export function App(): React.JSX.Element {
   }, [graph, snapshot.workspace, selectedNode, selectedTopic, copyPromptText]);
 
   /**
-   * The locator is built from the card currently on screen: IDs, real paths and
-   * the service's own entry paths. No body text and no other topic's content.
+   * The locator is built from the card currently on screen: stable domain IDs,
+   * revisions and the service's own entry paths. No body text, no other topic.
    */
   const copyLocate = useCallback(() => {
     if (graph === null || selectedNode === null) return;
@@ -375,7 +373,6 @@ export function App(): React.JSX.Element {
           onSelectNode={selectNode}
           onOpenTopic={openTopic}
           onTopicFilter={(id) => { update({ topicFilter: id }); }}
-          onSelectTopicPath={openTopicByPath}
           onClose={() => { setReading((current) => (current === null ? current : setLeftPanelOpen(current, false))); }}
           directoryMode
           onCopyTopic={copyPrompt}
@@ -449,7 +446,6 @@ export function App(): React.JSX.Element {
               onSelectNode={selectNodeAndOpen}
               onRetry={details.retry}
               onClose={closeDetail}
-              onOpenTopic={openTopicByPath}
               onCopyContinuation={copyPrompt}
               copied={copied}
               onCopyLocate={copyLocate}
@@ -460,11 +456,10 @@ export function App(): React.JSX.Element {
                 ? {
                     important: importanceOf(selectedNode),
                     onToggleImportant: (next: boolean) => {
-                      importance.set(selectedNode, next, selectedDetailHash);
+                      importance.set(selectedNode, next, selectedDetailRevision);
                     },
                   }
                 : {})}
-              resolvePathToNode={(path) => graph.nodes.find((candidate) => candidate.sourcePath === path)?.id ?? null}
               onOpenNode={(id) => { selectNodeAndOpen(id); }}
             />
           </>

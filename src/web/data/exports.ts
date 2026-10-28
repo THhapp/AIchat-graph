@@ -1,8 +1,4 @@
-import type {
-  ExportTargetResponse,
-  ExportsResponse,
-  TopicExportStatus,
-} from '../../shared/protocol.js';
+import type { ExportsResponse, TopicExportStatus } from '../../next/protocol.js';
 import { getJson, requestJson } from './client.js';
 
 /**
@@ -31,23 +27,21 @@ export async function setExportTarget(
   path: string | null,
   signal: AbortSignal,
 ): Promise<TopicExportStatus> {
-  const response = await sendJson<ExportTargetResponse>(
+  return sendJson<TopicExportStatus>(
     'PUT',
     '/api/exports/' + encodeURIComponent(topicId) + '/target',
     { path },
     signal,
   );
-  return response;
 }
 
 export async function retryExport(topicId: string, signal: AbortSignal): Promise<TopicExportStatus> {
-  const response = await sendJson<ExportTargetResponse>(
+  return sendJson<TopicExportStatus>(
     'POST',
     '/api/exports/' + encodeURIComponent(topicId) + '/retry',
     {},
     signal,
   );
-  return response;
 }
 
 export function exportStateLabel(status: TopicExportStatus): string {

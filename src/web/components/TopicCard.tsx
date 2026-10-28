@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
-import type { GraphNode } from '../../shared/protocol.js';
+import type { GraphNode } from '../../next/protocol.js';
 import { StateChip, stateLabel } from './display.js';
 
 export interface TopicCardData extends Record<string, unknown> {
@@ -56,7 +56,7 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
             aria-pressed={important}
             aria-busy={importanceBusy}
             aria-label={importanceLabel}
-            title={importanceBusy ? '正在保存…' : important ? '取消重要标记（写回源文件）' : '标记为重要（写回源文件）'}
+            title={importanceBusy ? '正在保存…' : important ? '取消重要标记（写入数据库）' : '标记为重要（写入数据库）'}
             disabled={importanceBusy}
             data-busy={importanceBusy ? 'true' : 'false'}
             onClick={(event) => {

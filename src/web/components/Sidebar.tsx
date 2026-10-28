@@ -1,4 +1,4 @@
-import type { GraphResponse } from '../../shared/protocol.js';
+import type { GraphResponse } from '../../next/protocol.js';
 import type { SearchResults } from '../lib/search.js';
 import {
   directoryRows,
@@ -24,7 +24,6 @@ export interface SidebarProps {
   expandedTopicIds: ReadonlySet<string>;
   onToggleTopicFolder: (topicId: string) => void;
   onTopicFilter: (id: string | null) => void;
-  onSelectTopicPath: (path: string) => void;
   /** Called by the panel's own close control. */
   onClose: () => void;
   directoryMode?: boolean;

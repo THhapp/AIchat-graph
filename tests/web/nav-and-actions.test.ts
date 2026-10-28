@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { GraphNode, GraphResponse } from '../../src/shared/protocol.js';
+import type { GraphNode, GraphResponse } from '../../src/next/protocol.js';
 import {
   emptyReadingState,
   navCollapsedNodeIds,
@@ -12,7 +12,7 @@ import { writeImportance } from '../../src/web/lib/importance.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string, topicId = 't_1'): GraphNode {
   return {
-    id, topicId, title, summary: title + ' 摘要', number, from, flow, state: 'agreed', important: false,
+    id, topicId, title, summary: title + ' 摘要', number, from, flow, state: 'agreed', important: false, revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, order: 10 } : {}),
   };
 }
@@ -31,7 +31,7 @@ const graph: GraphResponse = {
     node('n0601', 'n06', 'branch', '06-01', '标题与标注的分工'),
   ],
   topics: [
-    { id: 't_1', title: '协作方式', path: 'topics/协作方式/topic.md', nodeIds: ['n05', 'n06', 'n07', 'n0601'], fileHash: 'aaa' },
+    { id: 't_1', key: '协作方式', title: '协作方式', nodeIds: ['n05', 'n06', 'n07', 'n0601'], revision: 2 },
   ],
 };
 
@@ -65,7 +65,7 @@ describe('importance write', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const result = await writeImportance(
-      { topicId: 't_1', nodeId: 'n06', important: true, expectedHash: 'abc' },
+      { topicId: 't_1', nodeId: 'n06', important: true, revision: 3 },
       new AbortController().signal,
     );
     expect(result.node.important).toBe(true);
@@ -75,7 +75,7 @@ describe('importance write', () => {
     expect(path).toBe('/api/importance');
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>)['x-aichat-client']).toBe('cli');
-    expect(JSON.parse(String(init.body))).toEqual({ topicId: 't_1', nodeId: 'n06', important: true, expectedHash: 'abc' });
+    expect(JSON.parse(String(init.body))).toEqual({ topicId: 't_1', nodeId: 'n06', important: true, revision: 3 });
   });
 
   it('omits a hash it never saw and refuses an empty answer', async () => {

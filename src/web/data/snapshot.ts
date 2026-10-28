@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { GraphResponse, WorkspaceResponse } from '../../shared/protocol.js';
+import type { ExportEvent, GraphResponse, TopicExportStatus, WorkspaceResponse } from '../../next/protocol.js';
 import { errorMessage, getJson } from './client.js';
-import type { ExportEvent, TopicExportStatus } from '../../shared/protocol.js';
 
 export type ConnectionState = 'connecting' | 'open' | 'reconnecting' | 'closed';
 

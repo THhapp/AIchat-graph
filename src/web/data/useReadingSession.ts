@@ -1,5 +1,5 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
-import type { GraphResponse } from '../../shared/protocol.js';
+import type { GraphResponse } from '../../next/protocol.js';
 import {
   loadReadingState,
   pruneReadingState,

@@ -1,4 +1,4 @@
-import type { GraphNode, NodeState } from '../../shared/protocol.js';
+import type { GraphNode, NodeState } from '../../next/protocol.js';
 
 const STATE_LABEL: Record<NodeState, string> = {
   agreed: '已确认',

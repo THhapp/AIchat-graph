@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { GraphResponse } from '../../src/shared/protocol.js';
+import type { GraphResponse } from '../../src/next/protocol.js';
 import { buildGraphView, connectionText, scopeGraphToTopic, type GraphView } from '../../src/web/graph/viewModel.js';
 import { CARD_BASE_HEIGHT, CARD_WIDTH, EDGE_LABEL_FONT, EDGE_LABEL_PAD_Y, LAYOUT_HORIZONTAL_GAP, LAYOUT_VERTICAL_GAP, cardHeightForTitle, textWidth, wrapByWidth } from '../../src/web/graph/cardMetrics.js';
 import { parseReadingState, pruneReadingState, emptyReadingState, switchReadingTopic } from '../../src/web/data/readingState.js';
-import { resolveLink, resolveResourceKey, safeUrlTransform, stripNodeComments } from '../../src/web/components/MarkdownBody.js';
+import { resolveImageUrl, resolveLink, resolveResourceKey, safeUrlTransform, stripNodeComments } from '../../src/web/components/MarkdownBody.js';
 import { flowLabel } from '../../src/web/components/display.js';
 import { searchGraph } from '../../src/web/lib/search.js';
 import { buildContinuationPrompt } from '../../src/web/lib/prompt.js';
@@ -23,6 +23,7 @@ function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch',
     flow,
     state: 'agreed',
     important: false,
+    revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, order: 10 } : {}),
   };
 }
@@ -41,7 +42,7 @@ export const graph: GraphResponse = {
     node('n4', 'n3', 'next', '01-02', '侧枝续'),
     node('n5', 'n2', 'next', '03', '主线三'),
   ],
-  topics: [{ id: 't_1', title: '条目整理', path: 'topics/条目整理.md', nodeIds: ['n1', 'n2', 'n3', 'n4', 'n5'], fileHash: 'abc' }],
+  topics: [{ id: 't_1', key: '条目整理', title: '条目整理', nodeIds: ['n1', 'n2', 'n3', 'n4', 'n5'], revision: 3 }],
 };
 
 /**
@@ -69,8 +70,8 @@ const treeGraph: GraphResponse = {
     node('nX', 'n05', 'next', '06-x', '别的主题卡片'),
   ],
   topics: [
-    { id: 't_1', title: '协作方式', path: 'topics/协作方式.md', nodeIds: ['n05', 'n06', 'n07', 'n0601', 'n0602', 'n0603', 'n060301', 'n060302'], fileHash: 'aaa' },
-    { id: 't_2', title: '条目整理', path: 'topics/条目整理.md', nodeIds: ['nX'], fileHash: 'bbb' },
+    { id: 't_1', key: '协作方式', title: '协作方式', nodeIds: ['n05', 'n06', 'n07', 'n0601', 'n0602', 'n0603', 'n060301', 'n060302'], revision: 2 },
+    { id: 't_2', key: '条目整理', title: '条目整理', nodeIds: ['nX'], revision: 2 },
   ],
 };
 
@@ -203,7 +204,7 @@ describe('isolated topic reading', () => {
   const twoTopics: GraphResponse = {
     ...graph, activeNode: 'other',
     nodes: [...graph.nodes, { ...node('other', null, 'root', '01', '另一个主题'), topicId: 't_2' }],
-    topics: [...graph.topics, { id: 't_2', title: '另一个主题', path: 'topics/第二主题/topic.md', nodeIds: ['other'], fileHash: 'bbb' }],
+    topics: [...graph.topics, { id: 't_2', key: '另一个主题', title: '另一个主题', nodeIds: ['other'], revision: 1 }],
   };
 
   it('opens no graph until a topic is chosen, and search never leaks another topic', () => {
@@ -234,32 +235,45 @@ describe('isolated topic reading', () => {
       graph: twoTopics, topic: first, node: twoTopics.nodes.find((node) => node.id === 'other')!,
       workspace: { ...twoTopics, name: '示例库', rootPath: 'D:/example-vault', agentEntry: { cliPath: 'D:/daily/dist/cli/index.js', skillPath: 'D:/daily/skills/aichat-graph/SKILL.md' } },
     });
-    expect(text).toContain('workspaceId：w_1');
+    expect(text).toContain('workspaceId=w_1');
     expect(text).toContain('topicId=t_1');
-    expect(text).toContain('主题目录：D:/example-vault/topics');
-    expect(text).toContain('D:/daily/dist/cli/index.js');
-    expect(text).toContain('D:/daily/skills/aichat-graph/SKILL.md');
+    expect(text).toContain('CLI 入口：D:/daily/dist/cli/index.js');
+    expect(text).toContain('Skill 入口：D:/daily/skills/aichat-graph/SKILL.md');
     expect(text).toContain('不会自动改变本对话的记录目标');
     expect(text).not.toContain('activeNode：other');
     expect(text).not.toContain('另一个主题');
+    expect(text).not.toContain('topics/');
+    expect(text).not.toContain('topic.md');
     expect(text).not.toContain('按文件顺序阅读所有卡片');
   });
 });
 
 describe('markdown links', () => {
-  it('opens same-workspace topic files only', () => {
-    expect(resolveLink('条目整理.md', 'topics/协作方式.md')).toEqual({ kind: 'topic', path: 'topics/条目整理.md' });
-    expect(resolveLink('./sub/a.md', 'topics/x/y.md')).toEqual({ kind: 'topic', path: 'topics/x/sub/a.md' });
-    expect(resolveLink('../../outside.md', 'topics/y.md').kind).toBe('blocked');
-    expect(resolveLink('file:///D:/Note/a.md', 'topics/y.md').kind).toBe('blocked');
-    expect(resolveLink('D:/Note/a.md', 'topics/y.md').kind).toBe('blocked');
-    expect(resolveLink('/etc/passwd', 'topics/y.md').kind).toBe('blocked');
-    expect(resolveLink('other.txt', 'topics/y.md').kind).toBe('blocked');
+  it('opens only aichat:node targets on the stable node id', () => {
+    expect(resolveLink('aichat:node/n_0123456789abcdef')).toEqual({ kind: 'node', nodeId: 'n_0123456789abcdef' });
+    expect(resolveLink('aichat:node/n_abc')).toEqual({ kind: 'node', nodeId: 'n_abc' });
+    expect(resolveLink('aichat:node/')).toMatchObject({ kind: 'blocked' });
+    expect(resolveLink('aichat:node/../x').kind).toBe('blocked');
+    expect(resolveLink('aichat:node/n_abc/extra').kind).toBe('blocked');
+    expect(resolveLink('aichat:topic/t_1').kind).toBe('blocked');
   });
 
-  it('opens external http(s) and refuses script protocols', () => {
-    expect(resolveLink('https://example.com/a', 'topics/y.md')).toEqual({ kind: 'external', href: 'https://example.com/a' });
-    expect(resolveLink('javascript:alert(1)', 'topics/y.md').kind).toBe('blocked');
+  it('refuses file paths and unknown protocols', () => {
+    expect(resolveLink('条目整理.md').kind).toBe('blocked');
+    expect(resolveLink('./sub/a.md').kind).toBe('blocked');
+    expect(resolveLink('../../outside.md').kind).toBe('blocked');
+    expect(resolveLink('file:///D:/Note/a.md').kind).toBe('blocked');
+    expect(resolveLink('D:/Note/a.md').kind).toBe('blocked');
+    expect(resolveLink('/etc/passwd').kind).toBe('blocked');
+    expect(resolveLink('other.txt').kind).toBe('blocked');
+    expect(resolveLink('').kind).toBe('blocked');
+  });
+
+  it('opens external http(s), keeps anchors and refuses script protocols', () => {
+    expect(resolveLink('https://example.com/a')).toEqual({ kind: 'external', href: 'https://example.com/a' });
+    expect(resolveLink('#section')).toEqual({ kind: 'anchor', href: '#section' });
+    expect(resolveLink('javascript:alert(1)').kind).toBe('blocked');
+    expect(resolveLink('data:text/html,x').kind).toBe('blocked');
     expect(safeUrlTransform('javascript:alert(1)')).toBe('');
     expect(safeUrlTransform('https://example.com')).toBe('https://example.com');
     expect(safeUrlTransform('#section')).toBe('#section');
@@ -307,13 +321,13 @@ describe('collapse counts shown on cards', () => {
   });
 });
 describe('urlTransform keeps what the renderers need', () => {
-  it('does not erase relative .md links before resolveLink runs', () => {
+  it('does not erase aichat:node links before resolveLink runs', () => {
     // If the transform returned '', resolveLink would receive an empty href and
     // the internal link would silently become a blocked span.
-    expect(safeUrlTransform('../条目整理.md', 'href')).toBe('../条目整理.md');
-    expect(safeUrlTransform('./sibling.md#part-2', 'href')).toBe('./sibling.md#part-2');
-    const target = resolveLink(safeUrlTransform('./sibling.md#part-2', 'href'), 'topics/group/a.md');
-    expect(target).toEqual({ kind: 'topic', path: 'topics/group/sibling.md#part-2' });
+    expect(safeUrlTransform('aichat:node/n_abc', 'href')).toBe('aichat:node/n_abc');
+    expect(safeUrlTransform('aichat:node/n_abc#part-2', 'href')).toBe('aichat:node/n_abc#part-2');
+    const target = resolveLink(safeUrlTransform('aichat:node/n_abc#part-2', 'href'));
+    expect(target).toEqual({ kind: 'node', nodeId: 'n_abc' });
   });
 
   it('keeps safe raster data images for src but never for links', () => {
@@ -324,33 +338,56 @@ describe('urlTransform keeps what the renderers need', () => {
     expect(safeUrlTransform('data:text/html;base64,PHNjcmlwdD4=', 'src')).toBe('');
   });
 
-  it('keeps relative image paths but blocks remote and file schemes', () => {
-    expect(safeUrlTransform('../../resources/pic.png', 'src')).toBe('../../resources/pic.png');
+  it('keeps relative resource references but blocks file and script schemes', () => {
+    expect(safeUrlTransform('resources/pic.png', 'src')).toBe('resources/pic.png');
+    expect(safeUrlTransform('../resources/pic.png', 'src')).toBe('../resources/pic.png');
     expect(safeUrlTransform('https://example.com/p.png', 'src')).toBe('https://example.com/p.png');
     expect(safeUrlTransform('file:///C:/secret.png', 'src')).toBe('');
     expect(safeUrlTransform('javascript:alert(1)', 'href')).toBe('');
   });
 });
 
-describe('resource keys resolve against the node file', () => {
-  it('resolves relative and root-relative resource paths', () => {
-    expect(resolveResourceKey('../../resources/pic.png', 'topics/group/node.md')).toBe('resources/pic.png');
-    expect(resolveResourceKey('./local.png', 'topics/group/node.md')).toBe('topics/group/local.png');
-    expect(resolveResourceKey('/resources/pic.png', 'topics/group/node.md')).toBe('resources/pic.png');
+describe('resource keys stay below resources/', () => {
+  it('normalizes relative and root-relative references to one key', () => {
+    expect(resolveResourceKey('resources/pic.png')).toBe('resources/pic.png');
+    expect(resolveResourceKey('../resources/pic.png')).toBe('resources/pic.png');
+    expect(resolveResourceKey('./resources/pic.png')).toBe('resources/pic.png');
+    expect(resolveResourceKey('/resources/pic.png')).toBe('resources/pic.png');
   });
 
   it('keeps Unicode, spaces and parentheses in resource names', () => {
-    // Capture-side keys are real workspace paths, not slugs.
-    expect(resolveResourceKey('../../resources/图（1）.png', 'topics/group/node.md')).toBe('resources/图（1）.png');
-    expect(resolveResourceKey('./my pic.png', 'topics/group/node.md')).toBe('topics/group/my pic.png');
-    // react-markdown may percent-encode spaces; matching must still work.
-    expect(resolveResourceKey('./my%20pic.png', 'topics/group/node.md')).toBe('topics/group/my pic.png');
+    expect(resolveResourceKey('resources/图（1）.png')).toBe('resources/图（1）.png');
+    expect(resolveResourceKey('resources/my pic.png')).toBe('resources/my pic.png');
+    // react-markdown may percent-encode spaces; the decoded key is the match.
+    expect(resolveResourceKey('resources/my%20pic.png')).toBe('resources/my pic.png');
   });
 
   it('refuses escapes and remote sources so no fetch is attempted', () => {
-    expect(resolveResourceKey('../../../../outside.png', 'topics/a.md')).toBeNull();
-    expect(resolveResourceKey('https://example.com/p.png', 'topics/a.md')).toBeNull();
-    expect(resolveResourceKey('//cdn.example.com/p.png', 'topics/a.md')).toBeNull();
+    expect(resolveResourceKey('../../../../outside.png')).toBeNull();
+    expect(resolveResourceKey('resources/../outside.png')).toBeNull();
+    expect(resolveResourceKey('local.png')).toBeNull();
+    expect(resolveResourceKey('https://example.com/p.png')).toBeNull();
+    expect(resolveResourceKey('//cdn.example.com/p.png')).toBeNull();
+  });
+});
+
+describe('resource map rendering', () => {
+  const live = { 'resources/pic.png': '/api/resources/pic.png' };
+  const offline = { 'resources/pic.png': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==' };
+
+  it('renders the same-origin URL from live details and the data URI from exports', () => {
+    expect(resolveImageUrl('resources/pic.png', live)).toBe('/api/resources/pic.png');
+    expect(resolveImageUrl('../resources/pic.png', live)).toBe('/api/resources/pic.png');
+    expect(resolveImageUrl('resources/pic.png', offline)).toBe(offline['resources/pic.png']);
+  });
+
+  it('never renders an unsafe map value or fetches a missing resource', () => {
+    expect(resolveImageUrl('resources/pic.png', { 'resources/pic.png': 'javascript:alert(1)' })).toBeNull();
+    expect(resolveImageUrl('resources/pic.png', { 'resources/pic.png': 'https://example.com/pic.png' })).toBeNull();
+    expect(resolveImageUrl('resources/pic.png', { 'resources/pic.png': 'data:image/svg+xml;base64,PHN2Zz4=' })).toBeNull();
+    expect(resolveImageUrl('resources/pic.png', {})).toBeNull();
+    expect(resolveImageUrl('resources/pic.png', undefined)).toBeNull();
+    expect(resolveImageUrl('https://example.com/pic.png', live)).toBeNull();
   });
 });
 
@@ -464,10 +501,10 @@ describe('v5 branch layout, routing and labels', () => {
     ],
     topics: [{
       id: 't_1',
+      key: 'v5',
       title: 'v5',
-      path: 'topics/v5.md',
       nodeIds: ['r', 'n1', 'n2', 'b1', 'b1n', 'b1x', 'b2', 'b3'],
-      fileHash: 'v5',
+      revision: 1,
     }],
   };
 

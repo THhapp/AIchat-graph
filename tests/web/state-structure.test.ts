@@ -5,7 +5,7 @@ import type {
   GraphTopic,
   OfflineTopicDocument,
   WorkspaceResponse,
-} from '../../src/shared/protocol.js';
+} from '../../src/next/protocol.js';
 import {
   DETAIL_WIDTH_DEFAULT,
   DETAIL_WIDTH_MAX,
@@ -20,6 +20,7 @@ import {
 } from '../../src/web/components/directoryTree.js';
 import { ApiError, getJson, requestJson } from '../../src/web/data/client.js';
 import { deriveOfflineDetails } from '../../src/web/offline/details.js';
+import { parseOfflineDocument, toGraphResponse } from '../../src/web/offline/document.js';
 import { buildContinuationPrompt } from '../../src/web/lib/prompt.js';
 
 function node(
@@ -39,6 +40,7 @@ function node(
     flow,
     state: 'agreed',
     important: false,
+    revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, order: 10 } : {}),
   };
 }
@@ -55,10 +57,10 @@ const tree: GraphNode[] = [
 
 const topic: GraphTopic = {
   id: 't_1',
+  key: '协作方式',
   title: '协作方式',
-  path: 'topics/协作方式/topic.md',
   nodeIds: tree.map((item) => item.id),
-  fileHash: 'topic-hash',
+  revision: 2,
 };
 
 const graph: GraphResponse = {
@@ -93,8 +95,6 @@ function offlineDocument(): OfflineTopicDocument {
     nodes: [{
       ...first!,
       body: '缺省正文',
-      path: 'topics/协作方式/n_01.md',
-      fileHash: 'node-hash',
     }],
     boundaryNodes: [],
     resources: {},
@@ -208,8 +208,8 @@ describe('offline detail projection', () => {
     });
     expect(details.topicDetail).toBeNull();
     expect(details.nodeDetail?.body).toBe('节点正文');
-    expect(details.nodeDetail?.path).toBe(topic.path);
-    expect(details.nodeDetail?.fileHash).toBe(topic.fileHash);
+    expect(details.nodeDetail?.resources).toEqual({});
+    expect(details.nodeDetail?.node.id).toBe('n01');
 
     const missing = deriveOfflineDetails({
       graph,
@@ -225,9 +225,44 @@ describe('offline detail projection', () => {
   });
 });
 
-describe('continuation prompt paths', () => {
-  it('joins the topic directory with the workspace root separator', () => {
-    const text = buildContinuationPrompt({ workspace, graph, topic, node: null });
-    expect(text).toContain('主题目录：D:\\vault\\示例\\topics\\协作方式');
+describe('frozen offline document', () => {
+  it('projects the embedded document into the live GraphResponse shape', () => {
+    const doc = offlineDocument();
+    const response = toGraphResponse(doc);
+    expect(response.instanceId).toBe('inst');
+    expect(response.revision).toBe(7);
+    expect(response.workspaceId).toBe('w_1');
+    expect(response.topics).toEqual([topic]);
+    expect(response.nodes).toHaveLength(1);
+    expect(response.nodes[0]).not.toHaveProperty('body');
+    expect(response.nodes[0]?.id).toBe('n01');
+    expect(response.nodes[0]?.revision).toBe(1);
+  });
+
+  it('rejects a document that lost the frozen identity fields', () => {
+    expect(() => parseOfflineDocument({ format: 1, topic: { id: 't1' }, nodes: [] }))
+      .toThrow('导出数据缺少主题信息');
+    expect(() => parseOfflineDocument({
+      format: 1,
+      workspaceId: 'w',
+      topic: { id: 't1', key: 'k' },
+      nodes: [],
+      instanceId: 'i',
+    })).toThrow('导出数据缺少快照版本信息');
+  });
+});
+
+describe('continuation prompt identity', () => {
+  it('carries stable ids and the actual CLI/Skill entries instead of file paths', () => {
+    const text = buildContinuationPrompt({ workspace, graph, topic, node: tree[1]! });
+    expect(text).toContain('workspaceId=w_1');
+    expect(text).toContain('topicId=t_1');
+    expect(text).toContain('nodeId=n02');
+    expect(text).toContain('revision=1');
+    expect(text).toContain('CLI 入口：D:/daily/dist/cli/index.js');
+    expect(text).toContain('Skill 入口：D:/daily/skills/SKILL.md');
+    expect(text).not.toContain('topics/');
+    expect(text).not.toContain('topic.md');
+    expect(text).not.toContain('源文件');
   });
 });

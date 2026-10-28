@@ -7,7 +7,7 @@
   解析顺序（前者优先，命中即停）：
     1. -Cli <绝对路径>：本次调用显式指定；
     2. local.env.json 的 cli：本机安装绑定，按“脚本同目录 → Skill 根”查找；
-    3. 仓库内推导：<repo>/skills/aichat-graph/scripts → <repo>/dist/cli/index.js。
+    3. 仓库内推导：<repo>/skills/aichat-graph/scripts → <repo>/dist/next/cli.js。
   都不成立时明确失败并列出尝试过的路径；不猜正式库、不自动切换运行版本、不修改任何配置。
   显式传了 -Cli 但文件不存在时直接失败，不会悄悄改用本机绑定的其他版本。
   local.env.json 缺失或损坏不影响后续查找，只在失败信息里说明。
@@ -19,7 +19,7 @@
   ./scripts/aichat.ps1 topics --workspace "D:/my-workspace"
 
 .EXAMPLE
-  $runCli = 'D:/repo/.local/daily/dist/cli/index.js'
+  $runCli = 'D:/repo/.local/daily/dist/next/cli.js'
   ./scripts/aichat.ps1 -Cli $runCli topics --workspace 'D:/my-workspace'
 #>
 [CmdletBinding()]
@@ -71,7 +71,7 @@ if (-not $entry -and -not $Cli) {
   $repoRoot = Resolve-Path (Join-Path $scriptDir '../../..') -ErrorAction SilentlyContinue
   $skillMarker = if ($repoRoot) { Join-Path $repoRoot 'skills/aichat-graph/SKILL.md' }
   if ($repoRoot -and (Test-Path -LiteralPath $skillMarker -PathType Leaf)) {
-    $candidate = Join-Path $repoRoot 'dist/cli/index.js'
+    $candidate = Join-Path $repoRoot 'dist/next/cli.js'
     $tried.Add($candidate)
     if (Test-Path -LiteralPath $candidate -PathType Leaf) {
       $entry = (Resolve-Path -LiteralPath $candidate).Path
@@ -87,15 +87,15 @@ if (-not $entry) {
   }
   foreach ($note in $notes) { [Console]::Error.WriteLine('说明：' + $note) }
   if ($Cli) {
-    [Console]::Error.WriteLine('修复办法：确认 -Cli 指向实际存在的 dist/cli/index.js；本次不会改用本机绑定的其他版本。')
+    [Console]::Error.WriteLine('修复办法：确认 -Cli 指向实际存在的 dist/next/cli.js；本次不会改用本机绑定的其他版本。')
   } else {
     [Console]::Error.WriteLine('修复办法（任选其一）：')
     [Console]::Error.WriteLine(
       '  1. 在 Skill 根（与 scripts 同级）写 local.env.json：' +
-      '{ "cli": "<CLI 绝对路径>" }，例如已安装副本指向 .local/daily/dist/cli/index.js；'
+      '{ "cli": "<CLI 绝对路径>" }，例如已安装副本指向 .local/daily/dist/next/cli.js；'
     )
     [Console]::Error.WriteLine('  2. 本次调用传 -Cli "<CLI 绝对路径>"；')
-    [Console]::Error.WriteLine('  3. 仓库内先在工程根执行 npm run build:node 生成 dist/cli/index.js。')
+    [Console]::Error.WriteLine('  3. 仓库内先在工程根执行 npm run build:node 生成 dist/next/cli.js。')
   }
   exit 7
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { GraphNode, GraphResponse, GraphTopic, NodeDetailResponse, TopicDetailResponse } from '../../shared/protocol.js';
+import type { GraphNode, GraphResponse, GraphTopic, NodeDetailResponse, TopicDetailResponse } from '../../next/protocol.js';
 import { MarkdownBody } from './MarkdownBody.js';
 import { StateChip, flowLabel } from './display.js';
 
@@ -22,13 +22,9 @@ export interface DetailPanelProps {
   onSelectNode: (id: string) => void;
   onRetry: () => void;
   onClose: () => void;
-  onOpenTopic: (path: string) => void;
   onCopyContinuation: () => void;
   copied: boolean;
-  /** Markdown image key → data URI, from the same frozen snapshot as the text. */
-  resources?: Readonly<Record<string, string>>;
-  /** Resolves a workspace-relative .md path to a stable node id. */
-  resolvePathToNode?: (path: string) => string | null;
+  /** Opens a card referenced from body text (aichat:node/<id>); absent offline. */
   onOpenNode?: (nodeId: string) => void;
   /** Boundary nodes from other topics, shown as context only (never full body). */
   boundaryNodes?: GraphNode[];
@@ -49,8 +45,8 @@ function versionLabel(instanceId: string, revision: number): string {
 export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
   const {
     graph, tab, onTabChange, topic, node, nodeDetail, topicDetail, loading, error, detailVersion,
-    activeNodeId, selectedNodeId, onSelectNode, onRetry, onClose, onOpenTopic, onCopyContinuation, copied,
-    resources, resolvePathToNode, onOpenNode, boundaryNodes,
+    activeNodeId, selectedNodeId, onSelectNode, onRetry, onClose, onCopyContinuation, copied,
+    onOpenNode, boundaryNodes,
     onCopyLocate, locateCopied, important = false, onToggleImportant, importanceBusy = false, importanceError = null,
   } = props;
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -120,7 +116,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
       ) : null}
       {graph.stale ? (
         <div className="banner banner--stale" role="status">
-          <span className="banner__text">磁盘内容当前无效，这里显示上一份有效内容。</span>
+          <span className="banner__text">当前显示上一份有效快照。</span>
         </div>
       ) : null}
 
@@ -148,7 +144,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
               <h2 id="detail-node-title" ref={headingRef} tabIndex={-1} className="detail__title">{node.title}</h2>
               <p className="detail__source">
                 {node.from !== null ? '来自 ' + (graph.nodes.find((item) => item.id === node.from)?.number ?? node.from) + ' · ' : ''}
-                {topic?.path ?? node.topicId}
+                {topic !== null ? '主题 ' + topic.key + ' · r' + String(topic.revision) : 'topicId ' + node.topicId}
               </p>
               {onCopyLocate !== undefined || onToggleImportant !== undefined ? (
                 <div className="detail__actions">
@@ -160,7 +156,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                       type="button"
                       aria-pressed={important}
                       disabled={importanceBusy}
-                      title={important ? '取消重要标记（写回源文件）' : '标记为重要（写回源文件）'}
+                      title={important ? '取消重要标记（写入数据库）' : '标记为重要（写入数据库）'}
                       onClick={() => { onToggleImportant(!important); }}
                     >
                       {importanceBusy ? '正在保存…' : important ? '取消重要' : '设为重要'}
@@ -189,22 +185,19 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
               {nodeDetail === null && !loading ? (
                 <div className="state-block">
                   <h3>正文暂不可用</h3>
-                  <p>未收到与当前图版本一致的正文。可以重试，或直接阅读源文件。</p>
+                  <p>未收到与当前图版本一致的正文。可以重试，或让 Agent 重新读取这张卡片。</p>
                 </div>
               ) : null}
               {nodeDetail !== null && nodeDetail.node.id === node.id ? (
                 <>
                   <MarkdownBody
                     source={nodeDetail.body}
-                    topicPath={nodeDetail.path}
-                    onOpenTopic={onOpenTopic}
-                    {...(resolvePathToNode !== undefined ? { resolvePathToNode } : {})}
                     {...(onOpenNode !== undefined ? { onOpenNode } : {})}
-                    {...(resources !== undefined ? { resources } : {})}
+                    {...(nodeDetail.resources !== undefined ? { resources: nodeDetail.resources } : {})}
                   />
                   <p className="detail__version">
-                    内容版本 {versionLabel(nodeDetail.instanceId, nodeDetail.revision)} · 来源有效快照
-                    {graph.stale ? '（磁盘文件当前无效）' : ''}
+                    内容版本 {versionLabel(nodeDetail.instanceId, nodeDetail.revision)} · 数据库快照
+                    {graph.stale ? '（当前显示上一份有效快照）' : ''}
                   </p>
                 </>
               ) : null}
@@ -222,12 +215,10 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
               <span className="detail__number">{String(topic.nodeIds.length)} 张卡片</span>
             </div>
             <h2 id="detail-topic-title" ref={headingRef} tabIndex={-1} className="detail__title">{topic.title}</h2>
-            <p className="detail__source">{topic.path} · 文件哈希 {topic.fileHash.slice(0, 12)}…</p>
+            <p className="detail__source">主题键 {topic.key} · r{String(topic.revision)}</p>
             {topicDetail !== null ? (
               <p className="detail__origin" data-source={topicDetail.source}>
-                {topicDetail.source === 'snapshot'
-                  ? '内容来源：有效快照 r' + String(topicDetail.revision) + (graph.stale ? '（磁盘文件当前无效）' : '')
-                  : '内容来源：磁盘原文' + (topicDetail.valid ? '' : '（当前无法解析）')}
+                {'内容来源：数据库快照 r' + String(topicDetail.revision) + (graph.stale ? '（当前显示上一份有效快照）' : '')}
               </p>
             ) : null}
             <div className="detail__actions">
@@ -246,9 +237,9 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                 <span className="spinner" /> 正在获取与当前图版本一致的完整主题…
               </p>
             ) : null}
-            {topicDetail !== null && !topicDetail.valid && topicDetail.source === 'disk' ? (
+            {topicDetail !== null && !topicDetail.valid ? (
               <div className="banner banner--error" role="alert">
-                <span className="banner__text">磁盘上的主题文件当前无法解析，未显示部分正文。</span>
+                <span className="banner__text">该主题的正文当前未能完整读取，未显示部分正文。</span>
               </div>
             ) : null}
             <ol className="topic-reader" aria-label="按结构顺序的卡片">
@@ -279,12 +270,9 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                     </div>
                     <MarkdownBody
                       source={item.body}
-                      topicPath={item.path}
-                      onOpenTopic={onOpenTopic}
                       compact
-                      {...(resolvePathToNode !== undefined ? { resolvePathToNode } : {})}
                       {...(onOpenNode !== undefined ? { onOpenNode } : {})}
-                      {...(resources !== undefined ? { resources } : {})}
+                      {...(topicDetail?.resources !== undefined ? { resources: topicDetail.resources } : {})}
                     />
                   </li>
                 ))

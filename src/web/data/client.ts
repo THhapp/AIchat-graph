@@ -1,4 +1,14 @@
-import type { ApiErrorResponse } from '../../shared/protocol.js';
+/**
+ * 服务端错误响应外形（协议 4 未在 DTO 中冻结错误体，客户端只按最小结构读取）。
+ * 未知 code 一律按通用错误处理。
+ */
+interface ApiErrorResponseBody {
+  error: {
+    code: string;
+    message?: string;
+    details?: unknown;
+  };
+}
 
 export class ApiError extends Error {
   readonly code: string;
@@ -17,7 +27,7 @@ export class ApiError extends Error {
   }
 }
 
-function isErrorBody(value: unknown): value is ApiErrorResponse {
+function isErrorBody(value: unknown): value is ApiErrorResponseBody {
   if (typeof value !== 'object' || value === null) return false;
   const error = (value as { error?: unknown }).error;
   return typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string';

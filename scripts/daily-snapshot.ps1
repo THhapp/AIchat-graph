@@ -153,7 +153,7 @@ function Update-DailySnapshot {
     $originalCli = $script:CliPath
     $originalRuntime = $script:RuntimeRoot
     try {
-      $script:CliPath = Join-Path $ready 'dist\cli\index.js'
+      $script:CliPath = Join-Path $ready 'dist\next\cli.js'
       $script:RuntimeRoot = $ready
       $probe = Invoke-Cli -Arguments @('--help')
       if ($probe.ExitCode -ne 0) { throw ('准备的 CLI 未通过只读帮助检查：' + $probe.StdErr) }
@@ -165,7 +165,7 @@ function Update-DailySnapshot {
       kind = 'aichat-daily'; schemaVersion = 1; preparedAt = (Get-Date).ToString('o')
       nodeVersion = $nodeVersion
       packageLockHash = Get-SnapshotFileHash (Join-Path $ready 'package-lock.json')
-      cliHash = Get-SnapshotFileHash (Join-Path $ready 'dist\cli\index.js')
+      cliHash = Get-SnapshotFileHash (Join-Path $ready 'dist\next\cli.js')
     }
     [IO.File]::WriteAllText((Join-Path $ready 'snapshot.json'), ($manifest | ConvertTo-Json) + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 

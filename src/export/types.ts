@@ -1,13 +1,13 @@
 /**
  * export 模块的对外契约：资源捕获与安全单 HTML 封装。
  *
- * 共享 DTO（OfflineTopicDocument、Diagnostic）由 src/shared/protocol.ts 定义，
- * 这里只导入，不复制长期类型。本模块不实现读者、Markdown 渲染或布局，
- * 也不在运行时执行 Vite。
+ * 资源捕获仍复用共享 Diagnostic / SnapshotVersion；渲染只要求调用方给出
+ * 实际会读取的文档字段，因此文件后端旧文档与 SQLite 领域 OfflineTopicDocument
+ * 都能直接传入（字段完整性由 render 的运行时校验保证）。
+ * 本模块不实现读者、Markdown 渲染或布局，也不在运行时执行 Vite。
  */
 import type {
   Diagnostic,
-  OfflineTopicDocument,
   SnapshotVersion,
 } from '../shared/protocol.js';
 
@@ -102,8 +102,12 @@ export interface ExportDocumentLike {
 }
 
 export interface RenderTopicHtmlInput {
-  /** 完整冻结传输文档；原样整体嵌入，不裁剪、不按折叠/过滤删减。 */
-  document: OfflineTopicDocument;
+  /**
+   * 完整冻结传输文档；原样整体嵌入，不裁剪、不按折叠/过滤删减。
+   * 只要求导出模块实际读取的字段，因此文件后端旧文档与 SQLite 领域文档
+   * 都可以直接传入；节点重要标记等结构由 validateDocument 在运行时校验。
+   */
+  document: ExportDocumentLike;
   /** dist/offline/reader.js 的完整内容（独立 IIFE）。 */
   readerScript: string;
   /** dist/offline/reader.css 的完整内容（所有 url 已内联）。 */

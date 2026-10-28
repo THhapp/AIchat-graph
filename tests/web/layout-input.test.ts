@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { GraphNode, GraphResponse } from '../../src/shared/protocol.js';
+import type { GraphNode, GraphResponse } from '../../src/next/protocol.js';
 import {
   CARD_BASE_HEIGHT,
   CARD_WIDTH,
@@ -27,6 +27,7 @@ function node(
     flow,
     state: 'agreed',
     important: false,
+    revision: 1,
     ...(flow === 'branch' ? { order: order ?? 10 } : {}),
   };
 }
@@ -46,10 +47,10 @@ const graph: GraphResponse = {
   ],
   topics: [{
     id: 't_1',
+    key: 'topic',
     title: 'topic',
-    path: 'topics/t_1.md',
     nodeIds: ['r', 'n1', 'b1', 'b2'],
-    fileHash: 'hash',
+    revision: 1,
   }],
 };
 

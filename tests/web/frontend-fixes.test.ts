@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { GraphNode } from '../../src/shared/protocol.js';
+import type { GraphNode } from '../../src/next/protocol.js';
 import {
   directoryChildCounts,
   directoryRows,
@@ -24,6 +24,7 @@ function node(
     flow,
     state: 'agreed',
     important: false,
+    revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, ...(order !== undefined ? { order } : {}) } : {}),
   };
 }

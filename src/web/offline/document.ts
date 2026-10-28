@@ -1,4 +1,4 @@
-import type { Diagnostic, GraphNode, GraphResponse, OfflineTopicDocument } from '../../shared/protocol.js';
+import type { Diagnostic, GraphNode, GraphResponse, OfflineTopicDocument } from '../../next/protocol.js';
 import { isRecord } from '../../shared/guards.js';
 
 /**
@@ -21,7 +21,7 @@ export function parseOfflineDocument(raw: unknown): OfflineTopicDocument {
   if (!isRecord(raw)) throw new OfflineDocumentError('BAD_DOCUMENT', '导出的主题数据不是对象');
   if (raw['format'] !== 1) throw new OfflineDocumentError('UNSUPPORTED_FORMAT', '不支持的导出格式版本');
   const topic = raw['topic'];
-  if (!isRecord(topic) || typeof topic['id'] !== 'string') {
+  if (!isRecord(topic) || typeof topic['id'] !== 'string' || typeof topic['key'] !== 'string') {
     throw new OfflineDocumentError('BAD_TOPIC', '导出数据缺少主题信息');
   }
   if (!Array.isArray(raw['nodes'])) throw new OfflineDocumentError('BAD_NODES', '导出数据缺少节点列表');
@@ -29,6 +29,9 @@ export function parseOfflineDocument(raw: unknown): OfflineTopicDocument {
     if (!isRecord(node) || typeof node['id'] !== 'string' || typeof node['body'] !== 'string') {
       throw new OfflineDocumentError('BAD_NODE', '导出数据中的节点缺少 id 或正文');
     }
+  }
+  if (typeof raw['instanceId'] !== 'string' || typeof raw['workspaceId'] !== 'string' || typeof raw['revision'] !== 'number') {
+    throw new OfflineDocumentError('BAD_VERSION', '导出数据缺少快照版本信息');
   }
   return raw as unknown as OfflineTopicDocument;
 }
@@ -51,6 +54,26 @@ export function readEmbeddedDocument(doc: Document): OfflineTopicDocument {
   return parseOfflineDocument(parsed);
 }
 
+/** Project one frozen node into the display-only graph row (body stays in the detail). */
+function offlineGraphNode(node: OfflineTopicDocument['nodes'][number]): GraphNode {
+  const important = node.important === true;
+  return {
+    id: node.id,
+    topicId: node.topicId,
+    title: node.title,
+    summary: node.summary,
+    number: node.number,
+    from: node.from,
+    flow: node.flow,
+    state: node.state,
+    ...(node.side !== undefined ? { side: node.side } : {}),
+    ...(node.order !== undefined ? { order: node.order } : {}),
+    important,
+    ...(node.description !== undefined ? { description: node.description } : {}),
+    revision: node.revision,
+  };
+}
+
 /**
  * Builds the same GraphResponse the live reader uses, so viewmodel, layout and
  * search behave identically offline. Boundary nodes are kept for context and are
@@ -67,21 +90,7 @@ export function toGraphResponse(doc: OfflineTopicDocument): GraphResponse {
     activeNode: null,
     stale: false,
     diagnostics,
-    nodes: doc.nodes.map((node) => ({
-      id: node.id,
-      topicId: node.topicId,
-      title: node.title,
-      summary: node.summary,
-      number: node.number,
-      from: node.from,
-      flow: node.flow,
-      state: node.state,
-      // Frozen export: the flag is whatever the exported snapshot said.
-      important: node.important === true,
-      ...(node.side !== undefined ? { side: node.side } : {}),
-      ...(node.order !== undefined ? { order: node.order } : {}),
-      ...(node.description !== undefined ? { description: node.description } : {}),
-    })),
+    nodes: doc.nodes.map(offlineGraphNode),
     topics: [doc.topic],
   };
 }

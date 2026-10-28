@@ -1,4 +1,4 @@
-import type { GraphResponse } from '../../shared/protocol.js';
+import type { GraphResponse } from '../../next/protocol.js';
 
 /** Bumping this invalidates saved panel choices; bump when the meaning changes. */
 export const VIEW_SCHEMA_VERSION = 2;

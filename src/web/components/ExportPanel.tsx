@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { TopicExportStatus } from '../../shared/protocol.js';
+import type { TopicExportStatus } from '../../next/protocol.js';
 import { describeExportFreshness, exportStateLabel, fetchExportStatuses, retryExport, setExportTarget } from '../data/exports.js';
 import { errorMessage } from '../data/client.js';
 

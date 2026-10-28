@@ -1,7 +1,7 @@
 import { Component, StrictMode, useCallback, useEffect, useMemo, useState } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { GraphNode, GraphResponse, OfflineTopicDocument } from '../../shared/protocol.js';
+import type { GraphNode, GraphResponse, OfflineTopicDocument } from '../../next/protocol.js';
 import { buildGraphView } from '../graph/viewModel.js';
 import { layoutInputForView } from '../graph/layoutBridge.js';
 import { computeLayout } from '../layout/index.js';
@@ -94,17 +94,6 @@ function OfflineReader(): React.JSX.Element {
 
   const graph = state?.graph ?? null;
   const bodies = state?.bodies ?? new Map<string, string>();
-
-  // Offline links resolve through each node's real source path, never a file:// jump.
-  const nodeIdByPath = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const node of state?.doc.nodes ?? []) {
-      if (node.sourcePath !== undefined) map.set(node.sourcePath, node.id);
-      map.set(node.path, node.id);
-    }
-    return map;
-  }, [state]);
-  const resolvePathToNode = useCallback((path: string): string | null => nodeIdByPath.get(path) ?? null, [nodeIdByPath]);
 
   const view = useMemo(
     () => (graph === null ? null : buildGraphView(graph, collapsed, null)),
@@ -247,7 +236,6 @@ function OfflineReader(): React.JSX.Element {
               });
             }}
             onTopicFilter={() => { /* offline: single topic, nothing to filter */ }}
-            onSelectTopicPath={() => { setTab('topic'); setRightOpen(true); }}
             onClose={() => { setLeftOpen(false); }}
           />
         ) : null}
@@ -289,17 +277,17 @@ function OfflineReader(): React.JSX.Element {
               onSelectNode={openDetail}
               onRetry={() => undefined}
               onClose={() => { setRightOpen(false); }}
-              onOpenTopic={() => { setTab('topic'); }}
-              resolvePathToNode={resolvePathToNode}
               onOpenNode={(id) => { setSelectedNodeId(id); setTab('node'); }}
-              resources={state?.doc.resources ?? {}}
               boundaryNodes={state?.doc.boundaryNodes ?? []}
               important={selectedNode?.important === true}
               onCopyContinuation={() => {
                 copyText(
                   '离线导出：' + (selectedTopic?.title ?? '') + (selectedNode ? ' · ' + selectedNode.number + ' ' + selectedNode.title : '') +
-                    '\n工作区：' + graph.workspaceId + '\n快照：' + graph.instanceId + ' / r' + String(graph.revision) +
-                    '\n说明：这是离线成品，内容冻结于 ' + exportedAt + '；需要续谈请回到源工作区读取真实文件。',
+                    '\nworkspaceId：' + graph.workspaceId +
+                    (selectedTopic !== null ? '\ntopicId：' + selectedTopic.id : '') +
+                    (selectedNode !== null ? '\nnodeId：' + selectedNode.id + '  revision=' + String(selectedNode.revision) : '') +
+                    '\n快照：' + graph.instanceId + ' / r' + String(graph.revision) +
+                    '\n说明：这是离线成品，内容冻结于 ' + exportedAt + '；续谈请回到源工作区，用实际 CLI／Skill 入口读取上面的 ID。',
                 );
               }}
               copied={copied}

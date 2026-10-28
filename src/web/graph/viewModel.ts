@@ -1,4 +1,4 @@
-import type { GraphNode, GraphResponse } from '../../shared/protocol.js';
+import type { GraphNode, GraphResponse } from '../../next/protocol.js';
 import type { LayoutNodeInput } from '../layout/types.js';
 import { cardHeightForTitle } from './cardMetrics.js';
 

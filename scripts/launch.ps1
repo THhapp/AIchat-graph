@@ -47,13 +47,15 @@ if ($Mode -eq 'Daily') {
   $RuntimeRoot = $DailyRoot
   $ConfigPath = Join-Path $ProjectRoot 'launcher.local.json'
 }
-$CliPath = Join-Path $RuntimeRoot 'dist\cli\index.js'
+$CliPath = Join-Path $RuntimeRoot 'dist\next\cli.js'
+# 与 src/next/protocol.ts 的 INTERFACE_VERSION 保持一致；用于识别旧接口服务。
+$ExpectedInterfaceVersion = 4
 if ($Port -eq 0) {
   $Port = 4317
   if ($Mode -eq 'Development') { $Port = 4318 }
 }
 # 构建产物：构建后必须齐全，也是判断源码是否比产物新的基准。
-$BuildOutputs = @('dist\cli\index.js', 'dist\web\index.html', 'dist\offline\reader.js', 'dist\offline\reader.css', 'dist\build-info.json')
+$BuildOutputs = @('dist\next\cli.js', 'dist\web\index.html', 'dist\offline\reader.js', 'dist\offline\reader.css', 'dist\build-info.json')
 # 分发文件：根入口与程序手册随每日快照复制，让使用者无需安装 Skill 也能调用。
 $DistributionFiles = @('aichat.cmd', 'docs\cli.md')
 # 日用快照完整性的必查项：全部构建产物 + 分发文件。
@@ -213,7 +215,9 @@ function Get-WorkspaceEntries([string] $Path) {
   return @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
 }
 
-<# 只读检查：不创建、不删除、不写入任何东西。 #>
+<# 只读检查：不创建、不删除、不写入任何东西。
+   新工作区以 graph.sqlite 识别；只有旧 workspace.json 的目录属于待导入资料，
+   启动器不自动迁移，也不改写其中任何文件。 #>
 function Assert-WorkspaceUsable([string] $Path) {
   if (-not (Test-Path -LiteralPath $Path)) { return }
   $item = Get-Item -LiteralPath $Path -Force
@@ -222,9 +226,11 @@ function Assert-WorkspaceUsable([string] $Path) {
   }
   $entries = Get-WorkspaceEntries $Path
   if ($entries.Count -eq 0) { return }
-  if (-not (Test-Path -LiteralPath (Join-Path $Path 'workspace.json'))) {
-    Fail ('目录非空且不是 AIchat-graph 工作区：' + $Path) '为避免破坏已有资料，启动器不会在此初始化。请用 -Workspace 指定空目录或已有工作区。'
+  if (Test-Path -LiteralPath (Join-Path $Path 'graph.sqlite') -PathType Leaf) { return }
+  if (Test-Path -LiteralPath (Join-Path $Path 'workspace.json') -PathType Leaf) {
+    Fail ('该目录是旧版 Markdown 资料，还没有 graph.sqlite：' + $Path) ('先用 aichat.cmd import --workspace "' + $Path + '" 一次性导入，再启动；启动器不会自动迁移或改写旧文件。')
   }
+  Fail ('目录非空且不是 AIchat-graph 工作区：' + $Path) '为避免破坏已有资料，启动器不会在此初始化。请用 -Workspace 指定空目录或已有工作区。'
 }
 
 <# 前置检查都通过后才真正建立工作区：只在不存在或空目录时初始化。 #>
@@ -255,27 +261,38 @@ function Ensure-Workspace([string] $Path) {
     Fail ('init 失败（退出码 ' + $result.ExitCode + '）。') $detail
   }
 }
-<# 该工作区是否已由同一服务实例持有：whoami 会核对描述文件、服务身份与磁盘根，
-   只有四处身份真实一致时才 exit 0；任何失败都视为没有可复用服务。 #>
+<# 该工作区是否已有可复用的同版本服务：直接读 <ws>/.aichat/runtime/service.json，
+   再 GET /api/workspace 核对 workspaceId。不依赖 CLI 输出格式，不猜其他路径或端口；
+   任何一步不成立都视为没有可复用服务。 #>
 function Get-ExistingService([string] $Path) {
-  if (-not (Test-Path -LiteralPath $CliPath)) { return $null }
-  $result = Invoke-Cli -Arguments @('whoami', '--workspace', $Path)
-  if (-not $result -or $result.ExitCode -ne 0) { return $null }
+  $descriptorPath = Join-Path $Path '.aichat\runtime\service.json'
+  if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) { return $null }
   try {
-    $parsed = $result.StdOut.Trim() | ConvertFrom-Json
+    $descriptor = (([IO.File]::ReadAllText($descriptorPath)).TrimStart([char]0xFEFF)) | ConvertFrom-Json
   } catch {
     return $null
   }
-  if (-not ($parsed -and $parsed.ok -and $parsed.url)) { return $null }
-  $instanceId = ''
-  $workspaceId = ''
-  if ($parsed.identity) {
-    if ($parsed.identity.instanceId) { $instanceId = [string]$parsed.identity.instanceId }
-    if ($parsed.identity.workspaceId) { $workspaceId = [string]$parsed.identity.workspaceId }
+  if (-not ($descriptor -and $descriptor.url -and $descriptor.workspaceId)) { return $null }
+  $url = ([string]$descriptor.url).TrimEnd('/')
+  try {
+    $response = Invoke-WebRequest -Uri ($url + '/api/workspace') -UseBasicParsing -TimeoutSec 3
+    $identity = $response.Content | ConvertFrom-Json
+  } catch {
+    return $null
   }
+  if ($response.StatusCode -ne 200 -or -not $identity) { return $null }
+  if ([string]$identity.workspaceId -ne [string]$descriptor.workspaceId) { return $null }
+  $serviceInterface = $null
+  if ($identity.program -and $identity.program.interfaceVersion) { $serviceInterface = [int]$identity.program.interfaceVersion }
+  if ($serviceInterface -ne $ExpectedInterfaceVersion) {
+    $actual = if ($null -eq $serviceInterface) { '未声明' } else { [string]$serviceInterface }
+    Fail ('该工作区已有服务，但接口版本不匹配（启动器需要 ' + $ExpectedInterfaceVersion + '，实际 ' + $actual + '）：' + [string]$descriptor.url) '这不是当前程序版本的服务。请先停止该服务并确认 graph.sqlite 已导入；启动器不会结束其他进程。'
+  }
+  $instanceId = ''
+  if ($descriptor.instanceId) { $instanceId = [string]$descriptor.instanceId }
   return [pscustomobject]@{
-    Url = [string]$parsed.url
-    WorkspaceId = $workspaceId
+    Url = [string]$descriptor.url
+    WorkspaceId = [string]$descriptor.workspaceId
     InstanceId = $instanceId
   }
 }
@@ -399,6 +416,8 @@ if ($Help) {
   Write-Host '  日用读取 .local/daily 固定程序，不自动安装依赖或构建。端口默认 4317。'
   Write-Host '  正式工作区必须在 launcher.local.json 中指定，或首次用 -Workspace 选择。'
   Write-Host '  开发读取当前工程，独立 launcher.development.local.json，默认 .local/development-workspace:4318。'
+  Write-Host '  旧 Markdown 工作区先执行 aichat.cmd import --workspace <目录> 一次性导入 graph.sqlite；'
+  Write-Host '  启动器不自动迁移或改写旧文件，也不会结束其他服务进程。'
   Write-Host '  -Workspace <目录>  使用指定工作区，确认可用后记住到当前模式的本机配置。'
   Write-Host '                     路径含空格或中文时请加引号；start.cmd 会原样转交。'
   Write-Host '  -NoBrowser         不打开浏览器（非交互验收用）'
@@ -664,12 +683,18 @@ try {
             try {
               $response = Invoke-WebRequest -Uri $probeUrl -UseBasicParsing -TimeoutSec 3
               $identity = $response.Content | ConvertFrom-Json
-              if ($response.StatusCode -eq 200 -and $identity -and $identity.workspaceId -eq $candidate.workspaceId) {
+              $serviceInterface = $null
+              if ($identity -and $identity.program -and $identity.program.interfaceVersion) { $serviceInterface = [int]$identity.program.interfaceVersion }
+              if ($response.StatusCode -eq 200 -and $identity -and $identity.workspaceId -eq $candidate.workspaceId -and $serviceInterface -eq $ExpectedInterfaceVersion) {
                 $descriptor = $candidate
                 $ready = $true
                 break
               }
-              $lastProblem = '服务身份与描述文件不一致'
+              if ($identity -and $identity.workspaceId -eq $candidate.workspaceId) {
+                $lastProblem = '服务接口版本不匹配（需要 ' + $ExpectedInterfaceVersion + '，实际 ' + [string]$serviceInterface + '）'
+              } else {
+                $lastProblem = '服务身份与描述文件不一致'
+              }
             } catch {
               $lastProblem = $_.Exception.Message
             }

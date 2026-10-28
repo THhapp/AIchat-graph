@@ -1,4 +1,4 @@
-import type { GraphNode } from '../../shared/protocol.js';
+import type { GraphNode } from '../../next/protocol.js';
 
 /**
  * One row of the directory projection.

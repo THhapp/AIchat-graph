@@ -1,566 +1,129 @@
-# AIchat-graph CLI 手册
+# AIchat-graph 程序 CLI 手册（接口 4）
 
-适用接口版本：3。程序版本以 aichat version 的实际输出为准。
-本手册面向人、脚本作者和任意 Agent，说明程序入口、工作区、数据流和完整 CLI 行为。
-独立运行或编写调用脚本时不需要 Skill。Skill 自带另一份独立命令参考，
-并提供讨论组织与节点写作方法；这些协作方法不作为程序校验条件。
+程序入口为 dist/next/cli.js，仓库根也可用 aichat.cmd。默认 JSON；--text 输出摘要。配置优先 --workspace，其次 AICHAT_WORKSPACE，其次程序根 .aichat/default.json。
 
-## 入口与版本
+## 工作区与存储
 
-仓库源码构建后有三个等价入口：
+一个工作区是目录，主存储固定为 graph.sqlite；resources/ 保存正文引用的本地图片；.aichat/runtime/service.json 是本机服务描述；.aichat/local/exports.json 是 HTML 目标。graph.sqlite 保存主题、节点、正文、显式摘要、状态、连接、入边说明、顺序、important、revision 和请求结果。没有节点 Markdown、文件哈希、源码 ranges 或 editRef；正常运行不扫描、监听或写回 .md。
 
-    node dist/cli/index.js <command> [options]
-    npm start -- <command> [options]
-    .\aichat.cmd <command> [options]
+    aichat init <dir> --name "思路库"
+    aichat import --workspace <旧V2工作区> [--name "新名称"]
+    aichat config --workspace <dir>
+    aichat config --show
 
-日用固定版本在 .local/daily：
+init 拒绝已有 graph.sqlite。import 只接受旧 schemaVersion 2 isolated；原文件不动；已有 graph.sqlite 拒绝；导入失败回滚并删除本次新建库。导入会把旧卡片相对 .md 链接改成 aichat:node/<id>，把 resources/ 图片引用归一成资源键。
 
-    .local\daily\aichat.cmd <command> [options]
-    node .local\daily\dist\cli\index.js <command> [options]
+服务：
 
-安装到宿主 Skill 目录的 aichat.ps1 是宿主适配器，不独占程序能力；它最终调用同版本的 CLI。
-不需要为了执行命令而安装 Skill，也不要求把程序加入全局 PATH。
+    aichat serve --workspace <dir> [--port 4317|0] [--no-browser]
 
-除 init 用路径创建、帮助／版本／纯本地自查外，命令都要求显式或默认的工作区；只有读取类可离线读磁盘，写入必须有同工作区服务。
-本程序不通过交互式提问补齐参数，缺少必填参数时直接失败并返回非零退出码。
+服务只监听 127.0.0.1；port 0 选实际端口；descriptor 记录 url/workspaceId/instanceId/pid/rootPath/program。写入命令发现没有 descriptor 时会自启动后台同版服务并等待可用；--no-start-service 可禁止。Agent 不需要手工编排服务。
 
-### 版本、接口与构建
+## 读取
 
-    aichat version
-    aichat version --json
-    aichat --version
-    aichat -V
+直接读 SQLite，返回稳定 nodeId 和整数 revision；不需要服务。CLI 直读时响应 source 为 database。
 
-version 返回程序名、程序版本、接口版本、构建标识、提交号和构建时间。接口版本不是 workspace.json 的 schemaVersion，也不能混用。
-构建标识来自构建清单 dist/build-info.json，综合程序版本与提交号，不用某个单文件哈希冒充整个运行版本。
+    aichat topics
+    aichat validate
+    aichat search <词> [--topic <topicId|key>] [--limit 10] [--page 0]
+    aichat read <topicId|key> --view overview --budget 12000
+    aichat read <topicId|key> --view structure [--from <nodeId>]
+    aichat read <topicId|key> --view content --node <id> [--node <id> ...]
+    aichat read --node <id> [--start <n>] [--length <n>|--full] [--from-heading <标题> [--occurrence <n>]] [--meta]
+    aichat resume <topicId|key> --node <anchorId> --budget 12000
 
-    aichat whoami --workspace <path>
-    aichat whoami --workspace <path> --json
+overview 只给主线与直接分支入口。structure 给主题或子树的全部结构，无正文。content 按顺序给正文切片；UTF-16 偏移不切代理对；--meta 只返回元数据。resume 是续谈入口，一次返回 anchor 正文、必要来路、直接 next/branch 邻居和少量 important/最近节点，其余摘要级，需要时再 content。
 
-whoami 核对描述文件、运行服务、当前磁盘和真实工作区身份，
-同时给出本 CLI 与服务的接口版本和构建标识。
-接口缺失或不匹配时，whoami 仍尽量完成诊断，在线读写拒绝连接该服务；
-read 可转为磁盘读取，在 source／online.reason 中说明原因并返回空 refs。
-这不是连接旧服务成功；写入不回退，也不猜其他程序路径、端口或工作区。
-升级或更新固定版本后，应停止旧服务、启动同版本服务，再让 CLI 指向同版本入口。不要用新 CLI 写旧服务，也不要把只更新 Skill 当成更新程序。
+每个响应带 budget {unit,limit,used,mode}、page.hasMore 和 page.next。cursor 绑定节点 revision；把 page.next 原样传给 --cursor，只可另带 --budget；相关节点变化时返回 409 STALE_READ，丢弃 cursor 并从原范围重读。
 
-## 工作区与服务
+## 写入公共契约
 
-工作区保存 Markdown 源；程序缓存、服务描述和最近更新记录位于 .aichat/。工作区应独立于源码和构建产物。
-
-    aichat init <path> [--name <名称>]
-    aichat serve --workspace <path> [--port <端口>]
-
-init 只创建不存在的新目录，不覆盖已有工作区。serve 默认 127.0.0.1:4317；端口冲突明确失败，不自动换端口，也不结束其他进程。
-同一工作区已有服务时不要启动第二个写进程；服务不可用时可只读磁盘，写入必须拒绝。
-
-常用检查：
-
-    aichat topics --workspace <path>
-    aichat validate --workspace <path>
-    aichat whoami --workspace <path>
-
-topics 返回稳定 topicId、标题、入口路径和节点数；validate 检查磁盘结构与整图。日常保存后不必固定运行 validate，只有诊断异常、外部直接编辑或怀疑损坏时才需要。
-
-### 源文件、图与视图
-
-```text
-<工作区>/
-  workspace.json
-  AGENTS.md
-  topics/<主题目录>/
-    topic.md
-    <nodeId>.md
-  .aichat/
-```
-
-- workspace.json 保存工作区身份、格式与 activeNode；activeNode 不绑定外部 Agent 对话。
-- topic.md 保存主题身份和标题，正文为空；节点各自保存为 Markdown。
-- 节点头信息保存稳定 ID、标题、状态、from／flow、description 等属性；正文保存内容。
-  summary 是可选概述，important 是可选回看标记。编号和坐标由程序派生。
-- .aichat 保存缓存、本机导出绑定、服务描述与事务恢复信息；未恢复事务不能当缓存删除。
-- 新工作区的 AGENTS.md 是本地接入指南，可供宿主按自身规则加载；
-  它不授予源码开发权限，也不复制 Skill。程序不覆盖已有指南或用户的本地约定。
-
-每个主题有一个独立根。next 表示沿当前链继续，branch 表示从来源展开另一条链；
-非根节点只有一个父边，不能跨主题接边，最终结构必须无环且从主题根可达。
-节点正文的写作风格、何时视为共识，由使用者或外部 Agent 的协作方法决定。
-
-典型更新流程：外部 Agent 或脚本读取记录 → 提交 CLI 操作 → 本机服务检查旧版本、
-构造候选并校验 → 文件事务保存 Markdown → 重读源并发布有效快照 →
-浏览器收到 SSE 通知，取得图数据并计算布局。完整正文按需在详情中读取。
-
-服务还监听直接编辑的源文件。直接编辑是文件改变后再解析，不能与托管提交并行修改同一批文件；
-无效源产生诊断，服务保留上一份有效图。外部直接编辑不产生当前的最近更新标记。
-
-当前阅读器的全局主线在最左侧向下，分支向右且同源分支上下组织；
-卡片位置、干线、标签、主题筛选与折叠由程序处理，CLI 不提交自由坐标。
-目录折叠和图上折叠分别保存。浏览器的选择与外部 Agent 的记录目标分别管理。
-
-HTML 导出目标由用户在前端指定。已绑定的主题按有效快照自动生成完整单文件，
-包含折叠的分支和全部正文；离线页面只读，不连接服务或写回源文件。
-正文源、浏览视图和 HTML 成品分别维护，不需要手工双写。
-
-### 外部 Agent 接入
-
-给 Agent 实际程序入口、工作区和主题线索即可按本手册操作：
-
-1. 用 version、whoami 核对运行入口；服务未运行时按用户授权启动已有工作区。
-2. 用 topics 核对主题，保存稳定 topicId；已知节点可直接读取，不必先读全库。
-3. 按需要取正文和顶层 refs，选择 edit、next、branch、batch、insert 或 rearrange。
-4. 根据提交状态继续讨论；只有具体错误或异常才扩大诊断。
-
-新主题使用 create-topic，已有工作区不重复 init。
-采用随附 Skill 时，节点内容与讨论维护遵循其方法；自有 Agent 或脚本也可直接调用这些接口。
-
-## 帮助与本地自查
-
-    aichat --help
-    aichat <command> --help
-    aichat help <command>
-    aichat help <command> --json
-    aichat help batch --op edit|create|connect|important
-    aichat help batch --op edit --json
-    aichat help --json
-
-aichat --help 只给能力分组、推荐路径和进一步查询方法。
-aichat <command> --help 只解释当前命令，不附整份命令大全。
-aichat help <command> --json 返回机器可读说明，至少包含参数、必填性和默认值、互斥关系、输入结构、语义约束、最小合法示例、结果关键字段与下一步。
-aichat help batch --op <operation> 只返回该 batch 操作的字段、约束和最小示例，不返回完整批次 schema；--op 只与 batch 同用，未知操作明确失败并列出可用操作。
-这些帮助和自查不需要工作区、运行服务或安装 Skill。
-
-机器说明中的 JSON Schema 只描述结构；批次的原子性、局部名称生命周期、批前凭据、唯一 next、文件路径由 CLI 解析等语义会另行列出，不能把 JSON Schema 当作完整语义证明。
-
-## 约定与输出
-
-默认输出 JSON。--text 是简短人类摘要，不保证包含所有标识和凭据。大多数命令支持 --json 与 --text 二选一。
-帮助和 version 不需要 --workspace；其他命令接受 --workspace，省略时使用当前目录，serve 必须显式给出。
-写命令的 --verbose 才输出路径、前后哈希、字节数、事务和完整服务身份；默认结果保持精简。
-
-Agent 高层写命令（edit／branch／next／connect／insert／batch／rearrange／important／create-*）的默认结果是顶层对象，不再包在
-result 里：
+所有在线修改用读取时得到的 {id,revision}。revision 持久，服务重启不重置，无关主题不使其失效。冲突返回 412 VERSION_CONFLICT，details 带 expectedRevision/actualRevision/nodeId；不要先读最新再静默代填。单卡 edit 与 batch edit 共用同一个 NodePatch：
 
     {
-      "ok": true,
-      "command": "batch",
-      "workspaceId": "w_...",
-      "topicId": "t_...",
-      "requestId": "uuid",
-      "state": "committed",
-      "revision": 12,
-      "changedNodeIds": ["n_..."],
-      "created": {
-        "topicId": null,
-        "nodeIds": ["n_..."],
-        "aliases": { "new-question": "n_..." }
-      },
-      "refs": { "n_...": "opaque-token" }
-    }
-
-默认至少保留 ok、command、workspaceId、topicId、requestId、state、revision、
-changedNodeIds、created.aliases、refs 和有实际意义的 diagnostics；
-noop 或 committed_refresh_pending 时 refs 可以为空。
-底层 check／apply 仍使用各自的 {ok,command,requestId,httpStatus,service,result} 外壳，
-不等同于高层写结果。
-created.nodeIds 是本批创建节点；created.topicId 在创建主题时有值。refs 的键是稳定 nodeId，值是后续写入使用的 opaque token。
---verbose 才增加 httpStatus、service、transactionId、journalCleaned、touchedFiles、created.paths 和
-created.topicPath。
-
-读取结果不是写结果的外壳：它直接返回 ReadViewResponse，refs 同样在顶层。overview、structure 和离线读取的 refs 是空对象；content
-在线读取只为自己实际返回的节点签发 refs。
-
-### 提交状态
-
-- committed：已提交并发布新快照。
-- noop：没有实际内容变化，不需要再提交一次。
-- committed_refresh_pending：源文件已提交，但快照刷新待完成。按诊断核对服务和源内容，不能当作未写入而重复创建；此时 refs 为空。
-- checked：仅 batch --dry-run 出现的检查状态，未落盘、未更新最近修改，不能当作 committed。
-
-### 退出码与错误
-
-成功为 0，写入仍要看 state。常见退出码：
-
-| 退出码 | 含义 |
-| --- | --- |
-| 0 | 成功 |
-| 2 | 用法、输入、范围、预算或参数错误 |
-| 3 | 工作区或 workspaceId 不一致 |
-| 4 | 412 版本冲突；重新读取后再修改 |
-| 5 | 409 语义冲突，或 STALE_READ 读取范围失效 |
-| 6 | 422 结构校验失败，或离线 validate 不通过 |
-| 7 | 服务不可达、身份/接口不匹配、描述文件陈旧或启动失败 |
-| 8 | 写入结果未知；先查原 requestId |
-| 9 | 非标准 HTTP 错误或端点缺失 |
-| 10 | 未预期内部错误 |
-| 11 | 找不到节点、主题或文件 |
-
-默认 JSON 模式的错误写到 stderr，形如 ok:false、error:{code,message,details,diagnostics,usage}。
---text 模式才输出人类可读错误。退出码相同不代表原因相同，处理时看 code、message、details 和 diagnostics。
-错误诊断不输出完整正文或整批凭据。
-
-可执行的错误提示：
-edit 的缺伴生参数、空摘要、非法 important 等会带 details.field／hint／help="aichat help edit --json"；
-batch 的已知字段误放会指出 ops[i].字段，并提示正确 op（如 important／connect）以及局部帮助入口；
-root 改入边、跨主题来源等服务端结构错误会带 field／nodeId／category=structure。
-程序不会替调用方改写错误输入后继续提交。
-
-## 命令总览
-
-读取：topics、search、read、validate。
-写入：edit、branch、next、connect、insert、batch、rearrange、important、create-topic、create-root。
-工作区与服务：init、serve、whoami。
-底层与恢复：check、apply、status。
-自查：help、version。
-
-## 按任务选择入口
-
-先读相关内容并确认落点，再选一个高层命令；同一场景不需要叠加多个写命令。
-
-| 任务 | 入口 |
-| --- | --- |
-| 完善一张卡片 | edit |
-| 新增纵向后继 | next |
-| 新增独立方向 | branch |
-| 链中插入 | insert |
-| 仅标记重要 | important |
-| 仅整理关系 | rearrange |
-| 多卡混合修改 | batch |
-| 新建主题 | create-topic |
-
-一次完整编辑（标题、状态、摘要、正文、入边说明，以及可选的来源／flow 和重要性）用一个 edit；
-不要把同一张卡的 edit、connect、important 拆成多次提交。多张卡或一次补充旧卡并创建新卡时用 batch。
-各命令的必填参数和互斥关系以 aichat <command> --help 和 aichat help <command> --json 为准；下面是完整用法说明。
-
-
-## 命令分组
-
-### 工作区、服务与诊断
-
-    aichat init <path> [--name <名称>] [--json|--text]
-    aichat serve --workspace <path> [--port <端口>] [--json|--text]
-    aichat topics --workspace <path> [--json|--text]
-    aichat validate --workspace <path> [--json|--text]
-    aichat whoami --workspace <path> [--json|--text]
-
-init 的位置参数是目录，--name 只写工作区显示名；已存在目录不会被覆盖。
-serve 必须显式 --workspace；--port 取值范围 1-65535。
-topics 和 validate 默认只读磁盘，不要求服务；whoami 需要服务描述文件并核对服务身份。
-服务身份或工作区被替换时拒绝继续，不回退到默认端口上的其他工作区。
-
-### 搜索
-
-    aichat search <query> --workspace <path> [--topic <topicId>] [--limit <1-100>] [--page <n>]
-
-搜索标题、概述和正文。默认 10 项，最多 100；--topic 限定稳定主题。搜索不是读取正文的替代：确认 nodeId 后按需 read。
-
-### 渐进读取
-
-read 默认按主题给 overview；有 --node 时默认 content；有 --from 时默认 structure。三种粒度可以直接选择，不要求逐层经过。
-
-    aichat read <topicId|relative-path> --workspace <path>
-    aichat read --topic <topicId|relative-path> [--view overview|structure]
-                [--from <nodeId>] [--budget <n>]
-    aichat read <topicId|relative-path> --view overview [--budget <n>]
-    aichat read <topicId|relative-path> --view structure [--from <nodeId>] [--budget <n>]
-    aichat read --node <nodeId> [--node <nodeId> ...] [--budget <n>]
-    aichat read --node <nodeId> ... [--start <n>] [--length <n>|--full]
-    aichat read --node <nodeId> ... --from-heading <标题> [--occurrence <n>]
-    aichat read --node <nodeId> ... --meta
-    aichat read --cursor <token> [--budget <n>] [--offline]
-
-范围：
-- 主题 overview 返回主线与直接分支入口；分支内部默认未展开，带 read 入口。
-- structure 返回所选范围的节点身份、编号、标题、概述、状态和真实连接，不含正文、路径或写凭据。
-- content 由可重复的 --node 指定，保持主题隔离；也可以直接用已知 nodeId，不要求先看 overview。
-- 主题也可用 --topic 指定，与位置参数二选一；--topic 不能与 --node 或 --cursor 同用。
-- --from 在 overview/structure 中按可达子树读取；起点在主线中段时包含后续 next 和分支，不只读该节点旁支。
-- 边界连接只说明范围如何接入，不会自动扩大修改范围。
-
-预算：
---budget 默认 12000，范围 1-1000000，单位是 UTF-16，不是字节或模型 token。
-预算覆盖最终紧凑 JSON、envelope、items、refs、page.next、budget 和结尾换行；budget.used 等于实际写入 stdout 的字符串长度，可直接核对。
-content 默认每卡最多 4000 UTF-16；多卡共享整次预算，可能需要多页。--meta 也受分页约束。
-
-分页和 cursor：
-page.hasMore 表示当前视图还有下一页；page.next 是 opaque token。
-续读只传 cursor、工作区、所需预算和输出选项，不重发主题、view、node、from 或正文切片参数。
-在线 token 不能直接用于离线续读；服务不可用时从磁盘重新开始相应范围。
-STALE_READ 表示相关范围变化；丢弃旧 token，从头重读。
-truncated 只表示当前正文片段后面还有正文；末段为 false。它不同于 page.hasMore，也不同于 overview 的 scope.note。
-
-精确片段：
---start 从 0 起；--length 为 1-16000；--full 从起点读到末尾，与 --length 互斥，仍受整次预算限制。
---from-heading 从指定标题开始读取，不是只取这一节；默认仍最多 4000 UTF-16。
---occurrence 选择同名标题中的第几个，0 起，只能与 --from-heading 一起使用；它不是全文标题序号。
---meta 只返回元数据与凭据，不返回正文，不能和 start、length、full、from-heading、occurrence 同用。
-
-凭据：
-在线 content 只为当前页实际返回的节点签发凭据，位置是响应顶层 refs[nodeId]。
-overview、structure 不签发凭据；离线读取 refs 为空，不能写入。凭据绑定读取时的真实版本，不能刷新后覆盖未阅读的新内容。
---meta 适合只取凭据；不要为了凭据先读全文。
-
-离线边界：
-read 优先连接同工作区服务；只有服务不可用（退出码 7）才回退磁盘。--offline 明确只读磁盘。
-其他业务错误（范围、预算、版本、参数）直接报错，不混用在线与离线结果。
-程序预算不能保证任意宿主永远不截断大输出；长任务应主动缩小范围或分页。
-
-### 写入前置：凭据与版本
-
-所有在线写入使用真实读取得到的 opaque 凭据。读取响应的顶层 refs 是统一位置：
-
-    {
-      "refs": { "n_...": "opaque-token" }
-    }
-
-命令参数 --ref、--from-ref 只接收 token 字符串，不接收整份凭据对象、显示编号或自行拼接的 nodeId。
-写入成功后默认结果顶层 refs 给出仍可读取的受影响节点凭据；刷新待完成时为空。
-offline refs 为空；服务重启、凭据淘汰或源文件变化后旧凭据失效，需要重新读取。
-同一节点的读取哈希不能被偷偷换成最新值；版本冲突时先重读并重新判断。
-
-### 编辑已有节点
-
-    aichat edit --ref <token>
-                [--title <标题>] [--state agreed|proposed|reference]
-                [--summary <概述>|--clear-summary] [--important true|false]
-                [--body <正文>|--body-file <文件>|--body-stdin]
-                [--append-file <文件>|--replace-file <json>]
-                [--description <入边说明>] [--from-ref <token> --flow next|branch]
-                [--verbose]
-
-至少给一项修改。未给出的字段保持原值；只有显式 --body-stdin 才读取 stdin。
-正文模式互斥：整篇替换、追加、局部替换只能选一种。
---append-file 追加一段正文；段落分隔由程序规范化，不需要手工拼两个换行。
---replace-file 接受 [{"old":"...","new":"..."}] 或 {"replace":[...]}；每个 old 必须非空且恰好匹配一次，不做全局替换。
---summary 设置显式摘要；--clear-summary 显式删除显式摘要，两者互斥。--summary 空字符串不表示删除，会报用法错误并提示 --clear-summary。
---important true|false 与其他字段同次提交；false 明确取消重要标记，不是裸开关。
---description 单独给出时只改当前入边说明，不要求重给父节点或正文。
---from-ref 必须同时给 --flow next|branch 与 --description；只给 --flow 时保留当前来源、改关系类型，也必须给 --description。
---flow 只接受 next／branch，不接受 root；root 节点没有入边，任何 description／from-ref／flow 修改整体失败。
-内容、入边说明／来源和重要性在同一个 patchNode 动作、同一次事务提交；不通过 edit + connect + important 多次调用模拟。
-过期凭据、跨主题来源、自连、占位后继和成环由服务端统一拒绝，不自动刷新旧凭据或挤掉未声明后继。
-仅 important 变化不替换最近内容更新；内容、标题、摘要、正文或入边的真实改写才计入。
-
-一次完整编辑示例：
-
-    aichat edit --ref "<token>" --title "新的标题" --state agreed \
-      --summary "新的概述" --description "更新后的入边理由" --important true \
-      --body-file ".\正文.md" --workspace "<工作区>"
-
-只改来源和关系类型示例：
-
-    aichat edit --ref "<token>" --from-ref "<来源 token>" --flow branch \
-      --description "改接到这里更准确" --workspace "<工作区>"
-
-### 创建节点与主题
-
-    aichat branch --from-ref <token> --title <标题> --description <说明>
-                  (--body <正文>|--body-file <文件>|--body-stdin)
-                  [--summary <概述>] [--state <状态>] [--side left|right] [--order <n>]
-    aichat next --from-ref <token> --title <标题> --description <说明>
-                (--body <正文>|--body-file <文件>|--body-stdin)
-                [--summary <概述>] [--state <状态>] [--topic-id <topicId>]
-    aichat create-topic --topic-title <标题> [--directory <单层目录>] [--title <首卡标题>]
-                        [--summary <概述>] [--state <状态>]
-                        (--body <正文>|--body-file <文件>|--body-stdin)
-    aichat create-root --topic-title <标题> --title <首卡标题>
-                       [--summary <概述>] [--state <状态>]
-                       (--body <正文>|--body-file <文件>|--body-stdin)
-
-branch 创建独立方向；next 创建纵向后继，来源已有 next 时返回 409，不自动插队或顶掉主线。
-新节点默认 proposed；--state 显式设置。side 只是源数据元数据，当前前端统一向右呈现，不用它微调位置。
-order 只对 branch 有意义；未给时由程序稳定分配。创建时可以直接给 --summary，不需要创建后再 edit 一次。
-create-root 只用于空工作区（没有任何节点）；已有内容时新增节点用 next／branch／insert／batch，新主题用 create-topic，目录碰撞明确拒绝。
-新节点插入已有 next 之前不要用 branch 再 next 的两次提交；使用 insert 或 batch。
-
-### 重连与重排
-
-    aichat connect --ref <token> --description <说明>
-                   [--from-ref <token>] [--flow next|branch] [--side left|right] [--order <n>]
-    aichat rearrange (--input <spec.json>|--input-stdin) --workspace <path>
-
-connect 修改一条现有连接；仅改描述也可用。真正改变来源或 flow 时，说明必须解释最终关系。
-一个来源最多一个 next。目标位置已被未声明的后继占用时返回 409，工具不会隐式挤掉原后继。
-rearrange 一次表达多条最终入边，服务端在内存里先腾空再落位，中间状态不写盘；成功后 refs 是顶层映射。
-rearrange 输入：
-
-    {
-      "edits": [
-        {
-          "ref": "<C token>", "fromRef": "<A token>",
-          "flow": "next", "description": "先比较适用范围"
-        },
-        {
-          "ref": "<B token>", "fromRef": "<C token>",
-          "flow": "next", "description": "比较后回到原结论"
-        }
-      ]
-    }
-
-每个 ref 是被改接节点，fromRef 是最终来源。flow 只取 next 或 branch；branch 可带 side/order，next 不得带。
-把占位后继及其他需要换来源的节点一起纳入 edits，并各自给出最终位置。过期哈希 412、占位冲突 409、成环/重复 next 422。
-
-### batch：一次提交完整修改
-
-    aichat batch (--input <file.json>|--input-stdin) --workspace <path> [--dry-run] [--verbose]
-
-batch 是一次高层事务，不是顺序调用多个写命令。一个 batch 只处理一个已存在主题；
-主题创建仍用 create-topic，不把初始化或跨主题操作加入批次。
-输入：
-
-    {
-      "topicId": "t_...",
-      "ops": [
-        {
-          "op": "edit",
-          "target": { "ref": "<旧节点 token>" },
-          "patch": {
-            "append": "对旧问题的新补充",
-            "summary": "更新后的概述"
-          }
-        },
-        {
-          "op": "create",
-          "as": "new-question",
-          "from": { "ref": "<当前链尾 token>" },
-          "flow": "next",
-          "description": "由前面的判断进入新的问题",
-          "title": "新的讨论问题",
-          "body": "包含必要背景和问题的完整正文",
-          "summary": "新问题的概述",
-          "state": "proposed"
-        }
-      ]
-    }
-
-节点选择器二选一：ref 是真实在线凭据；local 用 create 的 as 名称。
-local 只在本次输入有效，不是稳定 nodeId，不写入源文件；必须唯一，可用于本批新节点之间的连接，支持前向引用。
-局部引用不存在、成环、同名重复整体拒绝。不引入全局短编号、长期别名缓存或隐式对话状态。
-
-ops：
-- edit：target 必须是已有 ref；patch 可改 title、state、summary、正文。正文三模式 body/append/replace 互斥；同一节点最多一份 edit。
-- create：声明最终 from、flow、description，可一次给 title、body、summary、
-  state、important；branch 可给 order，未给由程序稳定分配；next 不得带 side/order。
-  新节点属性尽量在 create 一次给齐。
-- connect：target 只能是已有节点；from 可用已有 ref 或本批 local；flow 只取 next/branch。
-  同一节点最多一份最终连接声明。只改 description 时 from 和 flow 可省略；
-  给 from 时必须同时给 flow；final flow=next 不得带 side/order。
-- important：target 已有 ref，只改 important；可与同批 edit/connect 共存，分别修改不同职责字段。
-
-同一已有节点最多一份 edit、一份 connect、一份 important，可以同时出现；它们基于同一份批前版本合成。重复或矛盾的同类修改明确拒绝，不靠 ops 顺序偷偷决定结果。
-
-长正文输入：
-CLI 输入层除 JSON 字符串 body 外，还接受 bodyFile、appendFile、replaceFile，与现有文件输入等价。
-- edit.patch 可用 bodyFile 替代 body，appendFile 替代 append，replaceFile 替代 replace；每个正文模式最多一个来源。
-- create 可用 bodyFile 替代 body。
-- 文件字段和对应 JSON 字段不能同时写；同一内容无论走内联、文件还是 stdin，正文结果一致。
-- --input 文件中的相对路径以该输入文件所在目录为基准；--input-stdin 中的相对路径以调用 cwd 为基准。
-- CLI 读取这些显式文件并转换成正文后再发送；HTTP 服务不根据请求中的本机路径读取正文文件。
-
-原子性与顺序：
-所有已有凭据按批前状态解释；本批先编辑节点再把它作为来源，不需要重新读取。
-程序在内存里生成最终候选图，一次提交；不逐条调用现有写命令，不发布中间结构，不创建临时旁支或过渡说明。
-现有 next 被占时，只有显式声明原后继最终位置才允许改接；不自动丢弃、不自动猜测说明。
-无效引用、过期版本、占位冲突、成环等提交前整体拒绝。提交失败走现有事务与恢复规则，不声称已经发生的 I/O 必然什么都没写。
-无变化为 noop；仅 important 变化不替换最近内容修改集合；混合批次的 lastChanges 包含该主题最终真实改写的内容节点。
-
-dry-run：
---dry-run 复用候选检查但不落盘、不更新最近修改、不返回可冒充已创建节点的写凭据。
-输出 state 为 checked，明确不是 committed；files 说明预计变化。
-dry-run 成功不代表后续提交免于重新检查版本。
-
-错误恢复：
-错误 details 会指出 ops 索引/字段、nodeId 或 local、冲突类别，并提示重读、修正输入、提高预算或查询原 requestId。
-过期凭据 412、占位/语义冲突 409、格式/结构 422；退出码沿用总表。
-同一 requestId 和相同请求体重放不会重复创建节点，应返回相同 created/aliases/refs；不要换 requestId 盲重发。
-结果未知时先 aichat status <原 requestId>，再核对源内容；不要无界重试。
-
-### insert：一次插入链中
-
-    aichat insert \
-      --after-ref <A token> \
-      --before-ref <B token> \
-      --title <新节点标题> \
-      --description <A 到新节点的说明> \
-      --next-description <新节点到 B 的说明> \
-      (--body <正文>|--body-file <文件>|--body-stdin) \
-      [--summary <概述>] [--state <状态>] --workspace <path>
-
-语义固定：原来 A → B → C，结果 A → N → B → C。
-A 与 B 当前必须是同主题内真实相邻的 next；两份凭据都按读取时版本检查。
-两条新关系说明由调用方明确提供，不继承不再准确的旧说明。
-不相邻、过期或结构不合法时整体拒绝，不降级为 append 或 branch；不会先创建旁支再重排。
-insert 复用 batch 核心，是一次提交；它没有 batch 的 local 输入，created.aliases 为空，插入节点身份看 created.nodeIds 与顶层 refs。
-也可用 batch 的 create + connect 表达同一操作：即使 create 写在 connect 前，程序仍按最终图处理，不会因过程里 A 的 next 暂时被占而拒绝。
-
-### 重要标记
-
-    aichat important (--ref <token>|--node <nodeId>) (--on|--off) --workspace <path>
-
---ref 使用已有读取版本；--node 先在线读取 meta 取得凭据，离线不伪造。--ref／--node 与 --on／--off 可自由组合。
-节点 important 只表示值得回看，不改变正文、编号或连接；取消时移除源字段。
-最近更新来自图接口 lastChanges[topicId]，普通 read 不返回。仅 important 不替换最近内容修改集合。
-
-### 底层检查与恢复
-
-    aichat check --input <ChangeRequest.json> --workspace <path>
-    aichat apply --input <ChangeRequest.json> --workspace <path>
-    aichat status <requestId|--input <原变更.json>> --workspace <path>
-
-check 只验证完整底层变更集合，不写盘；apply 提交并检查真实旧哈希。底层 JSON 不是 batch 或 rearrange 的简化格式。
-status 查询原 requestId；unknown 既不证明成功也不证明失败。结果未知时先查原 requestId，再核对源内容，不换 ID 盲重发。
-服务重启或请求记录被清理后，旧 requestId 可能查不到；这不等于一定没写入。
-
-## 完整示例
-
-以下示例都使用实际工作区路径变量。运行前先读取并确认稳定主题 ID。
-
-    .\aichat.cmd topics --workspace "D:\my-graph-vault"
-
-    .\aichat.cmd read "t_..." --workspace "D:\my-graph-vault"
-    .\aichat.cmd read --node "n_..." --workspace "D:\my-graph-vault"
-
-读取顶层 refs 后，用节点对应的 token 写入：
-
-    .\aichat.cmd edit --ref "<token>" --title "新的标题" --state agreed `
-      --summary "新的概述" --description "更新后的入边理由" --important true `
-      --body-file ".\正文.md" --workspace "D:\my-graph-vault"
-
-    .\aichat.cmd edit --ref "<token>" --append-file ".\补充.md" --workspace "D:\my-graph-vault"
-    .\aichat.cmd next --from-ref "<token>" --title "新的问题" `
-      --description "沿着上一个判断继续" --body-file ".\正文.md" `
-      --summary "新问题概述" --workspace "D:\my-graph-vault"
-
-补充旧问题并记录新问题，一次提交：
-
-    .\aichat.cmd batch --input ".\r3-batch.json" --workspace "D:\my-graph-vault"
-    .\aichat.cmd batch --input ".\r3-batch.json" --dry-run --workspace "D:\my-graph-vault"
-
-插入：
-
-    .\aichat.cmd insert --after-ref "<A token>" --before-ref "<B token>" `
-      --title "判断条件" --description "先引入判断条件" `
-      --next-description "满足条件后继续原问题" `
-      --body-file ".\判断.md" --workspace "D:\my-graph-vault"
-
-写成功后从顶层 refs 取新 token：
-
-    {
-      "refs": {
-        "n_...": "opaque-token"
-      },
-      "created": {
-        "nodeIds": ["n_..."],
-        "aliases": {"new-question": "n_..."}
+      "title": "新标题",
+      "state": "agreed",
+      "summary": "显式摘要",
+      "body": "完整正文",
+      "append": "追加片段",
+      "replace": [{"old": "旧片段", "new": "新片段"}],
+      "important": true,
+      "incoming": {
+        "from": {"id": "n_父节点", "revision": 2},
+        "flow": "branch",
+        "description": "为什么改接到这里",
+        "order": 20
       }
     }
 
-## 明确不支持
+- 未出现字段不变；body/append/replace 三选一；replace 的 old 必须恰好匹配一次。
+- summary:null 才是清除；CLI 用 --clear-summary；空字符串不是删除。
+- incoming 只对非 root；只改 description 可单独给；改 from/flow 必须同时给 description；只给 flow 保留当前来源。
+- root 没有入边，任何 incoming 修改整体 422 VALIDATION_FAILED（details 含 field=incoming、category=structure、nodeId）。
+- 内容、入边、重要性同一事务；失败不部分写入；仅 important 不替换最近内容更新集合。
+- 不自动刷新凭据或占用读取版本。
 
-- 不自动合并或删除节点，不整主题替换；整理重复节点仍需基于正文判断和现有结构操作。
-- 不提供通用脚本语言、表达式引擎、工作流引擎或持久化 Agent 会话。
-- 不维护全局当前主题；前端浏览选择和其他对话焦点不改变本对话写入目标。
-- CLI 不直接指定节点坐标或前端样式；阅读器根据结构自动计算版式。
-- batch 不能创建主题或跨主题；insert 不能降级为 branch。
-- 不对旧接口提供别名、双轨输出或永久兼容层。接口版本不匹配时更新程序和服务，而不是猜路径。
+## 单卡 edit
 
-本手册随程序分发；Skill 自带的命令参考独立说明同一接口，不是本手册的运行依赖。
+    aichat edit --node <id> --if-revision <n> [--title <t>] [--state agreed|proposed|reference]
+      [--summary <s>|--clear-summary] [--important true|false]
+      [--body <text>|--body-file <file>|--body-stdin]
+      [--append-file <file>|--replace-file <json>]
+      [--description <why>] [--from-node <id> --from-revision <n> --flow next|branch]
+
+示例：
+
+    aichat edit --node <id> --if-revision 3 --title "更准确的标题" --summary "新的概述" --description "更新后的入边理由" --important true --body-file .\正文.md
+    aichat edit --node <id> --if-revision 3 --description "改后的理由"
+    aichat edit --node <id> --if-revision 3 --from-node <新父> --from-revision 2 --flow branch --description "改接到这里更准确"
+
+至少给一项；--summary 与 --clear-summary 互斥；--from-node 必须带 --from-revision、--flow、--description；只给 --flow 保留来源；metadata-only 不读 stdin，只有 --body-stdin 才读。
+
+## 新增、插入、批量、重排、删除
+
+    aichat next --from-node <id> --from-revision <n> --title <t> --description <why> (--body <text>|--body-file <file>|--body-stdin)
+    aichat branch --from-node <id> --from-revision <n> --title <t> --description <why> (--body ...) [--side left|right] [--order <n>]
+    aichat insert --after-node <a> --after-revision <na> --before-node <b> --before-revision <nb> --title <t> --description <why> --next-description <back> (--body ...)
+    aichat delete --node <id> --if-revision <n>
+    aichat create-topic --title <t> [--key <k>] [--root-title <t>] (--body <text>|--body-file <file>|--body-stdin)
+    aichat important --node <id> [--if-revision <n>] --on|--off
+    aichat batch --input <batch.json>|--input-stdin [--dry-run]
+    aichat rearrange --input <edits.json>
+
+next 遇已有 next 返回 409，不隐式挤掉。insert 只接受当前真实相邻 next。delete 只允许无子节点叶卡，root 不可删，不递归合并。create-topic 的 key 唯一，省略时由标题派生；根卡 state 默认 proposed，summary 未给时由正文首段派生。important 只翻转标记，不要求预读 token。create/next/branch/insert 的正文都可来自 --body、--body-file 或 --body-stdin。
+
+batch 输入：
+
+    {"topicId":"t_...","ops":[
+      {"op":"edit","target":{"id":"n_a","revision":2},"patch":{"title":"补旧问题","append":"新增内容"}},
+      {"op":"create","as":"newQ","from":{"id":"n_a","revision":2},"flow":"branch","description":"从这里旁出","node":{"title":"新问题","body":"正文"}},
+      {"op":"create","as":"afterNew","from":{"local":"newQ"},"flow":"next","description":"新问题继续","node":{"title":"后续","body":"正文"}},
+      {"op":"delete","target":{"id":"n_leaf","revision":1}}
+    ]}
+
+同一主题一次事务；create 可引用本批 local（含安全前向依赖）；edit.patch 与单卡完全相同；create.node 支持 title、body 及可选 summary/state/important/side/order；删除叶卡。CLI 从输入 JSON 读 bodyFile/appendFile/replaceFile（相对输入文件目录，stdin 相对 cwd），服务端不读路径。--dry-run 返回 changes 和 checked，不落库、不写 request。
+
+rearrange 输入：
+
+    {"edits":[{"target":{"id":"n_a","revision":2},"from":{"id":"n_b","revision":4},"flow":"next","description":"最终接法"},{"target":{"id":"n_c","revision":1},"from":{"id":"n_b","revision":4},"flow":"branch","description":"侧枝","order":30}]}
+
+表达最终候选连接，提交后统一校验唯一 next、无环、同主题；不为临时态落旁支。
+
+## 提交结果、最近更新与幂等
+
+成功响应含 requestId、workspaceId、topicId、state（committed|noop）、revision（工作区级，不是节点版本）、changedNodeIds、created{topicId,nodeIds,aliases}、summary、diagnostics。提交后服务通过 SSE 推 snapshot；浏览器取得一致图数据。每主题 lastChanges 只在标题/摘要/正文/内容/入边真实变化时替换；仅 important 不替换；删除从集合移除被删节点。同一 requestId 同请求体重放原结果，不同请求体 409；aichat status <requestId> 直接读库查询。
+
+## 导出与独立 HTML
+
+导出目标由 Web 阅读器设置，存 .aichat/local/exports.json。目标须是工作区与应用根之外的绝对 .html；每次内容/节点 revision 变化自动重建；同路径原子替换；失败保留旧成品；外部改动拒绝覆盖；解绑不删旧文件。成品完整自包含，含正文、布局、脚本、样式和本地图片资源。
+
+## 帮助与错误
+
+    aichat help [<command>] [--json]
+    aichat version
+    aichat whoami
+    aichat status <requestId>
+
+help --json 只返回单命令参数/约束/示例/结果字段，不返回全量 batch schema。错误默认写 stderr：{ok:false,error:{code,message,details,usage}}。退出码：0 成功，2 用法，3 工作区，4 版本冲突（412），5 操作冲突（409），6 校验/结构（422），7 服务不可用，8 结果未知。
+
+恢复：412 重新读取后按新 revision 重试；409 先显式重接已有 next；422 按 details.field/nodeId 修正，root 入边不可改、空摘要用 --clear-summary；结果未知先 status 再决定，不重复提交不同正文；STALE_READ 丢弃 cursor 重读。
