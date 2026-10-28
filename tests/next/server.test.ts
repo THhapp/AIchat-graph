@@ -8,6 +8,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { GraphStore } from '../../src/next/store.js';
 import type {
   AgentChangeRequest,
@@ -580,6 +581,294 @@ describe('next service：service.json 生命周期', () => {
       startGraphService({ root, port: 0, webRoot: null, appRoot: parent }),
     ).rejects.toMatchObject({ code: 'WORKSPACE_NOT_FOUND' });
     expect(await fs.readdir(root)).toEqual([]);
+  });
+});
+
+describe('next service：nodeRevisions 与差异落库', () => {
+  interface NodeRevisionBody {
+    node: { revision: number };
+  }
+
+  it('新建/真实修改给可用版本，noop 给目标版本，删除省略，replay 原样，dry-run 不伪造', async () => {
+    const seeded = await seedWorkspace();
+    const handle = await start(seeded);
+    const workspaceId = seeded.workspaceId;
+
+    // 新建主题：新节点 revision 1。
+    const created = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId,
+      requestId: requestId(),
+      action: {
+        action: 'createTopic',
+        topicTitle: '版本主题',
+        node: { title: '版本起点', body: '版本正文。' },
+      },
+    });
+    expect(created.status).toBe(200);
+    const nodeId = created.body.created.nodeIds[0] as string;
+    expect(created.body.nodeRevisions).toEqual({ [nodeId]: 1 });
+
+    // 直接用返回的 revision 继续编辑，无需额外读。
+    const firstEdit = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId,
+      requestId: requestId(),
+      action: {
+        action: 'batch',
+        topicId: created.body.created.topicId,
+        ops: [
+          {
+            op: 'edit',
+            target: { id: nodeId, revision: created.body.nodeRevisions[nodeId] as number },
+            patch: { title: '版本标题' },
+          },
+        ],
+      },
+    });
+    expect(firstEdit.status).toBe(200);
+    expect(firstEdit.body.state).toBe('committed');
+    expect(firstEdit.body.nodeRevisions).toEqual({ [nodeId]: 2 });
+
+    const secondRequest = {
+      workspaceId,
+      requestId: requestId(),
+      action: {
+        action: 'batch',
+        topicId: created.body.created.topicId,
+        ops: [
+          {
+            op: 'edit',
+            target: { id: nodeId, revision: firstEdit.body.nodeRevisions[nodeId] as number },
+            patch: { append: '用映射版本追加。' },
+          },
+        ],
+      },
+    };
+    const secondEdit = await postJson<AgentChangeResponse>(
+      handle.url + '/api/agent/changes',
+      secondRequest,
+    );
+    expect(secondEdit.status).toBe(200);
+    expect(secondEdit.body.nodeRevisions).toEqual({ [nodeId]: 3 });
+
+    // 同一请求体重放：原样返回当时的映射，不按现在重新计算。
+    const replay = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', secondRequest);
+    expect(replay.body.replayed).toBe(true);
+    expect(replay.body.nodeRevisions).toEqual({ [nodeId]: 3 });
+
+    // noop：标题没变时也给目标实际版本，changedNodeIds 为空。
+    const noop = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId,
+      requestId: requestId(),
+      action: {
+        action: 'batch',
+        topicId: created.body.created.topicId,
+        ops: [
+          { op: 'edit', target: { id: nodeId, revision: 3 }, patch: { title: '版本标题' } },
+        ],
+      },
+    });
+    expect(noop.body.state).toBe('noop');
+    expect(noop.body.changedNodeIds).toEqual([]);
+    expect(noop.body.nodeRevisions).toEqual({ [nodeId]: 3 });
+
+    // 新节点给 1；删除后同一次响应里不出现被删节点。
+    const branch = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId,
+      requestId: requestId(),
+      action: {
+        action: 'createNext',
+        from: { id: nodeId, revision: 3 },
+        description: '挂一张临时卡',
+        node: { title: '临时卡', body: '临时正文。' },
+      },
+    });
+    expect(branch.status).toBe(200);
+    const branchId = branch.body.created.nodeIds[0] as string;
+    expect(branch.body.nodeRevisions).toEqual({ [branchId]: 1 });
+
+    const removed = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId,
+      requestId: requestId(),
+      action: { action: 'delete', target: { id: branchId, revision: 1 } },
+    });
+    expect(removed.status).toBe(200);
+    expect(removed.body.state).toBe('committed');
+    expect(removed.body.changedNodeIds).toContain(branchId);
+    expect(removed.body.nodeRevisions).toEqual({});
+
+    // dry-run：不返回、也不伪造提交后版本。
+    const dry = await postJson<AgentCheckResponse>(handle.url + '/api/agent/changes', {
+      workspaceId,
+      requestId: requestId(),
+      dryRun: true,
+      action: {
+        action: 'batch',
+        topicId: created.body.created.topicId,
+        ops: [{ op: 'edit', target: { id: nodeId, revision: 3 }, patch: { title: 'dry' } }],
+      },
+    });
+    expect(dry.status).toBe(200);
+    expect(dry.body).not.toHaveProperty('nodeRevisions');
+    const afterDry = await getJson<NodeRevisionBody>(handle.url + '/api/nodes/' + nodeId);
+    expect(afterDry.body.node.revision).toBe(3);
+  });
+
+  it('rearrange 最终无差异 → noop，节点/工作区 revision 不增长', async () => {
+    const seeded = await seedWorkspace();
+    const handle = await start(seeded);
+
+    const branch = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId: seeded.workspaceId,
+      requestId: requestId(),
+      action: {
+        action: 'createBranch',
+        from: { id: seeded.rootNodeId, revision: 1 },
+        description: '普通侧枝',
+        node: { title: '侧枝', body: '侧枝正文。', side: 'right', order: 10 },
+      },
+    });
+    expect(branch.status).toBe(200);
+    const branchId = branch.body.created.nodeIds[0] as string;
+    const revisionBefore = (await getJson<GraphResponse>(handle.url + '/api/graph')).body.revision;
+
+    const rearranged = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId: seeded.workspaceId,
+      requestId: requestId(),
+      action: {
+        action: 'rearrange',
+        edits: [
+          {
+            target: { id: branchId, revision: 1 },
+            from: { id: seeded.rootNodeId, revision: 1 },
+            flow: 'branch',
+            description: '普通侧枝',
+            order: 10,
+          },
+        ],
+      },
+    });
+    expect(rearranged.status).toBe(200);
+    expect(rearranged.body.state).toBe('noop');
+    expect(rearranged.body.revision).toBe(revisionBefore);
+    expect(rearranged.body.nodeRevisions).toEqual({ [branchId]: 1 });
+    expect(rearranged.body.changedNodeIds).toEqual([]);
+    const graph = await getJson<GraphResponse>(handle.url + '/api/graph');
+    expect(graph.body.revision).toBe(revisionBefore);
+  });
+
+  it('commit 只写真实变化的节点/主题行；noop 不写业务表', async () => {
+    const seeded = await seedWorkspace();
+    const handle = await start(seeded);
+    const observer = new DatabaseSync(path.join(seeded.root, 'graph.sqlite'));
+    try {
+      observer.exec(`
+        CREATE TABLE _writes(kind TEXT, id TEXT);
+        CREATE TRIGGER w_nodes_ins AFTER INSERT ON nodes BEGIN INSERT INTO _writes VALUES('node_insert', NEW.id); END;
+        CREATE TRIGGER w_nodes_upd AFTER UPDATE ON nodes BEGIN INSERT INTO _writes VALUES('node_update', NEW.id); END;
+        CREATE TRIGGER w_nodes_del AFTER DELETE ON nodes BEGIN INSERT INTO _writes VALUES('node_delete', OLD.id); END;
+        CREATE TRIGGER w_topics_ins AFTER INSERT ON topics BEGIN INSERT INTO _writes VALUES('topic_insert', NEW.id); END;
+        CREATE TRIGGER w_topics_upd AFTER UPDATE ON topics BEGIN INSERT INTO _writes VALUES('topic_update', NEW.id); END;
+        CREATE TRIGGER w_topics_del AFTER DELETE ON topics BEGIN INSERT INTO _writes VALUES('topic_delete', OLD.id); END;
+        CREATE TRIGGER w_workspace_upd AFTER UPDATE ON workspace BEGIN INSERT INTO _writes VALUES('workspace_update', NEW.id); END;
+        CREATE TRIGGER w_requests_ins AFTER INSERT ON requests BEGIN INSERT INTO _writes VALUES('request_insert', NEW.request_id); END;
+      `);
+
+      const edit = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+        workspaceId: seeded.workspaceId,
+        requestId: requestId(),
+        action: {
+          action: 'batch',
+          topicId: seeded.topicId,
+          ops: [
+            { op: 'edit', target: { id: seeded.rootNodeId, revision: 1 }, patch: { title: '只改这一行' } },
+          ],
+        },
+      });
+      expect(edit.status).toBe(200);
+      const writes = observer
+        .prepare('SELECT kind, id FROM _writes ORDER BY kind, id')
+        .all() as Array<{ kind: string; id: string }>;
+      const idsOf = (kind: string): string[] =>
+        writes.filter((row) => row.kind === kind).map((row) => row.id);
+      expect(idsOf('node_insert')).toEqual([]);
+      expect(idsOf('node_delete')).toEqual([]);
+      // 只有目标节点被 UPDATE，其他节点不写。
+      expect(idsOf('node_update')).toEqual([seeded.rootNodeId]);
+      expect(idsOf('topic_update')).toEqual([seeded.topicId]);
+      expect(idsOf('workspace_update')).toHaveLength(1);
+      expect(idsOf('request_insert')).toHaveLength(1);
+
+      observer.exec('DELETE FROM _writes');
+      const current = await getJson<NodeRevisionBody>(handle.url + '/api/nodes/' + seeded.rootNodeId);
+      const noop = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+        workspaceId: seeded.workspaceId,
+        requestId: requestId(),
+        action: {
+          action: 'batch',
+          topicId: seeded.topicId,
+          ops: [
+            {
+              op: 'edit',
+              target: { id: seeded.rootNodeId, revision: current.body.node.revision },
+              patch: { title: '只改这一行' },
+            },
+          ],
+        },
+      });
+      expect(noop.body.state).toBe('noop');
+      const noopWrites = observer
+        .prepare('SELECT kind FROM _writes')
+        .all() as Array<{ kind: string }>;
+      // 幂等记录仍写入，但节点/主题/工作区都不写。
+      expect(noopWrites.filter((row) => row.kind !== 'request_insert')).toEqual([]);
+      expect(noopWrites.filter((row) => row.kind === 'request_insert')).toHaveLength(1);
+
+      // 新建：只 INSERT 新节点行，不重建其他节点/主题。
+      observer.exec('DELETE FROM _writes');
+      const branch = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+        workspaceId: seeded.workspaceId,
+        requestId: requestId(),
+        action: {
+          action: 'createNext',
+          from: { id: seeded.rootNodeId, revision: current.body.node.revision },
+          description: '插入一行',
+          node: { title: '新行', body: '新行正文。' },
+        },
+      });
+      expect(branch.status).toBe(200);
+      const branchId = branch.body.created.nodeIds[0] as string;
+      const createWrites = observer
+        .prepare('SELECT kind, id FROM _writes ORDER BY kind, id')
+        .all() as Array<{ kind: string; id: string }>;
+      const createdIdsOf = (kind: string): string[] =>
+        createWrites.filter((row) => row.kind === kind).map((row) => row.id);
+      expect(createdIdsOf('node_insert')).toEqual([branchId]);
+      expect(createdIdsOf('node_update')).toEqual([]);
+      expect(createdIdsOf('node_delete')).toEqual([]);
+      expect(createdIdsOf('topic_insert')).toEqual([]);
+      // 主题 lastChange 更新仍是单独 UPDATE，不会全表重建。
+      expect(createdIdsOf('topic_update')).toEqual([seeded.topicId]);
+      expect(createdIdsOf('request_insert')).toHaveLength(1);
+
+      // 删除：只 DELETE 目标节点行。
+      observer.exec('DELETE FROM _writes');
+      const deleted = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+        workspaceId: seeded.workspaceId,
+        requestId: requestId(),
+        action: { action: 'delete', target: { id: branchId, revision: 1 } },
+      });
+      expect(deleted.body.state).toBe('committed');
+      const deleteWrites = observer
+        .prepare('SELECT kind, id FROM _writes ORDER BY kind, id')
+        .all() as Array<{ kind: string; id: string }>;
+      const deletedIdsOf = (kind: string): string[] =>
+        deleteWrites.filter((row) => row.kind === kind).map((row) => row.id);
+      expect(deletedIdsOf('node_delete')).toEqual([branchId]);
+      expect(deletedIdsOf('node_insert')).toEqual([]);
+      expect(deletedIdsOf('node_update')).toEqual([]);
+    } finally {
+      observer.close();
+    }
   });
 });
 

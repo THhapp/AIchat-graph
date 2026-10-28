@@ -83,7 +83,11 @@ replace 的 old 必须恰好匹配一次；summary:null 清除显式摘要；inc
 
 ## 提交与恢复
 
-成功响应：ok、command、requestId、workspaceId、topicId、state（committed|noop）、revision（工作区级，不是节点版本；节点版本从 read/resume 的 node.revision 取）、changedNodeIds、created{topicId,nodeIds,aliases}、summary、diagnostics。提交后 SSE 更新页面；同主题最近更新替换，仅 important 不替换。
+成功响应：ok、command、requestId、workspaceId、topicId、state（committed|noop）、revision（工作区级，不是节点版本）、nodeRevisions、changedNodeIds、created{topicId,nodeIds,aliases}、summary、diagnostics。
+
+nodeRevisions 是 nodeId → 本次结果实际持久版本：新建、真实修改和动作明确操作且仍存在的目标都包含；noop 也给目标版本；删除节点不出现。下一步直接用 nodeRevisions[nodeId] 作为写入版本，不必再读；不要拿工作区 revision 当节点版本。replay 返回当时保存的映射；dry-run 不返回伪造版本。
+
+提交后 SSE 更新页面；同主题最近更新替换，仅 important 不替换。
 
 - 412 VERSION_CONFLICT：重读节点，按新 revision 重新判断后提交；不要静默用最新值覆盖。
 - 409 OPERATION_CONFLICT：已有 next 或 insert 非相邻；先明确最终结构再 rearrange。

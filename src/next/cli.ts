@@ -287,7 +287,7 @@ const COMMANDS: readonly CommandSpec[] = [
       'aichat edit --node <id> --description "改接入边说明"',
       'aichat edit --node <id> --from-node <src> --from-revision <n> --flow branch --description "改接到这里更准确"',
     ],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'important',
@@ -303,7 +303,7 @@ const COMMANDS: readonly CommandSpec[] = [
     ],
     constraints: ['--on 与 --off 必须且只能给一个。', '仅重要标记变化不替换最近内容更新集合。'],
     examples: ['aichat important --node <id> --on'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'next',
@@ -322,7 +322,7 @@ const COMMANDS: readonly CommandSpec[] = [
     ],
     constraints: ['正文必须给出：--body／--body-file／--body-stdin 三选一。'],
     examples: ['aichat next --from-node <id> --from-revision <n> --title "下一步" --description "继续追问" --body-stdin'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'branch',
@@ -343,7 +343,7 @@ const COMMANDS: readonly CommandSpec[] = [
     ],
     constraints: ['正文必须给出：--body／--body-file／--body-stdin 三选一。', 'side／order 只影响同一来源下的旁支顺序。'],
     examples: ['aichat branch --from-node <id> --from-revision <n> --title "旁支" --description "另一个方向" --body-stdin'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'insert',
@@ -368,7 +368,7 @@ const COMMANDS: readonly CommandSpec[] = [
     ],
     constraints: ['正文必须给出：--body／--body-file／--body-stdin 三选一。', '非相邻 next 由服务整体拒绝，不降级。'],
     examples: ['aichat insert --after-node <a> --after-revision <n> --before-node <b> --before-revision <m> --title "补一问" --description "先追问" --next-description "再回到原问题" --body-stdin'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'batch',
@@ -382,7 +382,7 @@ const COMMANDS: readonly CommandSpec[] = [
       '本地仅在节点 revision 匹配时提交；一批只提交一次事务，失败不部分落库。',
     ],
     examples: ['aichat batch --input batch.json', 'aichat batch --input-stdin --dry-run < batch.json'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'rearrange',
@@ -392,7 +392,7 @@ const COMMANDS: readonly CommandSpec[] = [
     options: [...WRITE_COMMON, pathOption('input', '重排 JSON 文件', { valueName: '<edits.json>', required: true })],
     constraints: ['输入形状：{ edits:[{target:{id,revision}, from:{id,revision}, flow, description, order?}] }。'],
     examples: ['aichat rearrange --input rearrange.json'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'delete',
@@ -402,7 +402,7 @@ const COMMANDS: readonly CommandSpec[] = [
     options: [...WRITE_COMMON, stringOption('node', '节点 ID', { valueName: '<id>', required: true }), integerOptionSpec('if-revision', '节点 revision', { min: 0, required: true })],
     constraints: ['只能删除没有子节点的叶子卡片；有后继时服务拒绝。'],
     examples: ['aichat delete --node <id> --if-revision <n>'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
   {
     name: 'create-topic',
@@ -418,7 +418,7 @@ const COMMANDS: readonly CommandSpec[] = [
     ],
     constraints: ['正文必须给出：--body／--body-file／--body-stdin 三选一。', '主题 key 在库内唯一。'],
     examples: ['aichat create-topic --title "新主题" --body "起点正文"'],
-    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'created', 'summary', 'diagnostics'],
+    resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
   },
 
   /* ----------------------------- workspace ------------------------------ */
@@ -1036,6 +1036,8 @@ function writePayload(
     state: response.state,
     revision: response.revision,
     changedNodeIds: [...response.changedNodeIds],
+    // 默认 JSON 就带持久 node revision，调用方无需再读一次即可继续编辑。
+    nodeRevisions: { ...response.nodeRevisions },
     created: {
       topicId: response.created.topicId,
       nodeIds: [...response.created.nodeIds],

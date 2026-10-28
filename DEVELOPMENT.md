@@ -67,7 +67,7 @@ batch 支持话题内 edit/create/delete 与 local 别名；insert 只接受当�
 
 ## 事务、SSE 与导出
 
-GraphStore.commit 在一个 BEGIN IMMEDIATE 中完成候选计算、校验、revision、最近更新和持久化；失败整体回滚。提交成功后 runtime 计算受影响主题，广播 snapshot SSE，并调度导出。
+GraphStore.commit 在一个 BEGIN IMMEDIATE 中完成候选计算、校验、revision、最近更新和持久化；失败整体回滚。是否提交由 before/candidate 的最终字段差异决定，rearrange 写入相同最终值时为 noop。正常提交按 ID 差异写库：新节点/主题 INSERT、真实变化 UPDATE ... WHERE id、缺失行 DELETE ... WHERE id；未变化的节点和主题不写。全表重建只保留在一次性 importState。成功响应同时返回工作区 revision 与 nodeRevisions（nodeId → 持久节点版本；新建、真实修改、明确操作且仍存在的目标；删除省略；replay 原样；dry-run 不伪造），调用方可直接拿它继续写。提交成功后 runtime 计算受影响主题，广播 snapshot SSE，并调度导出。
 
 导出用同一已提交快照组装 OfflineTopicDocument；目标从 .aichat/local/exports.json 读取。要求：
 

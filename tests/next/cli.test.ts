@@ -461,6 +461,109 @@ describe('Interface 4 CLI', () => {
     expect(after.flow).toBe('branch');
   });
 
+  it('写命令默认输出 nodeRevisions，可直接作为下一次写入版本', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '版本', '--body', '版本正文', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const nodeId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const createdRevisions = created['nodeRevisions'] as Record<string, number>;
+    expect(createdRevisions).toEqual({ [nodeId]: 1 });
+
+    // 默认 JSON（非 --verbose）就能拿到 revision，并直接用于下一次 edit。
+    const first = writePayloadOf(
+      await cli(
+        [
+          'edit', '--node', nodeId, '--if-revision', String(createdRevisions[nodeId]),
+          '--title', '版本标题', '--workspace', root,
+        ],
+        context,
+      ),
+    );
+    expect(first['state']).toBe('committed');
+    const firstRevisions = first['nodeRevisions'] as Record<string, number>;
+    expect(firstRevisions).toEqual({ [nodeId]: 2 });
+
+    const appendFile = path.join(parent, 'append.md');
+    await fs.writeFile(appendFile, '映射版本追加。', 'utf8');
+    const second = writePayloadOf(
+      await cli(
+        [
+          'edit', '--node', nodeId, '--if-revision', String(firstRevisions[nodeId]),
+          '--append-file', appendFile, '--workspace', root,
+        ],
+        context,
+      ),
+    );
+    expect(second['state']).toBe('committed');
+    const secondRevisions = second['nodeRevisions'] as Record<string, number>;
+    expect(secondRevisions).toEqual({ [nodeId]: 3 });
+
+    // noop 也给目标实际版本，changedNodeIds 为空。
+    const noop = writePayloadOf(
+      await cli(
+        [
+          'edit', '--node', nodeId, '--if-revision', String(secondRevisions[nodeId]),
+          '--title', '版本标题', '--workspace', root,
+        ],
+        context,
+      ),
+    );
+    expect(noop['state']).toBe('noop');
+    expect(noop['changedNodeIds']).toEqual([]);
+    expect(noop['nodeRevisions']).toEqual({ [nodeId]: 3 });
+
+    // batch：编辑目标与新建节点都在映射里，新建节点版本为 1。
+    const batchFile = path.join(parent, 'versions-batch.json');
+    await fs.writeFile(
+      batchFile,
+      JSON.stringify({
+        topicId,
+        ops: [
+          { op: 'edit', target: { id: nodeId, revision: 3 }, patch: { title: '批量标题' } },
+          {
+            op: 'create', as: '新卡', from: { id: nodeId, revision: 3 }, flow: 'branch',
+            description: '批量新卡', node: { title: '新卡', body: '新卡正文' },
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const batch = writePayloadOf(await cli(['batch', '--input', batchFile, '--workspace', root], context));
+    const batchBranchId = (batch['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const batchRevisions = batch['nodeRevisions'] as Record<string, number>;
+    expect(batchRevisions[nodeId]).toBe(4);
+    expect(batchRevisions[batchBranchId]).toBe(1);
+
+    // 删除后同一响应不保留被删节点。
+    const removed = writePayloadOf(
+      await cli(['delete', '--node', batchBranchId, '--if-revision', '1', '--workspace', root], context),
+    );
+    expect(removed['state']).toBe('committed');
+    expect(removed['nodeRevisions']).toEqual({});
+    expect(removed['changedNodeIds']).toContain(batchBranchId);
+
+    // dry-run 不伪造提交后版本。
+    const dryFile = path.join(parent, 'versions-dry.json');
+    await fs.writeFile(
+      dryFile,
+      JSON.stringify({
+        topicId,
+        ops: [{ op: 'edit', target: { id: nodeId, revision: 4 }, patch: { title: 'dry' } }],
+      }),
+      'utf8',
+    );
+    const dry = writePayloadOf(await cli(['batch', '--input', dryFile, '--dry-run', '--workspace', root], context));
+    expect(dry['dryRun']).toBe(true);
+    expect(dry['nodeRevisions']).toBeUndefined();
+  });
+
   it('错误映射：过期 revision 412→4、422→6、服务不可达结果未知→8', async () => {
     const { parent, root, workspaceId } = await initWorkspace();
     const service = await startMockService({ root, workspaceId });

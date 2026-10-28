@@ -49,7 +49,7 @@ agreed 只对应明确认可的范围；新提议用 proposed，资料与一般�
 3. 原位更新将补充融入对应位置，清除失效或重复叙述；新的思考步骤由新节点承载。
    提交前确认本轮值得保留的问题已有落点，标题、概述、正文、状态和连接说明一致。
    多张卡混合修改用 batch（同一事务）；补旧卡同时加新卡、链中插入、纯重连和叶卡删除分别用 batch/insert/rearrange/delete。
-4. 完成必要提交，检查 state、revision、changedNodeIds 和 diagnostics；具体失败或未解决冲突需说明。
+4. 完成必要提交，检查 state、revision、nodeRevisions、changedNodeIds 和 diagnostics；同一节点继续修改时直接用 nodeRevisions[nodeId]，不再插入一次 read。
    无实质变化可不写；成功后自然继续讨论，不固定重读全图、验证或汇报维护过程。
 
 ## 操作边界

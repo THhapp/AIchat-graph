@@ -357,6 +357,11 @@ export interface AgentChangeResponse extends SnapshotVersion {
   state: 'committed' | 'noop' | 'committed_refresh_pending';
   created: AgentCreatedIds;
   changedNodeIds: string[];
+  /**
+   * 本次新建、真实修改，以及动作明确操作且仍存在的节点 → 提交后持久 node revision。
+   * 删除的节点不出现；noop 也给出目标的实际版本；replay 原样返回；dry-run 不伪造。
+   */
+  nodeRevisions: Record<string, number>;
   replayed?: boolean;
   summary: string;
   diagnostics: Diagnostic[];

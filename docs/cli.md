@@ -111,7 +111,26 @@ rearrange 输入：
 
 ## 提交结果、最近更新与幂等
 
-成功响应含 requestId、workspaceId、topicId、state（committed|noop）、revision（工作区级，不是节点版本）、changedNodeIds、created{topicId,nodeIds,aliases}、summary、diagnostics。提交后服务通过 SSE 推 snapshot；浏览器取得一致图数据。每主题 lastChanges 只在标题/摘要/正文/内容/入边真实变化时替换；仅 important 不替换；删除从集合移除被删节点。同一 requestId 同请求体重放原结果，不同请求体 409；aichat status <requestId> 直接读库查询。
+成功响应示例：
+
+    {
+      "ok": true,
+      "command": "edit",
+      "requestId": "...",
+      "workspaceId": "w_...",
+      "topicId": "t_...",
+      "state": "committed",
+      "revision": 12,
+      "changedNodeIds": ["n_..."],
+      "nodeRevisions": { "n_...": 4 },
+      "created": { "topicId": null, "nodeIds": [], "aliases": {} },
+      "summary": "1 update",
+      "diagnostics": []
+    }
+
+revision 是工作区级版本；nodeRevisions 是稳定 nodeId 到本次结果中实际持久节点版本的映射，默认 JSON 就返回。它覆盖新建节点、真实修改节点，以及本动作明确操作且仍存在的目标；noop 也返回目标实际版本，删除节点不出现。下一步可直接把 nodeRevisions[nodeId] 作为 --if-revision，不必额外读一次；不要拿工作区 revision 当节点版本。映射随成功响应一起写入 requests，同 requestId 重放返回当时保存的结果，不在重放时读取最新版本；dry-run 不返回伪造的提交后版本。
+
+提交后服务通过 SSE 推 snapshot；浏览器取得一致图数据。每主题 lastChanges 只在标题/摘要/正文/内容/入边真实变化时替换；仅 important 不替换；删除从集合移除被删节点。同一 requestId 同请求体重放原结果，不同请求体 409；aichat status <requestId> 直接读库查询。
 
 ## 导出与独立 HTML
 

@@ -118,6 +118,29 @@ export class GraphStore {
     return snapshot;
   }
 
+
+  /** 一次性导入专用：工作区为空时全量重建；正常 commit 只走 persistDiff。 */
+  private persist(state: State): void {
+    this.db.exec('DELETE FROM nodes');
+    this.db.exec('DELETE FROM topics');
+    const insertTopic = this.db.prepare(
+      'INSERT INTO topics(id,key,title,revision,last_change_at,last_change_ids) VALUES(?,?,?,?,?,?)',
+    );
+    for (const topic of state.topics) {
+      insertTopic.run(topic.id, topic.key, topic.title, topic.revision, topic.lastChangeAt, JSON.stringify(topic.lastChangeIds));
+    }
+    const insertNode = this.db.prepare(
+      'INSERT INTO nodes(id,topic_id,title,body,summary,state,from_id,flow,description,side,ord,important,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    );
+    for (const node of state.nodes) {
+      insertNode.run(node.id, node.topicId, node.title, node.body, node.summary, node.state, node.from,
+        node.flow, node.description, node.side, node.order, node.important ? 1 : 0, node.revision);
+    }
+    this.db.prepare('UPDATE workspace SET active_node=?,revision=? WHERE id=?').run(
+      state.workspace.activeNode, state.workspace.revision, state.workspace.id,
+    );
+  }
+
   close(): void { this.db.close(); }
 
   load(): State {
@@ -161,7 +184,9 @@ export class GraphStore {
       if (existing.bodyHash !== bodyHash) {
         throw new DomainError('REQUEST_CONFLICT', '同一 requestId 已用于不同请求体', 409, { requestId: request.requestId });
       }
-      return { ...(existing.response as AgentChangeResponse), replayed: true };
+      const stored = existing.response as AgentChangeResponse;
+      // 旧的幂等记录可能早于 nodeRevisions 字段；缺省给空映射，避免伪造版本。
+      return { ...stored, nodeRevisions: stored.nodeRevisions ?? {}, replayed: true };
     }
     const dryRun = request.dryRun === true;
     this.db.exec('BEGIN IMMEDIATE');
@@ -174,38 +199,56 @@ export class GraphStore {
       };
       const context = new CommitContext(candidate, request.action);
       const outcome = context.apply();
-      const snapshot = projectSnapshot(candidate.workspace, candidate.topics, candidate.nodes);
-      const revisions = this.applyRevisions(before, candidate, outcome, snapshot);
+      // 以 before/candidate 的最终字段差异为准：同一动作里改回原值、rearrange 无差异
+      // 都必须是 noop；不能只相信操作意图列表。
+      const diff = diffNodes(before.nodes, candidate.nodes);
+      const hasChanges =
+        diff.created.length > 0 ||
+        diff.updated.length > 0 ||
+        diff.deleted.length > 0 ||
+        candidate.workspace.activeNode !== before.workspace.activeNode;
+      // 无论 noop 还是 dry-run 都先做完整图校验；失败整体回滚。
+      projectSnapshot(candidate.workspace, candidate.topics, candidate.nodes);
       if (dryRun) {
         const response: AgentCheckResponse = {
           ok: true, command: request.action.action, dryRun: true, state: 'checked',
           requestId: request.requestId, workspaceId: before.workspace.id,
           topicId: outcome.primaryTopicId, summary: outcome.summary,
-          diagnostics: [], changes: outcome.changes,
+          diagnostics: [], changes: changesOf(diff),
         };
         this.db.exec('ROLLBACK');
         return response;
       }
-      const changed = outcome.changes.length > 0;
-      const state = changed ? 'committed' : 'noop';
-      const revision = changed ? before.workspace.revision + 1 : before.workspace.revision;
+      if (!hasChanges) {
+        const response: AgentChangeResponse = {
+          ok: true, requestId: request.requestId, action: request.action.action,
+          workspaceId: before.workspace.id, topicId: outcome.primaryTopicId,
+          state: 'noop',
+          created: { topicId: outcome.createdTopicId, nodeIds: outcome.createdNodeIds, aliases: outcome.aliases },
+          changedNodeIds: [],
+          // noop 也给动作明确操作且仍存在目标的实际版本。
+          nodeRevisions: revisionsOf(request.action, diff, before.nodes),
+          summary: '无实际变化',
+          diagnostics: [], revision: before.workspace.revision,
+          instanceId: this.instanceId,
+        };
+        this.finishRequest(request.requestId, bodyHash, 'noop', response);
+        return response;
+      }
+      this.applyRevisions(before, candidate, diff);
+      this.persistDiff(before, candidate);
       const response: AgentChangeResponse = {
         ok: true, requestId: request.requestId, action: request.action.action,
         workspaceId: before.workspace.id, topicId: outcome.primaryTopicId,
-        state, created: { topicId: outcome.createdTopicId, nodeIds: outcome.createdNodeIds, aliases: outcome.aliases },
-        changedNodeIds: outcome.changedNodeIds, summary: outcome.summary, diagnostics: [], revision,
+        state: 'committed',
+        created: { topicId: outcome.createdTopicId, nodeIds: outcome.createdNodeIds, aliases: outcome.aliases },
+        changedNodeIds: [...diff.created, ...diff.updated, ...diff.deleted].map((node) => node.id),
+        nodeRevisions: revisionsOf(request.action, diff, candidate.nodes),
+        summary: outcome.summary,
+        diagnostics: [], revision: candidate.workspace.revision,
         instanceId: this.instanceId,
       };
-      if (changed) {
-        candidate.workspace.revision = revision;
-        this.persist(candidate);
-        void revisions;
-      }
-      this.db.prepare(
-        'INSERT INTO requests(request_id,body_hash,http_status,state,response_json,created_at) VALUES(?,?,?,?,?,?)',
-      ).run(request.requestId, bodyHash, 200, state, JSON.stringify(response), new Date().toISOString());
-      trimRequests(this.db);
-      this.db.exec('COMMIT');
+      this.finishRequest(request.requestId, bodyHash, 'committed', response);
       return response;
     } catch (error) {
       try { this.db.exec('ROLLBACK'); } catch { /* ignore */ }
@@ -213,28 +256,35 @@ export class GraphStore {
     }
   }
 
-  private applyRevisions(before: State, candidate: State, outcome: CommitOutcome, snapshot: Snapshot): void {
+  /** 幂等结果与提交在同一事务内写入。 */
+  private finishRequest(
+    requestId: string,
+    bodyHash: string,
+    state: 'committed' | 'noop',
+    response: AgentChangeResponse,
+  ): void {
+    this.db.prepare(
+      'INSERT INTO requests(request_id,body_hash,http_status,state,response_json,created_at) VALUES(?,?,?,?,?,?)',
+    ).run(requestId, bodyHash, 200, state, JSON.stringify(response), new Date().toISOString());
+    trimRequests(this.db);
+    this.db.exec('COMMIT');
+  }
+
+  /**
+   * 只为前后最终字段有差异的节点递增持久 revision、更新主题 lastChange 与 topic revision，
+   * 并递增 workspace revision。created/updated/deleted 由调用方按真实差异给出。
+   */
+  private applyRevisions(before: State, candidate: State, diff: NodeDiff): void {
     const now = new Date().toISOString();
     const beforeNodes = new Map(before.nodes.map((node) => [node.id, node]));
-    const changedExisting = new Set<string>();
-    const created = new Set(outcome.createdNodeIds);
-    const deleted = new Set(outcome.deletedNodeIds);
-    for (const node of snapshot.nodes) {
-      const old = beforeNodes.get(node.id);
-      if (old === undefined) continue;
-      got: {
-        if (outcome.changedNodeIds.includes(node.id) && !created.has(node.id)) changedExisting.add(node.id);
-        break got;
-      }
-    }
-    // Increment node revisions and collect content updates.
+    const updated = new Set(diff.updated.map((node) => node.id));
     const contentByTopic = new Map<string, string[]>();
     for (const node of candidate.nodes) {
       const old = beforeNodes.get(node.id);
       if (old === undefined) {
         node.revision = 1;
         pushTopic(contentByTopic, node.topicId, node.id);
-      } else if (changedExisting.has(node.id)) {
+      } else if (updated.has(node.id)) {
         node.revision = old.revision + 1;
         if (contentChanged(old, node)) pushTopic(contentByTopic, node.topicId, node.id);
       }
@@ -245,52 +295,207 @@ export class GraphStore {
       topic.lastChangeAt = now;
       topic.lastChangeIds = [...new Set(ids)].filter((id) => candidate.nodes.some((node) => node.id === id));
     }
-    for (const deletedId of deleted) {
-      for (const topic of candidate.topics) topic.lastChangeIds = topic.lastChangeIds.filter((id) => id !== deletedId);
+    for (const node of diff.deleted) {
+      for (const topic of candidate.topics) {
+        topic.lastChangeIds = topic.lastChangeIds.filter((id) => id !== node.id);
+      }
     }
     const changedTopics = new Set<string>();
-    for (const node of outcome.createdNodeIds) {
-      const found = candidate.nodes.find((entry) => entry.id === node);
+    for (const node of diff.created) {
+      const found = candidate.nodes.find((entry) => entry.id === node.id);
       if (found) changedTopics.add(found.topicId);
     }
-    for (const id of outcome.changedNodeIds) {
-      const found = candidate.nodes.find((entry) => entry.id === id);
+    for (const node of diff.updated) {
+      const found = candidate.nodes.find((entry) => entry.id === node.id);
       if (found) changedTopics.add(found.topicId);
     }
-    for (const id of outcome.deletedNodeIds) {
-      const old = beforeNodes.get(id);
-      if (old) changedTopics.add(old.topicId);
-    }
-    if (outcome.createdTopicId !== null) changedTopics.add(outcome.createdTopicId);
+    for (const node of diff.deleted) changedTopics.add(node.topicId);
     for (const topicId of changedTopics) {
       const topic = candidate.topics.find((entry) => entry.id === topicId);
       const old = before.topics.find((entry) => entry.id === topicId);
-      if (topic && old && old.revision !== undefined) topic.revision = old.revision + 1;
+      // 本事务新建的主题保持 revision 1；已有主题才递增。
+      if (topic && old) topic.revision = old.revision + 1;
     }
-    candidate.workspace.revision = before.workspace.revision + (outcome.changes.length > 0 ? 1 : 0);
+    candidate.workspace.revision = before.workspace.revision + 1;
     candidate.workspace.activeNode = before.workspace.activeNode;
   }
 
-  private persist(state: State): void {
-    this.db.exec('DELETE FROM nodes');
-    this.db.exec('DELETE FROM topics');
+  /**
+   * 按 before/candidate 最终值差异写库：新行 INSERT、真实改变 UPDATE、缺失行 DELETE。
+   * 未改变的主题/节点不写；workspace 只在 revision/activeNode/name 改变时更新。
+   * importState 仍使用一次性全量 persist。
+   */
+  private persistDiff(before: State, candidate: State): void {
+    const beforeTopics = new Map(before.topics.map((topic) => [topic.id, topic] as const));
+    const candidateTopics = new Map(candidate.topics.map((topic) => [topic.id, topic] as const));
+    const beforeNodes = new Map(before.nodes.map((node) => [node.id, node] as const));
+    const candidateNodes = new Map(candidate.nodes.map((node) => [node.id, node] as const));
+
     const insertTopic = this.db.prepare(
       'INSERT INTO topics(id,key,title,revision,last_change_at,last_change_ids) VALUES(?,?,?,?,?,?)',
     );
-    for (const topic of state.topics) {
-      insertTopic.run(topic.id, topic.key, topic.title, topic.revision, topic.lastChangeAt, JSON.stringify(topic.lastChangeIds));
+    const updateTopic = this.db.prepare(
+      'UPDATE topics SET key=?,title=?,revision=?,last_change_at=?,last_change_ids=? WHERE id=?',
+    );
+    for (const topic of candidate.topics) {
+      const old = beforeTopics.get(topic.id);
+      const lastChangeIds = JSON.stringify(topic.lastChangeIds);
+      if (old === undefined) {
+        insertTopic.run(topic.id, topic.key, topic.title, topic.revision, topic.lastChangeAt, lastChangeIds);
+      } else if (!topicRowsEqual(old, topic)) {
+        updateTopic.run(topic.key, topic.title, topic.revision, topic.lastChangeAt, lastChangeIds, topic.id);
+      }
+    }
+
+    const deleteNode = this.db.prepare('DELETE FROM nodes WHERE id=?');
+    for (const node of before.nodes) {
+      if (!candidateNodes.has(node.id)) deleteNode.run(node.id);
     }
     const insertNode = this.db.prepare(
       'INSERT INTO nodes(id,topic_id,title,body,summary,state,from_id,flow,description,side,ord,important,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
     );
-    for (const node of state.nodes) {
-      insertNode.run(node.id, node.topicId, node.title, node.body, node.summary, node.state, node.from,
-        node.flow, node.description, node.side, node.order, node.important ? 1 : 0, node.revision);
-    }
-    this.db.prepare('UPDATE workspace SET active_node=?,revision=? WHERE id=?').run(
-      state.workspace.activeNode, state.workspace.revision, state.workspace.id,
+    const updateNode = this.db.prepare(
+      'UPDATE nodes SET topic_id=?,title=?,body=?,summary=?,state=?,from_id=?,flow=?,description=?,side=?,ord=?,important=?,revision=? WHERE id=?',
     );
+    for (const node of candidate.nodes) {
+      const old = beforeNodes.get(node.id);
+      if (old === undefined) {
+        insertNode.run(node.id, node.topicId, node.title, node.body, node.summary, node.state, node.from,
+          node.flow, node.description, node.side, node.order, node.important ? 1 : 0, node.revision);
+      } else if (!nodeRowsEqual(old, node)) {
+        updateNode.run(node.topicId, node.title, node.body, node.summary, node.state, node.from,
+          node.flow, node.description, node.side, node.order, node.important ? 1 : 0, node.revision, node.id);
+      }
+    }
+
+    const deleteTopic = this.db.prepare('DELETE FROM topics WHERE id=?');
+    for (const topic of before.topics) {
+      if (!candidateTopics.has(topic.id)) deleteTopic.run(topic.id);
+    }
+
+    const beforeWorkspace = before.workspace;
+    const afterWorkspace = candidate.workspace;
+    if (
+      beforeWorkspace.name !== afterWorkspace.name ||
+      beforeWorkspace.activeNode !== afterWorkspace.activeNode ||
+      beforeWorkspace.revision !== afterWorkspace.revision
+    ) {
+      this.db.prepare('UPDATE workspace SET name=?,active_node=?,revision=? WHERE id=?').run(
+        afterWorkspace.name,
+        afterWorkspace.activeNode,
+        afterWorkspace.revision,
+        afterWorkspace.id,
+      );
+    }
   }
+}
+
+interface NodeDiff {
+  readonly created: NodeRecord[];
+  readonly updated: NodeRecord[];
+  readonly deleted: NodeRecord[];
+}
+
+/** 节点最终字段差异（忽略 revision 本身；revision 由 applyRevisions 递增）。 */
+function nodeFieldsEqual(left: NodeRecord, right: NodeRecord): boolean {
+  return left.id === right.id &&
+    left.topicId === right.topicId &&
+    left.title === right.title &&
+    left.body === right.body &&
+    left.summary === right.summary &&
+    left.state === right.state &&
+    left.from === right.from &&
+    left.flow === right.flow &&
+    left.description === right.description &&
+    left.side === right.side &&
+    left.order === right.order &&
+    left.important === right.important;
+}
+
+/** 行级相等：写库前的最终值比较（含 revision）。 */
+function nodeRowsEqual(left: NodeRecord, right: NodeRecord): boolean {
+  return nodeFieldsEqual(left, right) && left.revision === right.revision;
+}
+
+function topicRowsEqual(left: TopicRecord, right: TopicRecord): boolean {
+  return left.id === right.id &&
+    left.key === right.key &&
+    left.title === right.title &&
+    left.revision === right.revision &&
+    left.lastChangeAt === right.lastChangeAt &&
+    left.lastChangeIds.join('\u0000') === right.lastChangeIds.join('\u0000');
+}
+
+function diffNodes(before: readonly NodeRecord[], candidate: readonly NodeRecord[]): NodeDiff {
+  const beforeById = new Map(before.map((node) => [node.id, node] as const));
+  const candidateById = new Map(candidate.map((node) => [node.id, node] as const));
+  const created: NodeRecord[] = [];
+  const updated: NodeRecord[] = [];
+  const deleted: NodeRecord[] = [];
+  for (const node of candidate) {
+    const old = beforeById.get(node.id);
+    if (old === undefined) created.push(node);
+    else if (!nodeFieldsEqual(old, node)) updated.push(node);
+  }
+  for (const node of before) {
+    if (!candidateById.has(node.id)) deleted.push(node);
+  }
+  return { created, updated, deleted };
+}
+
+function changesOf(diff: NodeDiff): AgentCheckResponse['changes'] {
+  return [
+    ...diff.created.map((node) => ({ nodeId: node.id, kind: 'create' as const })),
+    ...diff.updated.map((node) => ({ nodeId: node.id, kind: 'update' as const })),
+    ...diff.deleted.map((node) => ({ nodeId: node.id, kind: 'delete' as const })),
+  ];
+}
+
+/** 动作明确操作过的已有节点（不含来源、precondition、delete 被删后自然省略）。 */
+function explicitTargetIds(action: AgentChangeAction): string[] {
+  switch (action.action) {
+    case 'batch':
+      return action.ops.flatMap((op) =>
+        op.op === 'edit' ? [op.target.id] : op.op === 'delete' ? [op.target.id] : [],
+      );
+    case 'insert':
+      return [action.before.id];
+    case 'rearrange':
+      return action.edits.map((edit) => edit.target.id);
+    case 'setImportance':
+      return [action.nodeId];
+    case 'delete':
+      return [action.target.id];
+    case 'createTopic':
+    case 'createNext':
+    case 'createBranch':
+      return [];
+    default:
+      return [];
+  }
+}
+
+/**
+ * nodeRevisions：新建、真实修改、动作明确操作且仍存在的节点 → 最终持久 revision。
+ * 删除的节点不出现；noop 时传入 before 节点即可得到目标实际版本。
+ */
+function revisionsOf(
+  action: AgentChangeAction,
+  diff: NodeDiff,
+  candidateNodes: readonly NodeRecord[],
+): Record<string, number> {
+  const candidateById = new Map(candidateNodes.map((node) => [node.id, node] as const));
+  const revisions: Record<string, number> = {};
+  for (const node of [...diff.created, ...diff.updated]) {
+    const found = candidateById.get(node.id);
+    if (found !== undefined) revisions[node.id] = found.revision;
+  }
+  for (const nodeId of explicitTargetIds(action)) {
+    const found = candidateById.get(nodeId);
+    if (found !== undefined) revisions[nodeId] = found.revision;
+  }
+  for (const node of diff.deleted) delete revisions[node.id];
+  return revisions;
 }
 
 class CommitContext {
