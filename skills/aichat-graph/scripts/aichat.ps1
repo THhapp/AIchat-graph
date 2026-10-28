@@ -58,7 +58,19 @@ if (-not $entry -and -not $Cli) {
     if ($config -and $config.PSObject.Properties['cli'] -and $config.cli) {
       $configured = [string]$config.cli
       $tried.Add($configPath + ' → ' + $configured)
-      if (Test-Path -LiteralPath $configured -PathType Leaf) {
+      $migrated = $null
+      $configuredNormalized = $configured.Replace('/', '\')
+      $oldSuffix = '\dist\cli\index.js'
+      if ($configuredNormalized.EndsWith($oldSuffix, [StringComparison]::OrdinalIgnoreCase)) {
+        $base = $configuredNormalized.Substring(0, $configuredNormalized.Length - $oldSuffix.Length)
+        $migrated = Join-Path $base 'dist\next\cli.js'
+        $tried.Add($migrated)
+      }
+      if ($migrated -and (Test-Path -LiteralPath $migrated -PathType Leaf)) {
+        $entry = (Resolve-Path -LiteralPath $migrated).Path
+        $notes.Add('local.env.json 仍指向旧入口 dist/cli/index.js；Skill 已按同版本解析到 dist/next/cli.js，本机配置未修改。')
+      }
+      elseif (Test-Path -LiteralPath $configured -PathType Leaf) {
         $entry = (Resolve-Path -LiteralPath $configured).Path
       }
       else { $notes.Add('local.env.json 已配置 cli，但入口不存在：' + $configured) }

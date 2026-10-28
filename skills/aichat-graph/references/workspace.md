@@ -61,6 +61,7 @@ version、whoami 核对接口与身份；Skill 自带完整命令参考，不依
 
 1. 显式 -Cli <入口>，给了却不存在时失败，不换其他版本。
 2. 按“脚本同目录 → Skill 根目录”读取 local.env.json 的 cli；配置缺失或入口不存在时保留说明并继续。
+   若本机配置仍指向旧入口 dist/cli/index.js，脚本按同版本 Skill 解析到同目录的 dist/next/cli.js，不改写 local.env.json。
 3. 从仓库内 Skill 的 scripts 向上推导 dist/next/cli.js；先核对祖先确实包含本项目 Skill。
 4. 都不可用时退出 7，报告尝试路径和修复办法，不猜正式库或改配置。
 
