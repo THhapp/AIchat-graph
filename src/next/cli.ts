@@ -99,7 +99,7 @@ export interface ProcessOutcome {
 export type RunProcess = (
   command: string,
   args: readonly string[],
-  options?: { readonly detached?: boolean; readonly cwd?: string },
+  options?: { readonly detached?: boolean; readonly cwd?: string; readonly windowsHide?: boolean },
 ) => Promise<ProcessOutcome>;
 
 export interface CliRuntime {
@@ -767,7 +767,7 @@ async function readStdin(): Promise<string> {
 function defaultRunProcess(
   command: string,
   args: readonly string[],
-  options: { readonly detached?: boolean; readonly cwd?: string } = {},
+  options: { readonly detached?: boolean; readonly cwd?: string; readonly windowsHide?: boolean } = {},
 ): Promise<ProcessOutcome> {
   return new Promise<ProcessOutcome>((resolve, reject) => {
     let child;
@@ -776,7 +776,7 @@ function defaultRunProcess(
         ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
         detached: options.detached === true,
         stdio: options.detached === true ? 'ignore' : ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
+        windowsHide: options.windowsHide ?? true,
       });
     } catch (error) {
       reject(error);
@@ -2343,7 +2343,10 @@ async function pickWorkspace(runtime: CliRuntime): Promise<PickWorkspaceResult> 
   const launcher = runtime.installation.launcherPath;
   let outcome: ProcessOutcome;
   try {
-    outcome = await runtime.runProcess(launcher, ['--pick-workspace'], { cwd: runtime.cwd });
+    outcome = await runtime.runProcess(launcher, ['--pick-workspace'], {
+      cwd: runtime.cwd,
+      windowsHide: false,
+    });
   } catch (error) {
     throw new CliFailure(
       'PICKER_UNAVAILABLE',

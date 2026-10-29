@@ -103,6 +103,7 @@ interface ProcessCall {
   readonly command: string;
   readonly args: readonly string[];
   readonly detached: boolean;
+  readonly windowsHide: boolean;
 }
 
 function fakeRunProcess(
@@ -110,7 +111,12 @@ function fakeRunProcess(
 ): { runProcess: RunProcess; calls: ProcessCall[] } {
   const calls: ProcessCall[] = [];
   const runProcess: RunProcess = async (command, args, options = {}) => {
-    const call = { command, args, detached: options.detached === true };
+    const call = {
+      command,
+      args,
+      detached: options.detached === true,
+      windowsHide: options.windowsHide ?? true,
+    };
     calls.push(call);
     const result = handler?.(call) ?? { code: 0, stdout: '', stderr: '' };
     return { code: result.code, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
@@ -865,7 +871,7 @@ describe('Interface 4 CLI', () => {
     const emptyDir = path.join(parent, '新库');
     await fs.mkdir(emptyDir, { recursive: true });
     const installation = fakeInstallation(parent);
-    const { runProcess } = fakeRunProcess((call) =>
+    const { runProcess, calls } = fakeRunProcess((call) =>
       call.args[0] === '--pick-workspace' ? { code: 0, stdout: emptyDir + '\n' } : { code: 0 },
     );
     const spawns: Array<{ command: string; args: readonly string[] }> = [];
@@ -893,6 +899,7 @@ describe('Interface 4 CLI', () => {
       startTimeoutMs: 5_000,
     });
     const payload = writePayloadOf(result);
+    expect(calls.find((call) => call.args[0] === '--pick-workspace')).toMatchObject({ windowsHide: false });
     expect(payload['state']).toBe('opened');
     expect(payload['reused']).toBe(false);
     expect(await fs.realpath(emptyDir)).toBe(await fs.realpath(payload['workspace'] as string));
