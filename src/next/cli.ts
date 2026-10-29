@@ -2283,7 +2283,7 @@ async function inspectWorkspace(
     if (!options.allowInit) {
       throw workspaceFailure(
         'WORKSPACE_NOT_FOUND',
-        '工作区没有 graph.sqlite：' + root + '（不会自动初始化；请先 aichat init，或用 --choose-workspace 选择空目录）',
+        '工作区没有 graph.sqlite：' + root + '（不会自动初始化；请先 aichat init，或用 --choose-workspace 选择空目录；旧版 Markdown 资料请先 aichat import）',
         { root, dbPath },
       );
     }
@@ -2291,7 +2291,7 @@ async function inspectWorkspace(
     if (entries.length > 0) {
       throw workspaceFailure(
         'WORKSPACE_NOT_FOUND',
-        '选中目录非空且没有 graph.sqlite；不会自动初始化：' + root,
+        '选中目录非空且没有 graph.sqlite；不会自动初始化：' + root + '（旧版 Markdown 资料请先 aichat import --workspace <该目录>）',
         { root, dbPath, entries: entries.slice(0, 20) },
       );
     }
