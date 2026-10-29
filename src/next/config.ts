@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { workspaceFailure } from './args.js';
 import { GraphStore } from './store.js';
+import { currentInstallation } from './installation.js';
 
 export const CONFIG_RELATIVE_PATH = '.aichat/default.json';
 
@@ -30,8 +31,8 @@ export function moduleRepoRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 }
 
-export function defaultConfigPath(repoRoot: string = moduleRepoRoot()): string {
-  return path.join(repoRoot, CONFIG_RELATIVE_PATH);
+export function defaultConfigPath(distributionRoot: string = currentInstallation().distributionRoot): string {
+  return path.join(distributionRoot, CONFIG_RELATIVE_PATH);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

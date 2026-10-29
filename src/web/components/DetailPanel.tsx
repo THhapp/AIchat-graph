@@ -35,6 +35,8 @@ export interface DetailPanelProps {
   important?: boolean;
   onToggleImportant?: (next: boolean) => void;
   importanceBusy?: boolean;
+  /** The service is stopped, so the importance write cannot run. */
+  importanceDisabled?: boolean;
   importanceError?: string | null;
 };
 
@@ -47,7 +49,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
     graph, tab, onTabChange, topic, node, nodeDetail, topicDetail, loading, error, detailVersion,
     activeNodeId, selectedNodeId, onSelectNode, onRetry, onClose, onCopyContinuation, copied,
     onOpenNode, boundaryNodes,
-    onCopyLocate, locateCopied, important = false, onToggleImportant, importanceBusy = false, importanceError = null,
+    onCopyLocate, locateCopied, important = false, onToggleImportant, importanceBusy = false, importanceDisabled = false, importanceError = null,
   } = props;
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -155,8 +157,14 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                     <button
                       type="button"
                       aria-pressed={important}
-                      disabled={importanceBusy}
-                      title={important ? '取消重要标记（写入数据库）' : '标记为重要（写入数据库）'}
+                      disabled={importanceBusy || importanceDisabled}
+                      title={
+                        importanceDisabled
+                          ? '服务已停止，无法写入数据库'
+                          : important
+                            ? '取消重要标记（写入数据库）'
+                            : '标记为重要（写入数据库）'
+                      }
                       onClick={() => { onToggleImportant(!important); }}
                     >
                       {importanceBusy ? '正在保存…' : important ? '取消重要' : '设为重要'}

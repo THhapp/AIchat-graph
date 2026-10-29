@@ -100,6 +100,35 @@ code, pre, kbd { font-family: var(--font-mono); }
 .app-header__topic { min-width: 5em; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--text-sm); }
 .app-header__spacer { flex: 1; }
 .app-header__meta { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-muted); }
+.app-header__meta button:disabled { opacity: 0.55; cursor: default; }
+.app-header__meta button:disabled:hover { background: none; color: var(--text-soft); }
+
+/* program menu: one small dropdown in the header, no layout change */
+.program-menu { position: relative; }
+.program-menu__trigger { font-size: var(--text-xs); white-space: nowrap; }
+.program-menu__list {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 12rem;
+  padding: var(--space-1);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+.program-menu__list button { text-align: left; white-space: nowrap; font-size: var(--text-sm); }
+.program-menu__list button:disabled { opacity: 0.55; cursor: default; }
+.program-menu__list button:disabled:hover { background: none; color: var(--text-soft); }
+.program-menu__note {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+}
 
 .app-main {
   display: grid;

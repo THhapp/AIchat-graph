@@ -1,7 +1,8 @@
 # 命令参考
 
 适用接口：4。本参考随 Skill 分发，可独立完成接入、读取和图维护，不依赖程序手册。
-以下 aichat 指实际入口：可用 aichat.cmd 或 node <程序目录>/dist/next/cli.js。
+以下 aichat 指实际入口：Windows 便携包用包根 aichat.cmd；源码开发用
+node <程序目录>/dist/next/cli.js。
 <...>、n_a、t_... 等均为占位，使用真实返回的 ID 与版本。
 
 ## 接入与定位
@@ -22,6 +23,10 @@ aichat topics --workspace <dir>
 `init <dir> --name <名称>` 用于新库；`import --workspace <旧V2目录> [--name <名称>]`
 只在明确需要时一次导入，原件不改，已有 graph.sqlite 拒绝覆盖。
 不要因开始记录自动初始化、导入或安装。
+
+aichat open 用于用户主动打开/复用本库服务，aichat stop 只请求服务自行退出；
+两者都属于本机程序维护，不是记录流程的固定步骤。不要未经用户要求停止服务，
+也不要因页面断开就自行重启或建第二个服务。
 
 ## 选合适的读取粒度
 
@@ -232,7 +237,9 @@ aichat status <requestId>
 ~~~
 
 读取及 status 不需要服务；写入缺少服务描述时可自启动同版后台服务，
---no-start-service 可禁止。端口默认 4317，0 由系统选择，不假定所有连接失败都会自动恢复。
+--no-start-service 可禁止。服务端口优先用工作区 .aichat/local/runtime.json 的偏好，
+其次 4317；被占用时才用系统空闲端口，0 明确表示系统选择。
+不假定所有连接失败都会自动恢复。
 
 根 help 给命令目录，单命令 help 给参数、约束、示例和结果字段。
 NodePatch / batch 的具体结构使用本参考。

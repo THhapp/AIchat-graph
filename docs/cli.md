@@ -1,8 +1,8 @@
 # AIchat-graph 程序 CLI 手册
 
 适用接口：4。程序可独立使用，不要求安装 Skill。
-以下 aichat 表示实际入口；仓库或日用目录中可用 aichat.cmd，
-也可执行 node <程序目录>/dist/next/cli.js。使用前须已有构建产物。
+Windows 便携包中 aichat 表示包根 aichat.cmd；源码开发时可用 aichat.cmd 或
+node <程序目录>/dist/next/cli.js。普通用户用包内 AIchat-graph.exe 打开，不必执行 CLI。
 
 示例中的 <...>、n_a、t_... 等为占位符，使用命令返回的真实 ID 和版本替换。
 用法展示中的方括号表示可选项，不要原样传入 shell。
@@ -23,25 +23,38 @@ aichat whoami --workspace D:/my-discussions
 默认输出紧凑 JSON，--json 可显式指定，--text 输出简短摘要。
 写入可加 --verbose 查看附加传输信息，--no-start-service 禁止自动启动缺失的服务。
 普通成功结果写 stdout，失败结果写 stderr。
-Windows 启动器的 launcher.local.json 与 CLI 默认配置目前不自动同步。
-目标不明确时显式给 --workspace，不因启动器选过目录就假定 CLI 已有相同默认值。
-固定日用快照的默认配置与更新器尚未衔接：其程序根出现 .aichat/ 会阻止快照更新。
-日用命令目前宜显式给 --workspace；独立程序目录不受这项快照规则影响。
+默认库配置位于当前程序根 .aichat/default.json；便携包、源码和开发快照各自独立。
+目标不明确时显式给 --workspace；原生启动器选过的库会写入同一程序根的默认配置。
 
-## 初始化、导入与服务
+## 打开、停止、初始化与导入
 
 ~~~text
+aichat open
+aichat open --workspace <dir> [--no-browser]
+aichat open --choose-workspace --interactive [--no-browser]
+aichat stop
+aichat stop --workspace <dir>
 aichat init <dir> --name "思路库"
 aichat import --workspace <旧V2目录> [--name "新名称"]
 aichat serve --workspace <dir> [--port <端口>] [--no-browser]
 ~~~
+
+open 复用当前库的存活服务；没有服务时在后台启动并等待就绪，成功后保存为默认库并打开
+默认浏览器。--workspace 显式选库；--choose-workspace --interactive 弹原生目录选择器。
+只有选择器选中的空目录才会 init（库名取目录名）；取消返回 state:cancelled，不改默认库。
+程序目录及其内部不能作为讨论库；非空且没有 graph.sqlite 的目录不是可直接打开的库。
+
+stop 只请求当前库的服务自行退出，不自启动、不按 PID 杀进程；descriptor 缺失或连接拒绝
+返回 not-running 成功状态，旧服务没有停止端点时给出明确错误。结果中的 workspace revision
+不是节点版本；写后继续改节点使用 nodeRevisions。
 
 init 建立 graph.sqlite，拒绝覆盖已有数据库；建议选新的或空目录。
 import 只读取旧 schemaVersion 2 / isolated 资料，在原目录新建数据库，
 不改写原文件。已有 graph.sqlite 时拒绝；失败不留下半导入的可见库。
 原相对节点链接和资源引用会转换为稳定 ID 链接与 resources/ 键。
 
-serve 默认监听 127.0.0.1:4317，--port 0 由系统选可用端口。
+serve 默认优先本库 .aichat/local/runtime.json 记录的端口，其次 127.0.0.1:4317，
+被占用时才用系统空闲端口；显式 --port 精确使用（0 = 系统分配）。
 在浏览器打开服务实际 URL，Ctrl+C 停止；运行地址也可从 whoami 或服务描述取得。
 写命令需要本机服务；缺少描述文件时，CLI 可后台启动同版服务并等待就绪。
 已有描述却连接失败或版本不匹配时，按具体错误处理，不假定一定会自动修复。

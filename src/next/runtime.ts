@@ -6,9 +6,11 @@
  * (snapshot event + export scheduling). No filesystem graph scan or watcher.
  */
 import { promises as fs, existsSync } from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadProgramInfo } from '../build-info.js';
 import {
   assertPathInsideWorkspace,
@@ -18,7 +20,7 @@ import {
   writeFileDurable,
 } from '../storage/index.js';
 import type { ExportManagerLike } from './export-contract.js';
-import { findNode, publicNode } from './model.js';
+import { DomainError, findNode, publicNode } from './model.js';
 import type { Snapshot } from './model.js';
 import type {
   AgentChangeRequest,
@@ -36,6 +38,14 @@ export const RUNTIME_DIR = '.aichat/runtime';
 export const DESCRIPTOR_RELATIVE_PATH = '.aichat/runtime/service.json';
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 4317;
+/** 每库的稳定端口偏好；只在服务实际绑定端口后写入。 */
+export const RUNTIME_LOCAL_DIR = '.aichat/local';
+export const RUNTIME_PREFERENCES_RELATIVE_PATH = '.aichat/local/runtime.json';
+
+export interface RuntimePreferences {
+  /** 上次实际绑定的端口；缺失或非法时为 null。 */
+  readonly preferredPort: number | null;
+}
 
 /** .aichat/runtime/service.json 的稳定形状；version 只标识描述文件格式。 */
 export interface ServiceDescriptor {
@@ -262,6 +272,194 @@ export async function removeOwnDescriptor(
     if (!isErrnoCode(error, 'ENOENT')) throw error;
   }
   return true;
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 稳定端口偏好与启动占位
+ * ------------------------------------------------------------------ */
+
+/** .aichat/local/runtime.json 的绝对路径（只做路径校验，不创建）。 */
+export async function runtimePreferencesPath(root: string): Promise<string> {
+  return assertPathInsideWorkspace(root, RUNTIME_PREFERENCES_RELATIVE_PATH);
+}
+
+/** 读取稳定端口偏好；缺失或损坏时返回 null，不阻断启动。 */
+export async function readRuntimePreferences(root: string): Promise<RuntimePreferences | null> {
+  let absolute: string;
+  try {
+    absolute = await runtimePreferencesPath(root);
+  } catch {
+    return null;
+  }
+  let text: string;
+  try {
+    text = await fs.readFile(absolute, 'utf8');
+  } catch {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const value = (parsed as Record<string, unknown>)['preferredPort'];
+    const preferredPort =
+      typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535
+        ? value
+        : null;
+    return { preferredPort };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 记录实际绑定端口：合并已有字段，使用受控目录与原子持久写。
+ * 调用方必须在 listen 成功之后调用；失败时不写。
+ */
+export async function writeRuntimePreferences(
+  root: string,
+  preferredPort: number,
+): Promise<string> {
+  if (!Number.isInteger(preferredPort) || preferredPort < 1 || preferredPort > 65535) {
+    throw new DomainError('INVALID_ARGUMENT', 'preferredPort 必须是 1-65535 的整数', 400, {
+      preferredPort,
+    });
+  }
+  await ensureWorkspaceDirectory(root, RUNTIME_LOCAL_DIR);
+  const absolute = await runtimePreferencesPath(root);
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await fs.readFile(absolute, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      existing = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // 缺失或损坏时重建。
+  }
+  const record = { ...existing, preferredPort };
+  await writeFileDurable(absolute, Buffer.from(JSON.stringify(record, null, 2) + '\n', 'utf8'));
+  return absolute;
+}
+
+export interface StartupPlaceholder {
+  /** named pipe（Windows）或临时 socket 文件路径；仅用于互斥。 */
+  readonly name: string;
+  release(): Promise<void>;
+}
+
+function startupPlaceholderName(rootReal: string): string {
+  const hash = createHash('sha256')
+    .update(process.platform + ':' + rootReal.replace(/\\/g, '/').toLowerCase())
+    .digest('hex')
+    .slice(0, 32);
+  if (process.platform === 'win32') return '\\\\.\\pipe\\aichat-graph-' + hash;
+  return path.join(os.tmpdir(), 'aichat-graph-' + hash + '.sock');
+}
+
+function serviceAlreadyRunning(): DomainError {
+  return new DomainError(
+    'SERVICE_ALREADY_RUNNING',
+    '该数据库已有服务在运行（启动占位被占用）；请复用现有服务，或先停止它再启动',
+    409,
+    {},
+  );
+}
+
+/** 非 Windows：探测残留 socket 后面是否真有服务；没有则可清理陈旧文件重试。 */
+function probeUnixSocket(name: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const socket = net.createConnection(name);
+    socket.once('connect', () => {
+      socket.destroy();
+      finish(true);
+    });
+    socket.once('error', () => {
+      socket.destroy();
+      finish(false);
+    });
+    socket.setTimeout(300, () => {
+      socket.destroy();
+      finish(false);
+    });
+  });
+}
+
+function listenPlaceholder(server: net.Server, name: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(name);
+  });
+}
+
+/**
+ * 启动占位：Windows 用 named pipe，其他平台用临时目录 socket 文件。
+ * 名称由工作区真实路径哈希得到；同一数据库目录只允许一个服务持有。
+ * 任意连接立即断开：占位只承担互斥，不承担真实通信。
+ */
+export async function acquireStartupPlaceholder(
+  rootReal: string,
+): Promise<StartupPlaceholder> {
+  const windows = process.platform === 'win32';
+  const name = startupPlaceholderName(rootReal);
+  const server = net.createServer((socket) => {
+    socket.destroy();
+  });
+  try {
+    await listenPlaceholder(server, name);
+  } catch (error) {
+    if (!windows && isErrnoCode(error, 'EADDRINUSE')) {
+      const alive = await probeUnixSocket(name);
+      if (!alive) {
+        await fs.rm(name, { force: true }).catch(() => undefined);
+        try {
+          await listenPlaceholder(server, name);
+        } catch {
+          server.close(() => undefined);
+          throw serviceAlreadyRunning();
+        }
+      } else {
+        server.close(() => undefined);
+        throw serviceAlreadyRunning();
+      }
+    } else if (isErrnoCode(error, 'EADDRINUSE')) {
+      server.close(() => undefined);
+      throw serviceAlreadyRunning();
+    } else {
+      server.close(() => undefined);
+      throw error;
+    }
+  }
+  let released = false;
+  return {
+    name,
+    release: async (): Promise<void> => {
+      if (released) return;
+      released = true;
+      await new Promise<void>((resolve) => {
+        try {
+          server.close(() => resolve());
+        } catch {
+          resolve();
+        }
+      });
+      if (!windows) await fs.rm(name, { force: true }).catch(() => undefined);
+    },
+  };
 }
 
 /** 从当前模块向上找到包根（含 package.json）；找不到时返回 null。 */

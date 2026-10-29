@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { LicenseNotices } from './LicenseNotices.js';
 
 export interface AppHeaderProps {
@@ -21,6 +22,12 @@ export interface AppHeaderProps {
   onToggleLeft: () => void;
   onToggleRight: () => void;
   onToggleExport: () => void;
+  /** The local service is stopped: controls that need it are disabled. */
+  serviceStopped: boolean;
+  /** A runtime control request (open other library / stop) is in flight. */
+  runtimeBusy: boolean;
+  onOpenWorkspace: () => void;
+  onStopService: () => void;
 }
 
 /** Read-only header: branding, topic picker and panel/view actions. */
@@ -28,6 +35,35 @@ export function AppHeader(props: AppHeaderProps): React.JSX.Element {
   const topicTitle = props.selectedTopicTitle ?? '选择主题';
   // Narrow once so the click closure keeps the non-null type.
   const activeNodeId = props.activeNodeId;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close the program menu on an outside pointer or Escape; it has no backdrop.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+      if (menuRef.current !== null && target instanceof Node && !menuRef.current.contains(target)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [menuOpen]);
+
+  const serviceUnavailable = props.serviceStopped || props.runtimeBusy;
+  const runMenuAction = (action: () => void): void => {
+    setMenuOpen(false);
+    action();
+  };
+
   return (
     <header className="app-header">
       <div className="app-header__brand">
@@ -69,11 +105,46 @@ export function AppHeader(props: AppHeaderProps): React.JSX.Element {
           type="button"
           aria-pressed={props.exportOpen}
           aria-controls="export-panel"
+          disabled={props.serviceStopped}
           onClick={props.onToggleExport}
-          title="导出为独立 HTML"
+          title={props.serviceStopped ? '服务已停止，无法导出' : '导出为独立 HTML'}
         >
           {props.exportOpen ? '收起导出' : '导出'}
         </button>
+        <div className="program-menu" ref={menuRef}>
+          <button
+            type="button"
+            className="program-menu__trigger"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            disabled={props.runtimeBusy}
+            onClick={() => { setMenuOpen((open) => !open); }}
+            title="程序菜单"
+          >
+            {props.runtimeBusy ? '处理中…' : '程序 ▾'}
+          </button>
+          {menuOpen ? (
+            <div className="program-menu__list" role="menu" aria-label="程序菜单">
+              <button
+                type="button"
+                role="menuitem"
+                disabled={serviceUnavailable}
+                onClick={() => { runMenuAction(props.onOpenWorkspace); }}
+              >
+                打开其他讨论库…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={serviceUnavailable}
+                onClick={() => { runMenuAction(props.onStopService); }}
+              >
+                退出本库服务…
+              </button>
+              {props.serviceStopped ? <p className="program-menu__note">服务已停止，显示停止前内容。</p> : null}
+            </div>
+          ) : null}
+        </div>
       </div>
     </header>
   );
@@ -83,11 +154,22 @@ export interface AppBannersProps {
   stale: boolean;
   /** Latest refresh failure; the current reading stays visible. */
   error: Error | null;
+  /** The service was stopped on purpose: the loaded content is the last snapshot. */
+  stopped: boolean;
   onRefresh: () => void;
 }
 
-/** Stale-snapshot and refresh-failure banners, independent of each other. */
+/** Stale-snapshot, stopped-service and refresh-failure banners. */
 export function AppBanners(props: AppBannersProps): React.JSX.Element {
+  if (props.stopped) {
+    return (
+      <div className="banner banner--stale" role="status">
+        <span className="banner__text">
+          <strong>服务已停止，显示停止前内容。</strong> 本页不会重连或自动启动服务；需要继续写入、导出或打开其他库时，请重新启动本库服务后再打开页面。
+        </span>
+      </div>
+    );
+  }
   return (
     <>
       {props.stale ? (

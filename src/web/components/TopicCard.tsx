@@ -16,6 +16,8 @@ export interface TopicCardData extends Record<string, unknown> {
   recent: boolean;
   /** An importance write for this card is in flight; the button keeps its size. */
   importanceBusy: boolean;
+  /** The service is stopped; the importance write is disabled without moving the pin. */
+  importanceDisabled?: boolean;
   /** Omitted in the read-only offline reader, so no write control is rendered. */
   onToggleImportant?: (node: GraphNode, important: boolean) => void;
   onToggleCollapse: (id: string) => void;
@@ -29,7 +31,7 @@ export interface TopicCardData extends Record<string, unknown> {
  * marker instead, inside the height the card already had.
  */
 function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
-  const { node, height, active, hiddenCount, collapsed, childCount, recent, importanceBusy, onToggleImportant, onToggleCollapse } = data as TopicCardData;
+  const { node, height, active, hiddenCount, collapsed, childCount, recent, importanceBusy, importanceDisabled = false, onToggleImportant, onToggleCollapse } = data as TopicCardData;
   const important = node.important;
   const importanceLabel = (important ? '取消重要标记：' : '标记为重要：') + node.number + ' ' + node.title;
   return (
@@ -56,8 +58,16 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
             aria-pressed={important}
             aria-busy={importanceBusy}
             aria-label={importanceLabel}
-            title={importanceBusy ? '正在保存…' : important ? '取消重要标记（写入数据库）' : '标记为重要（写入数据库）'}
-            disabled={importanceBusy}
+            title={
+              importanceDisabled
+                ? '服务已停止，无法写入数据库'
+                : importanceBusy
+                  ? '正在保存…'
+                  : important
+                    ? '取消重要标记（写入数据库）'
+                    : '标记为重要（写入数据库）'
+            }
+            disabled={importanceBusy || importanceDisabled}
             data-busy={importanceBusy ? 'true' : 'false'}
             onClick={(event) => {
               // The whole card selects / opens detail; the pin is its own control.

@@ -5,6 +5,8 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { promises as fs } from 'node:fs';
+import net from 'node:net';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -27,11 +29,24 @@ import type { ExportManagerLike } from '../../src/next/export-contract.js';
 
 const temporaryRoots: string[] = [];
 const running: GraphServiceHandle[] = [];
+const networkServers: net.Server[] = [];
 
 afterEach(async () => {
   for (const handle of running.splice(0)) {
     await handle.stop().catch(() => undefined);
   }
+  await Promise.all(
+    networkServers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          try {
+            server.close(() => resolve());
+          } catch {
+            resolve();
+          }
+        }),
+    ),
+  );
   await Promise.all(
     temporaryRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
   );
@@ -106,6 +121,95 @@ async function postJson<T>(url: string, body: unknown): Promise<{ status: number
 function requestId(): string {
   return randomUUID();
 }
+
+function runtimePreferencesPathOf(root: string): string {
+  return path.join(root, '.aichat', 'local', 'runtime.json');
+}
+
+/** 读取 .aichat/local/runtime.json 的 preferredPort；没有/损坏时 null。 */
+async function preferredPortOf(root: string): Promise<number | null> {
+  try {
+    const parsed = JSON.parse(
+      await fs.readFile(runtimePreferencesPathOf(root), 'utf8'),
+    ) as { preferredPort?: unknown };
+    return typeof parsed.preferredPort === 'number' ? parsed.preferredPort : null;
+  } catch {
+    return null;
+  }
+}
+
+function listenNet(server: net.Server, port: number): Promise<AddressInfo> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off('error', onError);
+      resolve(server.address() as AddressInfo);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+async function occupyTcpPort(port = 0): Promise<{ server: net.Server; port: number }> {
+  const server = net.createServer();
+  const address = await listenNet(server, port);
+  networkServers.push(server);
+  return { server, port: address.port };
+}
+
+async function releaseTcp(blocker: { server: net.Server }): Promise<void> {
+  const index = networkServers.indexOf(blocker.server);
+  if (index >= 0) networkServers.splice(index, 1);
+  await new Promise<void>((resolve) => {
+    try {
+      blocker.server.close(() => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+/** 探测某端口当前是否可绑定；可绑定时返回 true 并立即释放。 */
+async function portIsFree(port: number): Promise<boolean> {
+  const server = net.createServer();
+  try {
+    await listenNet(server, port);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await new Promise<void>((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+}
+
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('等待条件超时');
+}
+
+async function serviceReachable(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url + '/api/workspace');
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 
 describe('next service：读取与描述', () => {
   it('workspace／graph／node／topic 返回数据库投影与实例信息', async () => {
@@ -869,6 +973,271 @@ describe('next service：nodeRevisions 与差异落库', () => {
     } finally {
       observer.close();
     }
+  });
+});
+
+describe('next service：稳定端口、启动占位与运行控制', () => {
+  it('省略 port 时 remembered → 4317 → 空闲，并在实际绑定后记录 preferredPort', async () => {
+    const seeded = await seedWorkspace();
+    // 4317 可能被本机日用服务占用：能绑定时首个服务应恰好选 4317。
+    const free4317 = await portIsFree(4317);
+
+    const first = await startGraphService({
+      root: seeded.root,
+      webRoot: null,
+      appRoot: seeded.parent,
+    });
+    running.push(first);
+    const firstPort = Number(new URL(first.url).port);
+    expect(firstPort).toBeGreaterThan(0);
+    if (free4317) expect(firstPort).toBe(4317);
+    // 只有实际绑定成功后才写入稳定端口。
+    expect(await preferredPortOf(seeded.root)).toBe(firstPort);
+
+    await first.stop();
+    const second = await startGraphService({
+      root: seeded.root,
+      webRoot: null,
+      appRoot: seeded.parent,
+    });
+    running.push(second);
+    expect(Number(new URL(second.url).port)).toBe(firstPort);
+  });
+
+  it('remembered 端口被占用时改用空闲端口并更新记录', async () => {
+    const seeded = await seedWorkspace();
+    const first = await startGraphService({
+      root: seeded.root,
+      webRoot: null,
+      appRoot: seeded.parent,
+    });
+    running.push(first);
+    const preferred = Number(new URL(first.url).port);
+    await first.stop();
+
+    const blocker = await occupyTcpPort(preferred);
+    try {
+      const second = await startGraphService({
+        root: seeded.root,
+        webRoot: null,
+        appRoot: seeded.parent,
+      });
+      running.push(second);
+      const secondPort = Number(new URL(second.url).port);
+      expect(secondPort).not.toBe(preferred);
+      expect(await preferredPortOf(seeded.root)).toBe(secondPort);
+    } finally {
+      await releaseTcp(blocker);
+    }
+  });
+
+  it('同一数据库不能并发启动；失败与 stop 都会释放占位且不写偏好', async () => {
+    const seeded = await seedWorkspace();
+    const first = await startGraphService({
+      root: seeded.root,
+      port: 0,
+      webRoot: null,
+      appRoot: seeded.parent,
+    });
+    running.push(first);
+    await expect(
+      startGraphService({ root: seeded.root, port: 0, webRoot: null, appRoot: seeded.parent }),
+    ).rejects.toMatchObject({ code: 'SERVICE_ALREADY_RUNNING' });
+
+    await first.stop();
+    const second = await startGraphService({
+      root: seeded.root,
+      port: 0,
+      webRoot: null,
+      appRoot: seeded.parent,
+    });
+    running.push(second);
+    await second.stop();
+
+    // 端口绑定失败：启动占位必须释放，且没有实际绑定就不写 preferredPort。
+    const fresh = await seedWorkspace();
+    const blocker = await occupyTcpPort();
+    let failure: unknown = null;
+    try {
+      await startGraphService({
+        root: fresh.root,
+        port: blocker.port,
+        webRoot: null,
+        appRoot: fresh.parent,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect((failure as { code?: string }).code).toBe('EADDRINUSE');
+    expect(await preferredPortOf(fresh.root)).toBeNull();
+    await releaseTcp(blocker);
+
+    const recovered = await startGraphService({
+      root: fresh.root,
+      port: 0,
+      webRoot: null,
+      appRoot: fresh.parent,
+    });
+    running.push(recovered);
+    expect(recovered.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+
+  it('runtimeControl 注入：端点校验 workspaceId／instanceId，缺失控制时 501', async () => {
+    const seeded = await seedWorkspace();
+    const runtime = await GraphRuntime.open(seeded.root);
+    try {
+      const calls: string[] = [];
+      const app = createGraphApp({
+        runtime,
+        webRoot: null,
+        runtimeControl: {
+          requestStop: () => {
+            calls.push('stop');
+          },
+          openWorkspace: () => {
+            calls.push('open');
+          },
+        },
+      });
+      const post = async (pathName: string, body: unknown): Promise<Response> =>
+        app.fetch(
+          new Request('http://127.0.0.1' + pathName, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          }),
+        );
+      const good = { workspaceId: runtime.workspaceId, instanceId: runtime.instanceId };
+
+      const wrongWorkspace = await post('/api/runtime/stop', {
+        ...good,
+        workspaceId: 'w_' + 'f'.repeat(32),
+      });
+      expect(wrongWorkspace.status).toBe(409);
+      expect((await wrongWorkspace.json()) as { error: { code: string } }).toMatchObject({
+        error: { code: 'RUNTIME_IDENTITY_MISMATCH' },
+      });
+
+      const wrongInstance = await post('/api/runtime/stop', {
+        ...good,
+        instanceId: 'inst_' + '0'.repeat(32),
+      });
+      expect(wrongInstance.status).toBe(409);
+      expect((await wrongInstance.json()) as { error: { code: string } }).toMatchObject({
+        error: { code: 'RUNTIME_INSTANCE_MISMATCH' },
+      });
+      expect(calls).toEqual([]);
+
+      const stopped = await post('/api/runtime/stop', good);
+      expect(stopped.status).toBe(200);
+      expect(await stopped.json()).toEqual({ ok: true, state: 'stopping' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(calls).toEqual(['stop']);
+
+      const opened = await post('/api/runtime/open-workspace', good);
+      expect(opened.status).toBe(200);
+      expect(await opened.json()).toEqual({ ok: true, state: 'started' });
+      expect(calls).toEqual(['stop', 'open']);
+
+      const withoutControl = createGraphApp({ runtime, webRoot: null });
+      const unavailable = await withoutControl.fetch(
+        new Request('http://127.0.0.1/api/runtime/stop', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(good),
+        }),
+      );
+      expect(unavailable.status).toBe(501);
+      expect((await unavailable.json()) as { error: { code: string } }).toMatchObject({
+        error: { code: 'RUNTIME_CONTROL_UNAVAILABLE' },
+      });
+    } finally {
+      runtime.close();
+    }
+  });
+
+  it('POST /api/runtime/stop 先响应 stopping，再由 startGraphService 停止服务', async () => {
+    const seeded = await seedWorkspace();
+    const handle = await startGraphService({
+      root: seeded.root,
+      port: 0,
+      webRoot: null,
+      appRoot: seeded.parent,
+    });
+    running.push(handle);
+    const good = { workspaceId: handle.workspaceId, instanceId: handle.instanceId };
+
+    const wrong = await postJson(handle.url + '/api/runtime/stop', {
+      ...good,
+      instanceId: 'inst_' + '0'.repeat(32),
+    });
+    expect(wrong.status).toBe(409);
+    expect(await serviceReachable(handle.url)).toBe(true);
+
+    const stopped = await postJson(handle.url + '/api/runtime/stop', good);
+    expect(stopped.status).toBe(200);
+    expect(stopped.body).toEqual({ ok: true, state: 'stopping' });
+    await waitFor(async () => !(await serviceReachable(handle.url)));
+    await expect(
+      fs.readFile(path.join(seeded.root, '.aichat', 'runtime', 'service.json'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('launcher 缺失时 open-workspace 501，服务继续可用', async () => {
+    const seeded = await seedWorkspace();
+    const handle = await startGraphService({
+      root: seeded.root,
+      port: 0,
+      webRoot: null,
+      appRoot: seeded.parent,
+      launcherPath: path.join(seeded.parent, 'missing-launcher.exe'),
+    });
+    running.push(handle);
+
+    const response = await postJson(handle.url + '/api/runtime/open-workspace', {
+      workspaceId: handle.workspaceId,
+      instanceId: handle.instanceId,
+    });
+    expect(response.status).toBe(501);
+    expect(response.body).toMatchObject({ error: { code: 'LAUNCHER_UNAVAILABLE' } });
+    expect(await serviceReachable(handle.url)).toBe(true);
+  });
+
+  it('launcher 存在时 open-workspace 返回 started（--choose-workspace 交给原生入口）', async () => {
+    const seeded = await seedWorkspace();
+    // 用可执行的 node 本身当 launcher：只验证 spawn 成功路径与响应契约。
+    const handle = await startGraphService({
+      root: seeded.root,
+      port: 0,
+      webRoot: null,
+      appRoot: seeded.parent,
+      launcherPath: process.execPath,
+    });
+    running.push(handle);
+
+    const response = await postJson(handle.url + '/api/runtime/open-workspace', {
+      workspaceId: handle.workspaceId,
+      instanceId: handle.instanceId,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ ok: true, state: 'started' });
+    expect(await serviceReachable(handle.url)).toBe(true);
+  });
+
+  it('agentEntry 使用 installation.aichatCmdPath 与 skills/SKILL.md', async () => {
+    const seeded = await seedWorkspace();
+    const handle = await startGraphService({
+      root: seeded.root,
+      port: 0,
+      webRoot: null,
+      appRoot: seeded.parent,
+    });
+    running.push(handle);
+    const workspace = await getJson<WorkspaceResponse>(handle.url + '/api/workspace');
+    expect(workspace.body.agentEntry).toEqual({
+      cliPath: path.join(seeded.parent, 'aichat.cmd'),
+      skillPath: path.join(seeded.parent, 'skills', 'aichat-graph', 'SKILL.md'),
+    });
   });
 });
 

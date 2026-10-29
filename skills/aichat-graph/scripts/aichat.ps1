@@ -1,26 +1,17 @@
-#requires -Version 7.0
+#requires -Version 5.1
 <#
 .SYNOPSIS
-  用固定版本的 CLI 调用 aichat；仓库内、日用快照内和已安装副本共用这一份脚本。
+  用实际安装的 AIchat-graph CLI 调用 aichat；源码、便携包和已安装副本共用这一份脚本。
 
 .DESCRIPTION
   解析顺序（前者优先，命中即停）：
-    1. -Cli <绝对路径>：本次调用显式指定；
+    1. -Cli <路径>：本次调用显式指定；
     2. local.env.json 的 cli：本机安装绑定，按“脚本同目录 → Skill 根”查找；
-    3. 仓库内推导：<repo>/skills/aichat-graph/scripts → <repo>/dist/next/cli.js。
-  都不成立时明确失败并列出尝试过的路径；不猜正式库、不自动切换运行版本、不修改任何配置。
+    3. 随包/仓库推导：Skill 位于 app/skills/... 时使用同包 runtime/node.exe + app/dist/next/cli.js；
+       源码仓库使用系统 node + dist/next/cli.js。
+  都不成立时明确失败并列出尝试过的路径；不猜正式库、不自动切换运行版本、不修改配置。
   显式传了 -Cli 但文件不存在时直接失败，不会悄悄改用本机绑定的其他版本。
-  local.env.json 缺失或损坏不影响后续查找，只在失败信息里说明。
-
-.PARAMETER Cli
-  本次使用的 CLI 入口（绝对路径）。只在本次调用生效，不改本机配置。
-
-.EXAMPLE
-  ./scripts/aichat.ps1 topics --workspace "D:/my-workspace"
-
-.EXAMPLE
-  $runCli = 'D:/repo/.local/daily/dist/next/cli.js'
-  ./scripts/aichat.ps1 -Cli $runCli topics --workspace 'D:/my-workspace'
+  分发入口为包根 aichat.cmd；包装脚本直接执行包内 Node 与 JS，避免长文本反复穿过 shell。
 #>
 [CmdletBinding()]
 param(
@@ -28,10 +19,34 @@ param(
   [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]] $CliArgs
 )
 
+$ErrorActionPreference = 'Stop'
+try {
+  [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+  $OutputEncoding = [Console]::OutputEncoding
+} catch {
+  # 旧宿主控制台编码不可改时不影响命令执行。
+}
+
 $scriptDir = Split-Path -Parent $PSCommandPath
 $tried = [System.Collections.Generic.List[string]]::new()
 $notes = [System.Collections.Generic.List[string]]::new()
 $entry = $null
+
+function Get-NodeAndEntry([string] $Path) {
+  if ($Path -match '\.cmd$') {
+    $root = Split-Path -Parent $Path
+    $manifest = Join-Path $root 'distribution.json'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+      throw ('包的 distribution.json 不存在：' + $manifest)
+    }
+    $node = Join-Path $root 'runtime\node.exe'
+    $js = Join-Path $root 'app\dist\next\cli.js'
+    if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw ('包内 Node 不存在：' + $node) }
+    if (-not (Test-Path -LiteralPath $js -PathType Leaf)) { throw ('包内 CLI 不存在：' + $js) }
+    return [pscustomobject]@{ Node = $node; Entry = $js }
+  }
+  return [pscustomobject]@{ Node = 'node'; Entry = $Path }
+}
 
 # 1. 本次显式指定；给了却找不到时直接失败，不退回别的版本
 if ($Cli) {
@@ -66,15 +81,24 @@ if (-not $entry -and -not $Cli) {
   }
 }
 
-# 3. 仓库内相对推导；先确认上一级确实是本仓库，避免把宿主任意祖先目录当成工程根
+# 3. 随包或仓库推导；先确认 Skill 标记存在，避免把宿主任意祖先当成工程
 if (-not $entry -and -not $Cli) {
-  $repoRoot = Resolve-Path (Join-Path $scriptDir '../../..') -ErrorAction SilentlyContinue
-  $skillMarker = if ($repoRoot) { Join-Path $repoRoot 'skills/aichat-graph/SKILL.md' }
-  if ($repoRoot -and (Test-Path -LiteralPath $skillMarker -PathType Leaf)) {
-    $candidate = Join-Path $repoRoot 'dist/next/cli.js'
-    $tried.Add($candidate)
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-      $entry = (Resolve-Path -LiteralPath $candidate).Path
+  $appRoot = Resolve-Path (Join-Path $scriptDir '../../..') -ErrorAction SilentlyContinue
+  $skillMarker = if ($appRoot) { Join-Path $appRoot 'skills/aichat-graph/SKILL.md' }
+  if ($appRoot -and (Test-Path -LiteralPath $skillMarker -PathType Leaf)) {
+    $distRoot = Split-Path -Parent $appRoot
+    $packageManifest = Join-Path $distRoot 'distribution.json'
+    $packageNode = Join-Path $distRoot 'runtime\node.exe'
+    $packageJs = Join-Path $appRoot 'dist\next\cli.js'
+    if ((Test-Path -LiteralPath $packageManifest -PathType Leaf) -and (Test-Path -LiteralPath $packageNode -PathType Leaf) -and (Test-Path -LiteralPath $packageJs -PathType Leaf)) {
+      $entry = $packageJs
+      $tried.Add($packageNode + ' + ' + $packageJs)
+    } else {
+      $sourceCandidate = Join-Path $appRoot 'dist/next/cli.js'
+      $tried.Add($sourceCandidate)
+      if (Test-Path -LiteralPath $sourceCandidate -PathType Leaf) {
+        $entry = (Resolve-Path -LiteralPath $sourceCandidate).Path
+      }
     }
   }
 }
@@ -87,18 +111,22 @@ if (-not $entry) {
   }
   foreach ($note in $notes) { [Console]::Error.WriteLine('说明：' + $note) }
   if ($Cli) {
-    [Console]::Error.WriteLine('修复办法：确认 -Cli 指向实际存在的 dist/next/cli.js；本次不会改用本机绑定的其他版本。')
+    [Console]::Error.WriteLine('修复办法：确认 -Cli 指向实际存在的 aichat.cmd 或 cli.js；本次不会改用本机绑定的其他版本。')
   } else {
     [Console]::Error.WriteLine('修复办法（任选其一）：')
-    [Console]::Error.WriteLine(
-      '  1. 在 Skill 根（与 scripts 同级）写 local.env.json：' +
-      '{ "cli": "<CLI 绝对路径>" }，例如已安装副本指向 .local/daily/dist/next/cli.js；'
-    )
-    [Console]::Error.WriteLine('  2. 本次调用传 -Cli "<CLI 绝对路径>"；')
-    [Console]::Error.WriteLine('  3. 仓库内先在工程根执行 npm run build:node 生成 dist/next/cli.js。')
+    [Console]::Error.WriteLine('  1. 在 Skill 根（与 scripts 同级）写 local.env.json：{ "cli": "<aichat.cmd 或 cli.js 的绝对路径>" }；')
+    [Console]::Error.WriteLine('  2. 本次调用传 -Cli "<入口绝对路径>"；')
+    [Console]::Error.WriteLine('  3. 在完整便携包或仓库内运行：包用 aichat.cmd，仓库先 npm run build 生成 dist/next/cli.js。')
   }
   exit 7
 }
 
-& node $entry @CliArgs
+try {
+  $runner = Get-NodeAndEntry $entry
+} catch {
+  [Console]::Error.WriteLine('CLI 入口无效：' + $_.Exception.Message)
+  exit 7
+}
+
+& $runner.Node $runner.Entry @CliArgs
 exit $LASTEXITCODE

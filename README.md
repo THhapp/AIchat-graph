@@ -16,10 +16,31 @@
 - 每个主题分别显示最近一次内容更新。重要标记与内容更新独立。
 - 用户可为主题指定 HTML 保存位置；有变化时自动更新同一路径，移走后仍可离线阅读。
 
-## 安装与运行
+## 获取与打开（Windows 10／11 x64）
 
-环境要求见 package.json 的 engines。当前使用 Node.js 24.17.0、npm 11.13.0，
-SQLite 由 Node 内置模块提供；目前分发源码，没有独立安装包。
+Windows 免安装包的文件名为 AIchat-graph-0.1.0-win-x64.zip。包内自带 Node 24.17.0
+和生产依赖，解压后即可运行，不需要安装 Node、npm、Git、PowerShell 7、.NET 或 VC++。
+
+1. 把 ZIP **完整解压**到可写、长期保留的目录（例如 D:\Tools\AIchat-graph）。
+2. 双击 AIchat-graph.exe。
+3. 第一次选择已有讨论库（含 graph.sqlite 的目录），或新建一个空文件夹。
+4. 服务就绪后用默认浏览器打开阅读页；下次双击直接打开上次的库。
+
+关闭网页不停止后台服务。页面「程序」菜单可重新选库或退出本库服务，也可运行
+AIchat-graph.exe --stop。更新时从新 ZIP 运行「更新已有程序.cmd」，程序文件替换，
+讨论库和本机 .aichat 设置保留。详细步骤见包内「开始使用.md」。
+
+程序不注册系统服务、PATH、文件关联或协议，也不自动安装 Skill。包根 aichat.cmd
+是给 Agent 使用的真实入口；Skill 是可选组件，安装不会改动讨论资料。
+
+下载页/Release 发布后只上传这个 ZIP，不把本机配置或真实资料放入仓库。
+维护者在仓库运行 npm run build 和 npm run package:windows，可在
+.local/packages/ 得到同一 ZIP 与未压缩目录；ZIP 本身不提交到 Git。
+
+## 源码运行与开发
+
+环境要求见 package.json 的 engines；当前为 Node.js 24.17.0、npm 11.13.0，
+SQLite 由 Node 内置模块提供。源码模式适合开发和构建，不是普通用户的必需步骤。
 
 ~~~sh
 git clone https://github.com/THhapp/AIchat-graph.git
@@ -28,25 +49,22 @@ npm ci
 npm run build
 ~~~
 
-选仓库之外的新目录保存讨论：
-
 ~~~sh
 node ./dist/next/cli.js init "../my-graph-workspace" --name "My graph"
-node ./dist/next/cli.js serve --workspace "../my-graph-workspace"
+node ./dist/next/cli.js open --workspace "../my-graph-workspace"
 ~~~
 
-打开 <http://127.0.0.1:4317>；Ctrl+C 停止服务。数据保留在工作区。
 Windows 可用 .\aichat.cmd 替代 node ./dist/next/cli.js。
-使用指南中的 aichat 表示实际程序入口，不要求安装 Skill 或注册全局命令。
-
-目录、默认工作区和旧资料导入见[工作区指南](docs/workspace.md)。
-需要一边使用一边开发时，start.cmd 运行固定日用构建，start-dev.cmd 使用独立开发库；
-构建、更新与宿主安装见[开发说明](DEVELOPMENT.md)。
+工作区、默认库和旧资料导入见[工作区指南](docs/workspace.md)。
+一边使用一边开发时，start.cmd 运行已安装的日用便携程序，start-dev.cmd 使用独立开发库；
+构建、打包、更新与宿主安装见[开发说明](DEVELOPMENT.md)。
 
 ## 与 Agent 一起使用
 
-把实际程序入口、工作区和讨论目标交给 Agent。它可直接按[程序 CLI 手册](docs/cli.md)工作；
-需要本项目的讨论组织与节点写作方法时，再使用随附 [Skill](skills/aichat-graph/SKILL.md)。
+把实际程序入口、工作区和讨论目标交给 Agent。便携包的 aichat.cmd 是真实入口，
+它使用包内 Node 与生产依赖；源码模式可用 dist/next/cli.js。
+它可直接按[程序 CLI 手册](docs/cli.md)工作；需要讨论组织与节点写作方法时，
+再使用随附 [Skill](skills/aichat-graph/SKILL.md)（程序不依赖 Skill，首次打开不安装）。
 
 进入未知主题可先读概览；已知节点可直读正文；续谈可用 resume。
 Agent 使用稳定节点 ID 与持久版本提交修改，程序负责结构校验、事务和图更新。
@@ -63,7 +81,7 @@ Agent 使用稳定节点 ID 与持久版本提交修改，程序负责结构校�
 ~~~text
 请启用 AIchat-graph 记录，陪我开展讨论。
 
-实际 CLI 入口：【aichat.cmd 或 dist/next/cli.js 的位置】
+实际 CLI 入口：【便携包 aichat.cmd；源码开发用 dist/next/cli.js】
 工作区：【实际讨论目录】
 主题：【已有主题名称或 ID；新建时填写名称及可选 key】
 起始问题：【讨论目标】
@@ -85,6 +103,7 @@ Agent 使用稳定节点 ID 与持久版本提交修改，程序负责结构校�
 graph.sqlite                     主题、节点、正文、关系、版本与请求结果
 resources/                       正文明确引用的本地图片
 .aichat/runtime/service.json      本机服务地址和实例
+.aichat/local/runtime.json        本机稳定端口偏好
 .aichat/local/exports.json        用户指定的 HTML 保存位置
 ~~~
 

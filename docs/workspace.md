@@ -1,20 +1,33 @@
 # 工作区指南
 
-工作区保存讨论资料；程序、开发代码、日用构建和 HTML 成品可以放在不同位置。
-以下 aichat 表示实际入口，未加入 PATH 时使用 aichat.cmd 或 `node <实际 CLI.js>`。
+工作区保存讨论资料；程序、开发代码、日用程序和 HTML 成品可以放在不同位置。
+Windows 发布包中的 aichat.cmd 是实际 CLI 入口；源码开发时可用 node dist/next/cli.js。
 
-## 建立与打开
+## 第一次打开与建立
 
-对新目录执行：
+Windows 便携包解压后双击 AIchat-graph.exe：
+
+1. 没有默认库时打开原生目录选择器；
+2. 选择已有讨论库（含 graph.sqlite），或空文件夹作为新库；
+3. 新库名称取文件夹名，无需额外命名；
+4. 服务就绪后打开默认浏览器，并记住默认库；下次双击直接打开。
+
+取消选择不会创建数据库或改默认库。程序目录、只读目录、非空且没有 graph.sqlite 的目录
+不会被当作讨论库；旧 Markdown 库需要先显式 import。
+程序包根和内部程序目录不能作为讨论库；不要把资料放进后续会被替换的程序目录。
+
+也可以显式管理：
 
 ~~~text
-aichat init D:/my-discussions --name "我的讨论库"
-aichat config --workspace D:/my-discussions
-aichat serve --workspace D:/my-discussions
+aichat.cmd init D:/my-discussions --name "我的讨论库"
+aichat.cmd open --workspace D:/my-discussions --no-browser
+aichat.cmd open
+aichat.cmd stop
 ~~~
 
-浏览器打开默认地址 <http://127.0.0.1:4317>。停止服务不会删除资料。
-已有 graph.sqlite 的工作区直接打开，不再 init。
+open 会复用存活服务，缺失时启动后台服务；成功后保存为默认库。stop 只请求当前库服务
+自行退出，不自启动、不按 PID 杀进程；已停止时返回 not-running 成功状态。
+页面「程序」菜单提供打开其他库和退出本库服务。
 
 ## 数据位置
 
@@ -22,36 +35,59 @@ aichat serve --workspace D:/my-discussions
 graph.sqlite
 resources/
 .aichat/runtime/service.json
+.aichat/local/runtime.json
 .aichat/local/exports.json
 ~~~
 
 - graph.sqlite 是唯一主存储。WAL 模式还可能出现 graph.sqlite-wal / -shm，由 SQLite 管理。
 - resources/ 保存正文明确引用的本地图片，正文使用 resources/... 键。
 - service.json 是当前服务描述，由程序维护；不要靠删除它解决连接问题。
+- runtime.json 记录本库上次成功绑定的端口；服务优先复用，端口被占用时才换空闲端口。
 - exports.json 保存本机 HTML 目标，由页面设置；它不是正文来源。
 - 主题 key 是库内自命名标识，不要求存在同名目录。
 
 不要直接修改数据库、运行描述或 HTML 来绕过 CLI 报错。
-讨论图和完整成品的日常维护不需要 workspace.json、topics/ 或节点 Markdown。
+日常维护不需要 workspace.json、topics/ 或节点 Markdown。
 
-## 默认工作区与显式目标
+## 程序目录、默认库与端口
 
-CLI 按以下顺序选择目录：
+便携包目录边界：
 
-1. `--workspace <dir>`；
+~~~text
+AIchat-graph-<version>-win-x64/
+  AIchat-graph.exe
+  aichat.cmd
+  更新已有程序.cmd
+  开始使用.md
+  distribution.json
+  runtime/         包内 Node
+  app/             CLI、Web、Skill、文档与生产依赖
+  .aichat/         默认库、本机设置和日志（由程序产生）
+~~~
+
+程序区和资料区分开：更新只替换 root 程序文件、runtime/ 和 app/，保留 .aichat/；
+讨论库应放在程序目录之外。默认库保存在程序根 .aichat/default.json。
+源码运行时默认配置在仓库根 .aichat/default.json。
+
+CLI 选择目录的顺序：
+
+1. --workspace <dir>；
 2. AICHAT_WORKSPACE 环境变量；
-3. 该程序根目录的 .aichat/default.json。
+3. 当前安装的程序根 .aichat/default.json。
 
-config --workspace 保存默认目标，config --show 查看。
---workspace-id 只核对所选库的身份，不把 ID 转成目录。
+config --workspace 保存默认目标，config --show 查看；--workspace-id 只核对身份。
+端口默认按 runtime.json 的 preferredPort，未记录时用 4317，被占用时才用系统空闲端口；
+只有成功绑定后才记录。
 
-仓库与 .local/daily 是不同程序根，应通过实际使用的入口配置默认库。
-Windows 启动器另外使用 launcher.local.json 或开发配置；
-它与 CLI 默认配置目前不会自动互相同步。目标不明确时显式给 --workspace。
+## 更新程序
 
-固定日用快照还有一项限制：在其程序根写入 .aichat/default.json 后，
-当前更新器会将 .aichat 视为额外目录并拒绝替换快照。
-日用命令宜显式给 --workspace；不要为更新快照自行删除配置或运行数据。
+1. 下载新 ZIP，完整解压到旧程序目录之外；
+2. 先退出旧程序正在服务的讨论库（页面菜单或旧程序 --stop）；
+3. 从新包运行「更新已有程序.cmd」，选择旧程序目录并确认；
+4. 完成后从原位置打开。
+
+更新只替换程序文件，不复制、不删除讨论资料；不会停止仍在运行的旧服务。
+程序不注册系统服务、PATH、文件关联或协议，也不自动安装 Skill。
 
 ## 给 Agent 继续讨论
 
@@ -60,7 +96,8 @@ Windows 启动器另外使用 launcher.local.json 或开发配置；
 修改使用读到的节点 revision，继续修改可用写结果中的 nodeRevisions。
 
 需要协作方法时加载 Skill；程序本身可以独立使用。
-Skill 包装脚本负责定位 CLI，不自动应用 local.env.json 中的 workspace 字段。
+Skill 是可选组件，首次打开程序不会安装。包内可用 app/tools/install-skill.ps1
+显式安装到 Codex/WorkBuddy 或其他目录；安装不改变讨论资料。
 
 ## HTML 保存与知识提炼
 
@@ -74,7 +111,7 @@ HTML 是完整、独立、只读的主题快照；保存位置可与知识库放
 ## 仅旧版 Markdown 资料需要导入
 
 ~~~text
-aichat import --workspace D:/old-workspace
+aichat.cmd import --workspace D:/old-workspace
 ~~~
 
 import 只读当前旧 V2 / isolated 格式，在该目录新建 graph.sqlite，

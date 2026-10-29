@@ -40,6 +40,8 @@ export function useDetails(
   topicId: string | null,
   enabled: boolean,
   onStale: () => void,
+  /** false once the local service is stopped: keep the loaded detail, no request. */
+  serviceAvailable = true,
 ) {
   const [state, setState] = useState<DetailState>(EMPTY);
   const abort = useRef<AbortController | null>(null);
@@ -53,6 +55,15 @@ export function useDetails(
   useEffect(() => () => { abort.current?.abort(); }, []);
 
   useEffect(() => {
+    if (!serviceAvailable) {
+      // The service is stopped on purpose: keep whatever is already on screen and
+      // never start another request. A new selection simply has no body to show.
+      abort.current?.abort();
+      requestKey.current = '';
+      activeKey.current = '';
+      setState((current) => (current.loading ? { ...current, loading: false } : current));
+      return;
+    }
     if (graph === null || !enabled || (nodeId === null && topicId === null)) {
       abort.current?.abort();
       requestKey.current = '';
@@ -142,7 +153,7 @@ export function useDetails(
       // otherwise the panel would stay in a loading state with no request.
       if (activeKey.current !== key) controller.abort();
     };
-  }, [graph, nodeId, topicId, enabled, retryNonce, onStale]);
+  }, [graph, nodeId, topicId, enabled, retryNonce, onStale, serviceAvailable]);
 
   return { ...state, retry };
 }

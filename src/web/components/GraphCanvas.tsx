@@ -49,13 +49,15 @@ export interface CanvasProps {
   importanceBusyIds?: ReadonlySet<string>;
   /** Writes one node's important flag from its card; omitted in the read-only offline reader. */
   onToggleImportant?: (node: GraphNode, important: boolean) => void;
+  /** The local service is stopped, so the importance write cannot run. */
+  importanceDisabled?: boolean;
 }
 
 const nodeTypes = { topic: TopicCard };
 const edgeTypes = { route: RouteEdge, trunk: TrunkEdge };
 
 function CanvasInner(props: CanvasProps): React.JSX.Element {
-  const { view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, recentNodeIds, importanceBusyIds, onToggleImportant } = props;
+  const { view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, recentNodeIds, importanceBusyIds, onToggleImportant, importanceDisabled } = props;
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TopicCardData>>([]);
 
   const flowNodes = useMemo<Node<TopicCardData>[]>(() => {
@@ -93,13 +95,14 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
           childCount: children.get(node.id) ?? 0,
           recent: recentNodeIds?.has(node.id) ?? false,
           importanceBusy: importanceBusyIds?.has(node.id) ?? false,
+          importanceDisabled: importanceDisabled === true,
           ...(onToggleImportant !== undefined ? { onToggleImportant } : {}),
           onToggleCollapse,
         },
       });
     }
     return result;
-  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, recentNodeIds, importanceBusyIds, onToggleImportant]);
+  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, recentNodeIds, importanceBusyIds, onToggleImportant, importanceDisabled]);
 
   // `layout` is the dependency that carries `edgeRoutes` and `branchTrunks`
   // together, so a new trunk set always rebuilds the edge list.

@@ -13,6 +13,7 @@
   "include": [
     "src/build-info.ts",
     "src/next/**/*.ts",
+    "src/portable/**/*.ts",
     "src/core/**/*.ts",
     "src/storage/**/*.ts",
     "src/index/**/*.ts",

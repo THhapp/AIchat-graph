@@ -1,5 +1,5 @@
 @echo off
-rem Shared argument forwarding for Daily, Development and UpdateDaily.
+rem Shared argument forwarding for the Development source launcher.
 setlocal EnableExtensions
 set "LAUNCH_PS1=%~dp0launch.ps1"
 set "LAUNCH_MODE=%~1"

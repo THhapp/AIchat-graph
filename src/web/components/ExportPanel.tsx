@@ -10,6 +10,8 @@ export interface ExportPanelProps {
   focusedTopicId: string | null;
   /** Statuses pushed by the service's 'export' event, keyed by topic id. */
   liveStatuses?: Readonly<Record<string, TopicExportStatus>>;
+  /** The local service is stopped: this panel cannot read or write export state. */
+  serviceAvailable?: boolean;
   onClose: () => void;
 }
 
@@ -19,7 +21,7 @@ type Pending = { kind: 'target'; topicId: string } | { kind: 'retry'; topicId: s
  * Per-topic export target and status. Paths are typed in full and sent to the
  * service; nothing here triggers a browser download or writes a file.
  */
-export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveStatuses, onClose }: ExportPanelProps): React.JSX.Element {
+export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveStatuses, serviceAvailable = true, onClose }: ExportPanelProps): React.JSX.Element {
   const [statuses, setStatuses] = useState<TopicExportStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending>(null);
@@ -51,9 +53,16 @@ export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveSta
   }, []);
 
   useEffect(() => {
+    if (!serviceAvailable) {
+      // The service is gone: do not fetch or write, and do not fake an empty list.
+      abort.current?.abort();
+      setStatuses(null);
+      setError(null);
+      return () => { abort.current?.abort(); };
+    }
     void load();
     return () => { abort.current?.abort(); };
-  }, [load, instanceId, graphRevision]);
+  }, [load, instanceId, graphRevision, serviceAvailable]);
 
   useEffect(() => { headingRef.current?.focus(); }, []);
 
@@ -116,6 +125,7 @@ export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveSta
       <div className="export-panel__hint">
         填写本机 .html 的完整绝对路径后保存。服务会写入该文件；此页不下载、不写盘。
         目标需不存在或属于同一主题，父目录必须已存在。
+        {serviceAvailable ? null : <strong> 服务已停止，导出不可用。</strong>}
       </div>
       {error !== null ? (
         <div className="banner banner--error" role="alert">
@@ -125,7 +135,9 @@ export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveSta
       ) : null}
       <div className="export-panel__body">
         {ordered === null ? (
-          <p className="sidebar__placeholder"><span className="spinner" /> 正在读取导出状态…</p>
+          <p className="sidebar__placeholder">
+            {serviceAvailable ? <><span className="spinner" /> 正在读取导出状态…</> : '服务已停止，导出不可用。'}
+          </p>
         ) : ordered.length === 0 ? (
           <p className="sidebar__placeholder">没有可导出的主题。</p>
         ) : (
@@ -153,6 +165,7 @@ export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveSta
                       autoComplete="off"
                       placeholder="例如 C:\Users\你\Documents\主题.html"
                       value={draft}
+                      disabled={!serviceAvailable}
                       onChange={(event) => {
                         const value = event.target.value;
                         setDrafts((current) => ({ ...current, [status.topicId]: value }));
@@ -160,7 +173,7 @@ export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveSta
                     />
                     <button
                       type="button"
-                      disabled={busy || !dirty}
+                      disabled={busy || !dirty || !serviceAvailable}
                       onClick={() => { void submitTarget(status.topicId); }}
                     >
                       {busy ? '保存中…' : status.targetPath === null ? '保存目标' : draft.trim() === '' ? '取消绑定' : '更改位置'}
@@ -190,7 +203,7 @@ export function ExportPanel({ graphRevision, instanceId, focusedTopicId, liveSta
                     <p className="export-item__notice" role="status">{notice[status.topicId]}</p>
                   ) : null}
                   {status.targetPath !== null ? (
-                    <button type="button" disabled={busy} onClick={() => { void doRetry(status.topicId); }}>
+                    <button type="button" disabled={busy || !serviceAvailable} onClick={() => { void doRetry(status.topicId); }}>
                       {busy ? '处理中…' : '重新生成'}
                     </button>
                   ) : null}

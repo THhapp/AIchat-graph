@@ -8,13 +8,15 @@
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { serve, type ServerType } from '@hono/node-server';
-import { sha256Bytes } from '../storage/index.js';
+import { isErrnoCode, resolveWorkspaceRoot, sha256Bytes } from '../storage/index.js';
 import { loadProgramInfo } from '../build-info.js';
+import { agentEntryOf, resolveInstallation } from './installation.js';
 import {
   derivedSummary,
   DomainError,
@@ -26,11 +28,14 @@ import {
 import { readView, DEFAULT_READ_BUDGET, MAX_READ_BUDGET, type ReadRequest } from './read.js';
 import type { CreateExportManagerOptions, ExportManagerLike } from './export-contract.js';
 import {
+  acquireStartupPlaceholder,
   DEFAULT_HOST,
   DEFAULT_PORT,
   GraphRuntime,
   packageRoot,
+  readRuntimePreferences,
   removeOwnDescriptor,
+  writeRuntimePreferences,
   writeServiceDescriptor,
   type GraphEvent,
 } from './runtime.js';
@@ -44,6 +49,8 @@ import type {
   ImportanceResponse,
   ReadViewKind,
   ReadViewResponse,
+  RuntimeOpenWorkspaceResponse,
+  RuntimeStopResponse,
   SearchField,
   SearchHit,
   SearchResponse,
@@ -248,11 +255,23 @@ function initialSnapshotEvent(runtime: GraphRuntime): SnapshotEvent {
  * 应用
  * ------------------------------------------------------------------ */
 
+/**
+ * 本机运行控制回调：由 startGraphService 注入，HTTP 层只负责校验身份与返回约定形状。
+ * 缺失时两个控制端点统一 501，测试/嵌入场景也可注入 spy。
+ */
+export interface RuntimeControl {
+  /** 请求停止；实现方负责在响应写出之后调用真正的 stop。 */
+  requestStop(): void;
+  /** 打开/切换工作区（native launcher --choose-workspace）；launcher 缺失抛 501。 */
+  openWorkspace(): Promise<void> | void;
+}
+
 export interface GraphAppOptions {
   readonly runtime: GraphRuntime;
   readonly webRoot: string | null;
   readonly exports?: ExportManagerLike | null | undefined;
   readonly agentEntry?: { cliPath: string; skillPath: string } | undefined;
+  readonly runtimeControl?: RuntimeControl | undefined;
 }
 
 export function createGraphApp(options: GraphAppOptions): Hono {
@@ -270,6 +289,40 @@ export function createGraphApp(options: GraphAppOptions): Hono {
       );
     }
     return manager;
+  };
+
+  const requireRuntimeControl = (): RuntimeControl => {
+    if (options.runtimeControl === undefined) {
+      throw new DomainError(
+        'RUNTIME_CONTROL_UNAVAILABLE',
+        '本实例没有启用运行时控制（缺少启动上下文）',
+        501,
+        {},
+      );
+    }
+    return options.runtimeControl;
+  };
+
+  /** 控制请求必须携带本实例身份；跨实例请求一律拒绝，不误停/误开别的服务。 */
+  const assertRuntimeIdentity = (value: unknown): { workspaceId: string; instanceId: string } => {
+    if (!isRecord(value)) throw badRequest('运行时控制请求体必须是 JSON 对象');
+    const workspaceId = requireString(value, 'workspaceId');
+    const instanceId = requireString(value, 'instanceId');
+    if (workspaceId !== runtime.workspaceId) {
+      throw new DomainError('RUNTIME_IDENTITY_MISMATCH', 'workspaceId 与服务实例不一致', 409, {
+        expectedWorkspaceId: runtime.workspaceId,
+        workspaceId,
+      });
+    }
+    if (instanceId !== runtime.instanceId) {
+      throw new DomainError(
+        'RUNTIME_INSTANCE_MISMATCH',
+        'instanceId 与服务实例不一致（服务可能已重启）；请重新读取 workspace 后重试',
+        409,
+        { expectedInstanceId: runtime.instanceId, instanceId },
+      );
+    }
+    return { workspaceId, instanceId };
   };
 
   app.onError((error, c) => fail(c, error));
@@ -527,6 +580,34 @@ export function createGraphApp(options: GraphAppOptions): Hono {
       node: publicNode(findNode(after, nodeId)),
     };
     return jsonResponse(c, body);
+  });
+
+
+  /* --------------------------- 运行控制 ---------------------------- */
+
+  api.post('/runtime/stop', async (c) => {
+    const raw = await readRawBody(c);
+    assertRuntimeIdentity(parseJsonBody(raw));
+    const control = requireRuntimeControl();
+    const response: RuntimeStopResponse = { ok: true, state: 'stopping' };
+    // 先让 HTTP 响应出站；真正停止由 startGraphService 的 requestStop 调 handle.stop。
+    setTimeout(() => {
+      try {
+        control.requestStop();
+      } catch {
+        // 停止请求失败不影响已经返回的响应。
+      }
+    }, 0);
+    return jsonResponse(c, response);
+  });
+
+  api.post('/runtime/open-workspace', async (c) => {
+    const raw = await readRawBody(c);
+    assertRuntimeIdentity(parseJsonBody(raw));
+    const control = requireRuntimeControl();
+    await control.openWorkspace();
+    const response: RuntimeOpenWorkspaceResponse = { ok: true, state: 'started' };
+    return jsonResponse(c, response);
   });
 
   /* ------------------------------ 导出 ------------------------------ */
@@ -844,11 +925,14 @@ function contentTypeOf(file: string): string {
 
 export interface StartGraphServiceOptions {
   readonly root: string;
+  /** 省略时使用稳定端口偏好（remembered → 4317 → 空闲端口）；显式给出时精确使用（0 = 系统分配）。 */
   readonly port?: number | undefined;
   readonly host?: string | undefined;
   readonly webRoot?: string | null | undefined;
   readonly offlineDirectory?: string | undefined;
   readonly appRoot?: string | undefined;
+  /** native launcher 路径；省略时取 installation.launcherPath（dev 模式通常不存在 → 501）。 */
+  readonly launcherPath?: string | undefined;
 }
 
 export interface GraphServiceHandle {
@@ -856,6 +940,8 @@ export interface GraphServiceHandle {
   readonly workspaceId: string;
   readonly instanceId: string;
   readonly revision: number;
+  /** 服务因任何原因关闭时 resolve；serve 进程据此正常退出，不留下 unsettled top-level await。 */
+  readonly closed: Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -911,6 +997,44 @@ async function loadExportManager(
   }
 }
 
+
+/**
+ * native launcher 入口：分发包的 exe 处理 --choose-workspace。
+ * dev/源码模式通常没有 launcher → 501；启动失败明确 500，不静默吞掉。
+ */
+async function launchChooseWorkspace(launcherPath: string): Promise<void> {
+  const stat = await fs.stat(launcherPath).catch(() => null);
+  if (stat === null || !stat.isFile()) {
+    throw new DomainError(
+      'LAUNCHER_UNAVAILABLE',
+      '没有可用的原生 launcher，无法打开其他工作区：' + launcherPath,
+      501,
+      { launcherPath },
+    );
+  }
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(launcherPath, ['--choose-workspace'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    });
+    child.once('error', (error) => {
+      reject(
+        new DomainError(
+          'LAUNCHER_FAILED',
+          '无法启动 launcher：' + (error instanceof Error ? error.message : String(error)),
+          500,
+          { launcherPath },
+        ),
+      );
+    });
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
 function formatHost(host: string): string {
   return host.includes(':') && !host.startsWith('[') ? '[' + host + ']' : host;
 }
@@ -921,25 +1045,57 @@ async function listen(
   port: number,
 ): Promise<{ server: ServerType; port: number }> {
   return new Promise((resolve, reject) => {
-    const emitterHolder: { server: ServerType | null } = { server: null };
+    let server: ServerType | null = null;
     const errorListener = (error: unknown): void => {
+      try {
+        server?.close(() => undefined);
+      } catch {
+        // 绑定失败时关闭尽力而为
+      }
       reject(error);
     };
-    const server = serve(
+    server = serve(
       { fetch: app.fetch, hostname: host, port },
       (info) => {
         const emitter = server as unknown as {
           off?: (event: string, listener: (error: unknown) => void) => void;
         };
         emitter.off?.('error', errorListener);
-        resolve({ server, port: info.port });
+        resolve({ server: server as ServerType, port: info.port });
       },
     );
-    emitterHolder.server = server;
     (server as unknown as {
       once: (event: string, listener: (error: unknown) => void) => void;
     }).once('error', errorListener);
   });
+}
+
+/**
+ * 省略 port 时的稳定选择：remembered → 4317 → 系统分配。
+ * 只有真正绑定成功才返回；端口被占用时继续尝试下一个候选。
+ */
+async function listenPreferred(
+  app: Hono,
+  host: string,
+  root: string,
+): Promise<{ server: ServerType; port: number }> {
+  const preferences = await readRuntimePreferences(root);
+  const candidates: number[] = [];
+  if (preferences?.preferredPort !== null && preferences?.preferredPort !== undefined) {
+    candidates.push(preferences.preferredPort);
+  }
+  if (!candidates.includes(DEFAULT_PORT)) candidates.push(DEFAULT_PORT);
+  candidates.push(0);
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      return await listen(app, host, candidate);
+    } catch (error) {
+      if (!isErrnoCode(error, 'EADDRINUSE')) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError ?? new DomainError('PORT_UNAVAILABLE', '没有可用端口', 503, {});
 }
 
 async function closeServer(server: ServerType | null): Promise<void> {
@@ -963,89 +1119,132 @@ async function closeServer(server: ServerType | null): Promise<void> {
 }
 
 /**
- * 启动单工作区本地服务：打开 DB → HTTP 监听（port 0 取实际端口）→ 写描述文件。
- * 任一步失败都清理已获取资源，不删除其他实例的描述文件。
+ * 启动单工作区本地服务：占启动位 → 打开 DB → HTTP 监听（稳定端口或显式端口）
+ * → 记录实际端口 → 写描述文件。任一步失败释放占位并清理自己获取的资源，
+ * 不删除其他实例的描述文件。
  */
 export async function startGraphService(
   options: StartGraphServiceOptions,
 ): Promise<GraphServiceHandle> {
-  const port = options.port ?? DEFAULT_PORT;
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new DomainError('INVALID_ARGUMENT', 'port 必须是 0-65535 的整数', 400, { port });
+  const explicitPort = options.port;
+  if (
+    explicitPort !== undefined &&
+    (!Number.isInteger(explicitPort) || explicitPort < 0 || explicitPort > 65535)
+  ) {
+    throw new DomainError('INVALID_ARGUMENT', 'port 必须是 0-65535 的整数', 400, {
+      port: explicitPort,
+    });
   }
   const host = options.host ?? DEFAULT_HOST;
-  const runtime = await GraphRuntime.open(options.root);
-  const appRoot = options.appRoot ?? packageRoot() ?? process.cwd();
-  const webRoot = await resolveWebRoot(options.webRoot, appRoot);
-  const offlineDirectory = options.offlineDirectory ?? defaultOfflineDirectory(appRoot);
+  const rootReal = await resolveWorkspaceRoot(options.root);
+  // 先占住同一数据库的启动位：Windows named pipe，其他平台临时 socket 文件。
+  const placeholder = await acquireStartupPlaceholder(rootReal);
 
+  let runtime: GraphRuntime | null = null;
   let manager: ExportManagerLike | null = null;
   let server: ServerType | null = null;
   let descriptorWritten = false;
+  let handle: GraphServiceHandle | null = null;
+
   try {
+    const activeRuntime = await GraphRuntime.open(rootReal);
+    runtime = activeRuntime;
+    const appRoot = options.appRoot ?? packageRoot() ?? process.cwd();
+    const installation = resolveInstallation(appRoot);
+    const webRoot = await resolveWebRoot(options.webRoot, appRoot);
+    const offlineDirectory = options.offlineDirectory ?? defaultOfflineDirectory(appRoot);
+    const launcherPath = options.launcherPath ?? installation.launcherPath;
+
     manager = await loadExportManager({
-      root: runtime.root,
+      root: activeRuntime.root,
       appRoot,
       offlineDirectory,
-      workspaceId: runtime.workspaceId,
-      workspaceName: runtime.snapshot().name,
-      onStatus: (status) => runtime.publishExport(status),
+      workspaceId: activeRuntime.workspaceId,
+      workspaceName: activeRuntime.snapshot().name,
+      onStatus: (status) => activeRuntime.publishExport(status),
     });
-    runtime.attachExports(manager);
+    activeRuntime.attachExports(manager);
+
+    const runtimeControl: RuntimeControl = {
+      requestStop: () => {
+        // 让 /api/runtime/stop 的响应先出站，再由 startGraphService 调 handle.stop。
+        setTimeout(() => {
+          void handle?.stop().catch(() => undefined);
+        }, 50).unref?.();
+      },
+      openWorkspace: async () => {
+        await launchChooseWorkspace(launcherPath);
+      },
+    };
 
     const app = createGraphApp({
-      runtime,
+      runtime: activeRuntime,
       webRoot,
       exports: manager,
-      agentEntry: {
-        cliPath: path.join(appRoot, 'dist', 'next', 'cli.js'),
-        skillPath: path.join(appRoot, 'skills', 'aichat-graph', 'SKILL.md'),
-      },
+      agentEntry: agentEntryOf(installation),
+      runtimeControl,
     });
-    const bound = await listen(app, host, port);
+
+    const bound =
+      explicitPort === undefined
+        ? await listenPreferred(app, host, activeRuntime.root)
+        : await listen(app, host, explicitPort);
     server = bound.server;
+    // 只有真正绑定成功后才记录稳定端口；失败的候选与启动失败都不写。
+    await writeRuntimePreferences(activeRuntime.root, bound.port);
     const url = 'http://' + formatHost(host) + ':' + String(bound.port);
-    runtime.setUrl(url);
-    await writeServiceDescriptor(runtime, url);
+    activeRuntime.setUrl(url);
+    await writeServiceDescriptor(activeRuntime, url);
     descriptorWritten = true;
 
-    const revision = runtime.snapshot().revision;
+    const revision = activeRuntime.snapshot().revision;
     let stopped = false;
-    return {
+    let resolveClosed: () => void = () => undefined;
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    const created: GraphServiceHandle = {
       url,
-      workspaceId: runtime.workspaceId,
-      instanceId: runtime.instanceId,
+      workspaceId: activeRuntime.workspaceId,
+      instanceId: activeRuntime.instanceId,
       revision,
+      closed,
       stop: async () => {
         if (stopped) return;
         stopped = true;
-        runtime.attachExports(null);
+        activeRuntime.attachExports(null);
         try {
           manager?.close();
         } catch {
           // 关闭导出失败不阻断服务退出
         }
         try {
-          await removeOwnDescriptor(runtime.root, runtime.instanceId);
+          await removeOwnDescriptor(activeRuntime.root, activeRuntime.instanceId);
         } catch {
           // 描述文件清理失败不阻断退出；下次启动会覆盖。
         }
         await closeServer(server);
-        runtime.close();
+        activeRuntime.close();
+        await placeholder.release().catch(() => undefined);
+        handle = null;
+        resolveClosed();
       },
     };
+    handle = created;
+    return created;
   } catch (error) {
-    runtime.attachExports(null);
+    runtime?.attachExports(null);
     try {
       manager?.close();
     } catch {
       // ignore
     }
-    if (descriptorWritten) {
+    if (descriptorWritten && runtime !== null) {
       await removeOwnDescriptor(runtime.root, runtime.instanceId).catch(() => undefined);
     }
     await closeServer(server);
-    runtime.close();
+    runtime?.close();
+    await placeholder.release().catch(() => undefined);
     throw error;
   }
 }

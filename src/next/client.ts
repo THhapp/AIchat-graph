@@ -3,7 +3,7 @@
  * - 读取 <root>/.aichat/runtime/service.json，只接受 loopback http；
  * - GET /api/workspace 核对 workspaceId／rootPath／instanceId 与接口版本 4；
  * - 写：POST /api/agent/changes（不投递 /api/changes/:id；status 直接读 SQLite）；
- * - descriptor 缺失时按约定自启动同版 CLI 的 serve --port 0，轮询到超时，不杀后台进程；
+ * - descriptor 缺失时按约定自启动同版 CLI 的 serve（端口由服务的端口偏好决定），轮询到超时，不杀后台进程；
  * - 连不上／结果不明时如实报告，不换 requestId 重发。
  */
 import { spawn } from 'node:child_process';
@@ -27,6 +27,7 @@ import type {
   AgentCheckResponse,
   AgentChangeRequest,
   ProgramInfo,
+  RuntimeStopResponse,
   WorkspaceResponse,
 } from './protocol.js';
 
@@ -521,9 +522,10 @@ export async function startServiceProcess(root: string, deps: ServiceDeps): Prom
     );
   }
   try {
+    // 不传 --port 0：由服务读取自己的端口偏好，避免每次启动都换端口。
     const child = deps.spawnImpl(
       process.execPath,
-      [entry, 'serve', '--workspace', root, '--port', '0', '--no-browser'],
+      [entry, 'serve', '--workspace', root, '--no-browser'],
       { detached: true, stdio: 'ignore', windowsHide: true },
     );
     child.unref?.();
@@ -587,6 +589,158 @@ export async function resolveService(
   }
   await startServiceProcess(root, deps);
   return waitForStartedService(root, workspaceId, deps);
+}
+
+export interface EnsureServiceResult {
+  readonly service: ResolvedService;
+  /** true 表示复用了 descriptor 指向的存活服务；false 表示本次自启动。 */
+  readonly reused: boolean;
+}
+
+const STALE_DESCRIPTOR_CODES: ReadonlySet<string> = new Set([
+  'SERVICE_UNREACHABLE',
+  'SERVICE_DESCRIPTOR_INVALID',
+  'SERVICE_DESCRIPTOR_UNREADABLE',
+  'SERVICE_URL_INVALID',
+]);
+
+/**
+ * open 的服务边界：优先复用存活 descriptor；descriptor 缺失或已失效（进程已退出、
+ * 端口拒绝连接、描述文件损坏）时自启动一次并轮询。绝不按 PID 杀进程。
+ */
+export async function ensureService(
+  root: string,
+  workspaceId: string,
+  deps: ServiceDeps,
+): Promise<EnsureServiceResult> {
+  let descriptor: ServiceDescriptor | null = null;
+  try {
+    descriptor = await readServiceDescriptor(root);
+  } catch (error) {
+    if (error instanceof CliFailure && STALE_DESCRIPTOR_CODES.has(error.code)) {
+      descriptor = null;
+    } else {
+      throw error;
+    }
+  }
+  if (descriptor !== null) {
+    try {
+      const service = await resolveFromDescriptor(root, workspaceId, descriptor, deps);
+      return { service, reused: true };
+    } catch (error) {
+      if (!(error instanceof CliFailure) || !STALE_DESCRIPTOR_CODES.has(error.code)) {
+        throw error;
+      }
+      // 失效描述：交给下方自启动覆盖，不删除他人 descriptor。
+    }
+  }
+  if (deps.noStart) {
+    throw serviceFailure(
+      'SERVICE_NOT_RUNNING',
+      '该工作区没有运行中的服务（' + serviceDescriptorPath(root) + ' 不存在或已失效）；请运行 aichat serve --workspace <dir>，或允许 CLI 自启动',
+      { descriptorPath: serviceDescriptorPath(root) },
+    );
+  }
+  await startServiceProcess(root, deps);
+  const service = await waitForStartedService(root, workspaceId, deps);
+  return { service, reused: false };
+}
+
+/** POST /api/runtime/stop 的返回值；只表示服务接受了停止请求。 */
+export interface RuntimeStopResult {
+  readonly httpStatus: number;
+  readonly response: RuntimeStopResponse;
+}
+
+/**
+ * 请求服务自行停止（POST /api/runtime/stop）。连接拒绝由调用方视为「已不在运行」；
+ * 旧版服务没有该端点时返回 404，这里给出明确的不支持错误，绝不移交 PID 杀进程。
+ */
+export async function requestRuntimeStop(
+  service: ResolvedService,
+  deps: ServiceDeps,
+): Promise<RuntimeStopResult> {
+  const endpoint = new URL('api/runtime/stop', service.baseUrl).toString();
+  const body = JSON.stringify({
+    workspaceId: service.workspaceId,
+    instanceId: service.instanceId,
+  });
+  let outcome: { status: number; body: unknown; text: string };
+  try {
+    outcome = await requestJson(
+      endpoint,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json',
+          [CLIENT_HEADER]: CLIENT_HEADER_VALUE,
+        },
+        body,
+      },
+      deps.fetchImpl,
+    );
+  } catch (error) {
+    throw error;
+  }
+  if (outcome.status === 404) {
+    throw new CliFailure(
+      'SERVICE_STOP_UNSUPPORTED',
+      '该服务是旧版本，没有 POST /api/runtime/stop（HTTP 404）；CLI 不会按 PID 杀进程。' +
+        '请关闭服务窗口／结束其运行后重试，或升级到同一构建。',
+      EXIT_CODES.service,
+      {
+        details: {
+          endpoint,
+          httpStatus: 404,
+          url: service.baseUrl,
+          hint: '旧服务没有运行控制端点；本命令只请求服务自己退出。',
+        },
+      },
+    );
+  }
+  if (outcome.status < 200 || outcome.status >= 300) {
+    throw serviceErrorFromResponse({ status: outcome.status, body: outcome.body });
+  }
+  if (!isRecord(outcome.body) || outcome.body['ok'] !== true) {
+    throw serviceFailure('SERVICE_RESPONSE_INVALID', endpoint + ' 的响应缺少 ok:true', {
+      endpoint,
+    });
+  }
+  return { httpStatus: outcome.status, response: outcome.body as unknown as RuntimeStopResponse };
+}
+
+/** 轮询直到服务端口不可达或 descriptor 消失；超时不杀进程，交给调用方报错。 */
+export async function waitForServiceStopped(
+  root: string,
+  baseUrl: string,
+  deps: ServiceDeps,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const probeUrl = new URL('api/workspace', baseUrl).toString();
+  while (Date.now() < deadline) {
+    if (!existsSync(serviceDescriptorPath(root))) return;
+    let alive = false;
+    try {
+      const response = await deps.fetchImpl(probeUrl, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(1_000),
+      });
+      alive = response.status >= 200 && response.status < 500;
+    } catch {
+      return;
+    }
+    if (!alive) return;
+    await deps.sleep(deps.pollIntervalMs);
+  }
+  throw serviceFailure(
+    'SERVICE_STOP_TIMEOUT',
+    '已请求服务停止，但 ' + String(timeoutMs) + 'ms 内仍能访问 ' + baseUrl +
+      '；不会按 PID 杀进程，请手动检查。',
+    { url: baseUrl, timeoutMs, descriptorPath: serviceDescriptorPath(root) },
+  );
 }
 
 export interface SubmitResult {

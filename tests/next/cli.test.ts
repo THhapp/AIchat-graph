@@ -11,8 +11,9 @@ import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { main, type RunResult } from '../../src/next/cli.js';
+import { main, type RunProcess, type RunResult } from '../../src/next/cli.js';
 import type { SpawnLike } from '../../src/next/client.js';
+import type { InstallationPaths } from '../../src/next/installation.js';
 import { INTERFACE_VERSION } from '../../src/next/protocol.js';
 import { GraphStore } from '../../src/next/store.js';
 import { DomainError } from '../../src/next/model.js';
@@ -64,21 +65,83 @@ interface MockService {
   readonly workspaceId: string;
   readonly instanceId: string;
   readonly requests: Array<{ method: string; url: string; body: string }>;
+  readonly stopRequests: Array<{ workspaceId: string; instanceId: string }>;
   writeDescriptor: () => Promise<void>;
+  removeDescriptor: () => Promise<void>;
+  /** 只关 HTTP 端口，保留 descriptor 与 store（模拟进程死掉但描述文件残留）。 */
+  closeServerKeepDescriptor: () => Promise<void>;
   setFailPost: (value: boolean) => void;
   close: () => Promise<void>;
+}
+
+/** 假安装布局：config/logs/launcher 都落在临时目录，不碰真实仓库配置。 */
+function fakeInstallation(parent: string, overrides: Partial<InstallationPaths> = {}): InstallationPaths {
+  const distributionRoot = path.join(parent, 'install');
+  const appRoot = path.join(distributionRoot, 'app');
+  return {
+    kind: 'repo',
+    appRoot,
+    distributionRoot,
+    configPath: path.join(distributionRoot, '.aichat', 'default.json'),
+    logsDirectory: path.join(distributionRoot, '.aichat', 'logs'),
+    startupLogPath: path.join(distributionRoot, '.aichat', 'logs', 'startup.log'),
+    nodePath: process.execPath,
+    cliJsPath: path.join(appRoot, 'dist', 'next', 'cli.js'),
+    aichatCmdPath: path.join(appRoot, 'aichat.cmd'),
+    launcherPath: path.join(distributionRoot, 'AIchat-graph.exe'),
+    skillsDirectory: path.join(appRoot, 'skills', 'aichat-graph'),
+    toolsDirectory: path.join(appRoot, 'tools'),
+    updateScriptPath: path.join(appRoot, 'dist', 'portable', 'update.js'),
+    manifestPath: null,
+    manifest: null,
+    portable: false,
+    ...overrides,
+  };
+}
+
+interface ProcessCall {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly detached: boolean;
+}
+
+function fakeRunProcess(
+  handler?: (call: ProcessCall) => { code: number; stdout?: string; stderr?: string },
+): { runProcess: RunProcess; calls: ProcessCall[] } {
+  const calls: ProcessCall[] = [];
+  const runProcess: RunProcess = async (command, args, options = {}) => {
+    const call = { command, args, detached: options.detached === true };
+    calls.push(call);
+    const result = handler?.(call) ?? { code: 0, stdout: '', stderr: '' };
+    return { code: result.code, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+  };
+  return { runProcess, calls };
 }
 
 async function startMockService(options: {
   root: string;
   workspaceId: string;
   instanceId?: string;
+  /** support: 提供 POST /api/runtime/stop；legacy-404: 模拟旧服务没有该端点。 */
+  stopMode?: 'support' | 'legacy-404';
 }): Promise<MockService> {
   const instanceId = options.instanceId ?? 'inst-test-1';
+  const stopMode = options.stopMode ?? 'support';
   const store = GraphStore.open(options.root, { instanceId });
+  const descriptorPath = path.join(options.root, '.aichat', 'runtime', 'service.json');
+  const stopRequests: Array<{ workspaceId: string; instanceId: string }> = [];
   let closed = false;
+  let serverClosed = false;
+  let storeClosed = false;
   let failPost = false;
   const requests: Array<{ method: string; url: string; body: string }> = [];
+  const shutdownServer = async (removeDescriptor: boolean): Promise<void> => {
+    if (serverClosed) return;
+    serverClosed = true;
+    if (removeDescriptor) await fs.rm(descriptorPath, { force: true });
+    (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
   const server: Server = createServer(async (request, response) => {
     const url = request.url ?? '/';
     const chunks: Buffer[] = [];
@@ -127,6 +190,27 @@ async function startMockService(options: {
       }
       return;
     }
+    if (request.method === 'POST' && url === '/api/runtime/stop') {
+      if (stopMode === 'legacy-404') {
+        json(404, { ok: false, error: { code: 'NOT_FOUND', message: '旧服务没有运行控制端点' } });
+        return;
+      }
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        parsed = {};
+      }
+      stopRequests.push({
+        workspaceId: typeof parsed['workspaceId'] === 'string' ? (parsed['workspaceId'] as string) : '',
+        instanceId: typeof parsed['instanceId'] === 'string' ? (parsed['instanceId'] as string) : '',
+      });
+      json(200, { ok: true, state: 'stopping' });
+      setTimeout(() => {
+        void shutdownServer(true);
+      }, 25);
+      return;
+    }
     json(404, { ok: false, error: { code: 'NOT_FOUND', message: 'no route' } });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -139,8 +223,9 @@ async function startMockService(options: {
     workspaceId: options.workspaceId,
     instanceId,
     requests,
+    stopRequests,
     writeDescriptor: async () => {
-      const file = path.join(options.root, '.aichat', 'runtime', 'service.json');
+      const file = descriptorPath;
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(
         file,
@@ -160,14 +245,23 @@ async function startMockService(options: {
         'utf8',
       );
     },
+    removeDescriptor: async () => {
+      await fs.rm(descriptorPath, { force: true });
+    },
+    closeServerKeepDescriptor: async () => {
+      await shutdownServer(false);
+    },
     setFailPost: (value: boolean) => {
       failPost = value;
     },
     close: async () => {
       if (closed) return;
       closed = true;
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      store.close();
+      await shutdownServer(false);
+      if (!storeClosed) {
+        storeClosed = true;
+        store.close();
+      }
     },
   };
   return service;
@@ -195,6 +289,9 @@ describe('Interface 4 CLI', () => {
 
     const topics = writePayloadOf(await cli(['topics', '--workspace', root], { cwd: parent }));
     expect(topics).toMatchObject({ ok: true, command: 'topics', workspaceId, revision: 1, topics: [] });
+
+    // GraphStore.create 只建库文件；.aichat 由服务（descriptor／端口偏好）创建。
+    expect(await fs.access(path.join(root, '.aichat')).then(() => true).catch(() => false)).toBe(false);
 
     const validate = writePayloadOf(await cli(['validate', '--workspace', root], { cwd: parent }));
     expect(validate).toMatchObject({ ok: true, command: 'validate', topics: 0, nodes: 0 });
@@ -633,7 +730,7 @@ describe('Interface 4 CLI', () => {
     const spawnedArgs = spawned.args.slice(1);
     expect(spawnedArgs.slice(0, 2)).toEqual(['serve', '--workspace']);
     expect(await fs.realpath(spawnedArgs[2] as string)).toBe(await fs.realpath(root));
-    expect(spawnedArgs.slice(3)).toEqual(['--port', '0', '--no-browser']);
+    expect(spawnedArgs.slice(3)).toEqual(['--no-browser']); // 不再传 --port 0：由服务使用端口偏好
     // 第二次写入复用已有 descriptor，不再自启动。
     const again = await cli(['create-topic', '--title', '自启动2', '--body', 'body', '--workspace', root], {
       cwd: parent,
@@ -712,5 +809,241 @@ describe('Interface 4 CLI', () => {
     );
     expect(result.exitCode).toBe(7);
     expect(jsonOf<{ error: { code: string } }>(result.stderr).error.code).toBe('SERVICE_NOT_RUNNING');
+  });
+
+  it('open：复用服务、保存默认库并通过 launcher --open-url 打开浏览器', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const installation = fakeInstallation(parent);
+    await fs.mkdir(path.dirname(installation.launcherPath), { recursive: true });
+    await fs.writeFile(installation.launcherPath, '', 'utf8');
+    const { runProcess, calls } = fakeRunProcess();
+    const spawns: Array<{ command: string; args: readonly string[] }> = [];
+    const spawnImpl: SpawnLike = (command, args) => {
+      spawns.push({ command, args });
+      return { pid: 1001, unref: () => undefined };
+    };
+
+    const serviceUrl = new URL(service.url).toString();
+    const result = await cli(['open', '--workspace', root], { cwd: parent, installation, runProcess, spawnImpl });
+    const payload = writePayloadOf(result);
+    expect(payload).toMatchObject({
+      ok: true,
+      command: 'open',
+      state: 'opened',
+      workspaceId,
+      workspace: await fs.realpath(root),
+      url: serviceUrl,
+      instanceId: service.instanceId,
+      reused: true,
+    });
+    expect((payload['program'] as ProgramInfo).interfaceVersion).toBe(INTERFACE_VERSION);
+    expect(spawns).toHaveLength(0);
+    const config = jsonOf<{ workspace: string; workspaceId: string }>(
+      await fs.readFile(installation.configPath, 'utf8'),
+    );
+    expect(await fs.realpath(config.workspace)).toBe(await fs.realpath(root));
+    expect(config.workspaceId).toBe(workspaceId);
+    const browserCall = calls.find((call) => call.command === installation.launcherPath);
+    expect(browserCall).toBeTruthy();
+    expect(browserCall?.args).toEqual(['--open-url', serviceUrl]);
+    expect(browserCall?.detached).toBe(true);
+
+    // 默认库保存后，不带 --workspace 的 open 复用同一服务。
+    const second = writePayloadOf(
+      await cli(['open', '--no-browser'], { cwd: parent, installation, runProcess, spawnImpl }),
+    );
+    expect(second['workspaceId']).toBe(workspaceId);
+    expect(second['reused']).toBe(true);
+    expect(spawns).toHaveLength(0);
+  });
+
+  it('open --choose-workspace --interactive：空目录 init、自启动不带 --port 0，取消 state=cancelled', async () => {
+    const parent = await newParent();
+    const emptyDir = path.join(parent, '新库');
+    await fs.mkdir(emptyDir, { recursive: true });
+    const installation = fakeInstallation(parent);
+    const { runProcess } = fakeRunProcess((call) =>
+      call.args[0] === '--pick-workspace' ? { code: 0, stdout: emptyDir + '\n' } : { code: 0 },
+    );
+    const spawns: Array<{ command: string; args: readonly string[] }> = [];
+    let started: MockService | null = null;
+    const spawnImpl: SpawnLike = (command, args) => {
+      spawns.push({ command, args });
+      void (async () => {
+        const index = args.indexOf('--workspace');
+        const pickedRoot = args[index + 1] as string;
+        const reader = GraphStore.open(pickedRoot, { readonly: true });
+        const pickedWorkspaceId = reader.snapshot().workspaceId;
+        reader.close();
+        started = await startMockService({ root: pickedRoot, workspaceId: pickedWorkspaceId });
+        cleanup.push(() => started?.close());
+        await started.writeDescriptor();
+      })();
+      return { pid: 1002, unref: () => undefined };
+    };
+
+    const result = await cli(['open', '--choose-workspace', '--interactive', '--no-browser'], {
+      cwd: parent,
+      installation,
+      runProcess,
+      spawnImpl,
+      startTimeoutMs: 5_000,
+    });
+    const payload = writePayloadOf(result);
+    expect(payload['state']).toBe('opened');
+    expect(payload['reused']).toBe(false);
+    expect(await fs.realpath(emptyDir)).toBe(await fs.realpath(payload['workspace'] as string));
+    expect(spawns).toHaveLength(1);
+    const spawnArgs = (spawns[0] as { args: readonly string[] }).args;
+    expect(spawnArgs).not.toContain('--port');
+    await expect(fs.stat(path.join(emptyDir, 'graph.sqlite'))).resolves.toBeTruthy();
+    // 交互 init 只建库；descriptor 由服务写入（本次为替身）。
+    await expect(fs.stat(path.join(emptyDir, '.aichat', 'runtime', 'service.json'))).resolves.toBeTruthy();
+    const config = jsonOf<{ workspace: string }>(await fs.readFile(installation.configPath, 'utf8'));
+    expect(await fs.realpath(config.workspace)).toBe(await fs.realpath(emptyDir));
+
+    // 取消：原生选择器 exit 2，不写默认库。
+    const cancelParent = await newParent();
+    const cancelInstallation = fakeInstallation(cancelParent);
+    const cancelRun = fakeRunProcess(() => ({ code: 2 }));
+    const cancelled = writePayloadOf(
+      await cli(['open', '--choose-workspace', '--interactive'], {
+        cwd: cancelParent,
+        installation: cancelInstallation,
+        runProcess: cancelRun.runProcess,
+      }),
+    );
+    expect(cancelled).toMatchObject({ ok: true, command: 'open', state: 'cancelled' });
+    expect(await fs.access(cancelInstallation.configPath).then(() => true).catch(() => false)).toBe(false);
+  });
+
+  it('open 用法与失败：--choose-workspace 缺 --interactive、显式空目录不 init 且写 startup log', async () => {
+    const parent = await newParent();
+    const emptyDir = path.join(parent, '空目录');
+    await fs.mkdir(emptyDir, { recursive: true });
+    const installation = fakeInstallation(parent);
+    const { runProcess } = fakeRunProcess();
+
+    const usage = await cli(['open', '--choose-workspace'], { cwd: parent, installation, runProcess });
+    expect(usage.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(usage.stderr).error.message).toContain('--interactive');
+
+    const noConfig = await cli(['open'], { cwd: parent, installation, runProcess });
+    expect(noConfig.exitCode).toBe(3);
+    expect(jsonOf<{ error: { code: string } }>(noConfig.stderr).error.code).toBe('WORKSPACE_NOT_CONFIGURED');
+
+    // 程序目录（distributionRoot/app/...）不能作为讨论库；picker 选中同样拒绝。
+    const programWorkspace = path.join(installation.distributionRoot, 'app', '库');
+    await fs.mkdir(programWorkspace, { recursive: true });
+    const forbidden = await cli(['open', '--workspace', programWorkspace, '--no-browser'], {
+      cwd: parent,
+      installation,
+      runProcess,
+    });
+    expect(forbidden.exitCode).toBe(3);
+    const forbiddenError = jsonOf<{ error: { code: string; message: string } }>(forbidden.stderr).error;
+    expect(forbiddenError.code).toBe('WORKSPACE_FORBIDDEN');
+    expect(forbiddenError.message).toContain('程序目录');
+    expect(
+      await fs.access(path.join(programWorkspace, 'graph.sqlite')).then(() => true).catch(() => false),
+    ).toBe(false);
+
+    const pickForbiddenRun = fakeRunProcess(() => ({ code: 0, stdout: programWorkspace + '\n' }));
+    const pickerForbidden = await cli(['open', '--choose-workspace', '--interactive', '--no-browser'], {
+      cwd: parent,
+      installation,
+      runProcess: pickForbiddenRun.runProcess,
+    });
+    expect(pickerForbidden.exitCode).toBe(3);
+    expect(jsonOf<{ error: { code: string } }>(pickerForbidden.stderr).error.code).toBe('WORKSPACE_FORBIDDEN');
+
+    const explicit = await cli(['open', '--workspace', emptyDir, '--no-browser'], {
+      cwd: parent,
+      installation,
+      runProcess,
+    });
+    expect(explicit.exitCode).toBe(3);
+    expect(jsonOf<{ error: { code: string } }>(explicit.stderr).error.code).toBe('WORKSPACE_NOT_FOUND');
+    expect(await fs.access(path.join(emptyDir, 'graph.sqlite')).then(() => true).catch(() => false)).toBe(false);
+    const log = await fs.readFile(installation.startupLogPath, 'utf8');
+    expect(log).toContain('WORKSPACE_NOT_FOUND');
+    expect(log).toContain('"command":"open"');
+  });
+
+  it('stop：POST 运行控制端点并等待关闭；缺失／拒绝连接＝not-running，不自启动', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const installation = fakeInstallation(parent);
+    const spawns: Array<{ command: string; args: readonly string[] }> = [];
+    const spawnImpl: SpawnLike = (command, args) => {
+      spawns.push({ command, args });
+      return { pid: 1003, unref: () => undefined };
+    };
+
+    const result = await cli(['stop', '--workspace', root], { cwd: parent, installation, spawnImpl });
+    const payload = writePayloadOf(result);
+    expect(payload).toMatchObject({
+      ok: true,
+      command: 'stop',
+      state: 'stopped',
+      workspaceId,
+      instanceId: service.instanceId,
+    });
+    expect(service.stopRequests).toHaveLength(1);
+    expect(service.stopRequests[0]).toMatchObject({ workspaceId, instanceId: service.instanceId });
+    expect(
+      await fs.access(path.join(root, '.aichat', 'runtime', 'service.json')).then(() => true).catch(() => false),
+    ).toBe(false);
+    expect(spawns).toHaveLength(0);
+
+    const again = writePayloadOf(await cli(['stop', '--workspace', root], { cwd: parent, installation, spawnImpl }));
+    expect(again['state']).toBe('not-running');
+
+    // 从未启动服务的库：not-running，且不会自启动。
+    const other = await initWorkspace();
+    const otherInstallation = fakeInstallation(other.parent);
+    const none = writePayloadOf(
+      await cli(['stop', '--workspace', other.root], {
+        cwd: other.parent,
+        installation: otherInstallation,
+        spawnImpl,
+      }),
+    );
+    expect(none['state']).toBe('not-running');
+    expect(spawns).toHaveLength(0);
+  });
+
+  it('stop：旧服务 404 返回具体错误并写 startup log，不按 PID 杀', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId, stopMode: 'legacy-404' });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const installation = fakeInstallation(parent);
+    const result = await cli(['stop', '--workspace', root], { cwd: parent, installation });
+    expect(result.exitCode).toBe(7);
+    const error = jsonOf<{ error: { code: string; message: string } }>(result.stderr).error;
+    expect(error.code).toBe('SERVICE_STOP_UNSUPPORTED');
+    expect(error.message).toContain('404');
+    expect(await fs.access(service.root + '/.aichat/runtime/service.json').then(() => true).catch(() => false)).toBe(true);
+    const log = await fs.readFile(installation.startupLogPath, 'utf8');
+    expect(log).toContain('SERVICE_STOP_UNSUPPORTED');
+    expect(log).toContain('"command":"stop"');
+  });
+
+  it('stop：descriptor 残留但端口拒绝连接＝not-running', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    await service.closeServerKeepDescriptor();
+    const installation = fakeInstallation(parent);
+    const result = await cli(['stop', '--workspace', root], { cwd: parent, installation });
+    const payload = writePayloadOf(result);
+    expect(payload['state']).toBe('not-running');
   });
 });

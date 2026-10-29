@@ -444,3 +444,25 @@ export interface SnapshotEvent extends SnapshotVersion {
   stale: boolean;
   diagnostics?: Diagnostic[];
 }
+
+/* ------------------------- local runtime controls ------------------------- */
+
+export interface RuntimeStopRequest {
+  workspaceId: string;
+  instanceId: string;
+}
+
+export interface RuntimeStopResponse {
+  ok: true;
+  state: 'stopping';
+}
+
+export interface RuntimeOpenWorkspaceRequest {
+  workspaceId: string;
+  instanceId: string;
+}
+
+export interface RuntimeOpenWorkspaceResponse {
+  ok: true;
+  state: 'started';
+}

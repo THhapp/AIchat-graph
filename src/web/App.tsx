@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSnapshot } from './data/snapshot.js';
 import {
   DETAIL_WIDTH_DEFAULT,
@@ -25,6 +25,7 @@ import { buildLocateText } from './lib/locate.js';
 import { useCopyFeedback } from './lib/clipboard.js';
 import { recentNodeIds } from './lib/recent.js';
 import { importanceOf, useImportance } from './lib/importance.js';
+import { openWorkspaceRuntime, runtimeErrorMessage, stopRuntimeService, type RuntimeAction } from './data/runtime.js';
 import { Sidebar } from './components/Sidebar.js';
 import { DetailPanel, type DetailTab } from './components/DetailPanel.js';
 import { GraphCanvas } from './components/GraphCanvas.js';
@@ -55,6 +56,15 @@ export function App(): React.JSX.Element {
   const { copied, copy: copyPromptText, reset: resetCopied } = useCopyFeedback();
   const { copied: locateCopied, copy: copyLocateText } = useCopyFeedback();
   const [exportOpen, setExportOpen] = useState(false);
+  /** Open other library / stop own service: one at a time, never after a stop. */
+  const [runtimeAction, setRuntimeAction] = useState<RuntimeAction | null>(null);
+  const [runtimeNotice, setRuntimeNotice] = useState<{ tone: 'ok' | 'bad'; text: string } | null>(null);
+  const runtimeAbort = useRef<AbortController | null>(null);
+  const serviceStopped = snapshot.stopped;
+
+  // Abort a runtime control request when the page unmounts; the service answer
+  // is only used to update this page.
+  useEffect(() => () => { runtimeAbort.current?.abort(); }, []);
   /**
    * The last accepted importance write, applied on top of the snapshot until the
    * service's own snapshot catches up. Never a source of truth: entries are
@@ -127,6 +137,7 @@ export function App(): React.JSX.Element {
     detailOpen && tab === 'topic' ? effectiveTopicId : null,
     detailOpen,
     snapshot.refresh,
+    !serviceStopped,
   );
 
   // Decoration only: derived from the graph and the current topic, so folding,
@@ -175,6 +186,65 @@ export function App(): React.JSX.Element {
     ? importance.error.message
     : null;
   const importantBusyForSelected = selectedNode !== null && importance.busyIds.has(selectedNode.id);
+
+  /** Ask the running service to open another library; this page never navigates. */
+  const openOtherWorkspace = useCallback(() => {
+    if (graph === null || serviceStopped || runtimeAction !== null) return;
+    const controller = new AbortController();
+    runtimeAbort.current?.abort();
+    runtimeAbort.current = controller;
+    setRuntimeAction('open');
+    setRuntimeNotice(null);
+    openWorkspaceRuntime(
+      { workspaceId: graph.workspaceId, instanceId: graph.instanceId },
+      controller.signal,
+    ).then(
+      () => {
+        if (controller.signal.aborted) return;
+        setRuntimeAction(null);
+        setRuntimeNotice({ tone: 'ok', text: '已发起打开其他讨论库；由系统窗口接管本轮操作，本页保持当前内容。' });
+      },
+      (cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setRuntimeAction(null);
+        setRuntimeNotice({ tone: 'bad', text: runtimeErrorMessage(cause, 'open') });
+      },
+    );
+  }, [graph, serviceStopped, runtimeAction]);
+
+  /**
+   * Stop this library's service after an explicit confirmation. Only a confirmed
+   * stop closes the event stream and freezes the page; a failed request leaves the
+   * reader untouched.
+   */
+  const stopOwnService = useCallback(() => {
+    if (graph === null || serviceStopped || runtimeAction !== null) return;
+    const confirmed = window.confirm(
+      '停止本库服务后，本页只能继续阅读停止前的内容，且不会自动重连或重新启动服务。确定停止？',
+    );
+    if (!confirmed) return;
+    const controller = new AbortController();
+    runtimeAbort.current?.abort();
+    runtimeAbort.current = controller;
+    setRuntimeAction('stop');
+    setRuntimeNotice(null);
+    stopRuntimeService(
+      { workspaceId: graph.workspaceId, instanceId: graph.instanceId },
+      controller.signal,
+    ).then(
+      () => {
+        if (controller.signal.aborted) return;
+        setRuntimeAction(null);
+        setExportOpen(false);
+        snapshot.halt();
+      },
+      (cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setRuntimeAction(null);
+        setRuntimeNotice({ tone: 'bad', text: runtimeErrorMessage(cause, 'stop') });
+      },
+    );
+  }, [graph, serviceStopped, runtimeAction, snapshot]);
 
   const toggleLeft = useCallback(() => {
     setReading((current) => (current === null ? current : toggleLeftPanel(current)));
@@ -290,6 +360,7 @@ export function App(): React.JSX.Element {
           <h3>无法载入图</h3>
           <p role="alert">{snapshot.error?.message ?? '服务未返回有效图数据。'}</p>
           <p>请确认本地服务已启动并指向正确的工作区；界面不会用空白图伪装成功。</p>
+          <p>本页不会自动启动服务，刷新页面也不会；需要时请手动启动本库服务。</p>
           <div className="state-block__actions">
             <button type="button" onClick={() => { snapshot.refresh(); }}>重试</button>
             <a href="/api/diagnostics" target="_blank" rel="noreferrer">查看诊断</a>
@@ -300,13 +371,15 @@ export function App(): React.JSX.Element {
   }
 
   const results = searchGraph(topicGraph ?? scopeGraphToTopic(graph, null), query);
-  const status: AppStatus = snapshot.error !== null
-    ? { tone: 'bad', text: '刷新失败' }
-    : graph.stale
-      ? { tone: 'warn', text: '上一份有效内容' }
-      : snapshot.connection === 'open'
-        ? { tone: 'ok', text: '已同步' }
-        : { tone: 'warn', text: snapshot.connection === 'reconnecting' ? '正在重连' : '离线' };
+  const status: AppStatus = serviceStopped
+    ? { tone: 'bad', text: '服务已停止' }
+    : snapshot.error !== null
+      ? { tone: 'bad', text: '刷新失败' }
+      : graph.stale
+        ? { tone: 'warn', text: '上一份有效内容' }
+        : snapshot.connection === 'open'
+          ? { tone: 'ok', text: '已同步' }
+          : { tone: 'warn', text: snapshot.connection === 'reconnecting' ? '正在重连' : '离线' };
 
   const isEmpty = graph.nodes.length === 0;
 
@@ -328,7 +401,11 @@ export function App(): React.JSX.Element {
         onCopyPrompt={copyPrompt}
         onToggleLeft={toggleLeft}
         onToggleRight={toggleRight}
-        onToggleExport={() => { setExportOpen((value) => !value); }}
+        onToggleExport={() => { if (!serviceStopped) setExportOpen((value) => !value); }}
+        serviceStopped={serviceStopped}
+        runtimeBusy={runtimeAction !== null}
+        onOpenWorkspace={openOtherWorkspace}
+        onStopService={stopOwnService}
       />
 
       {exportOpen ? (
@@ -337,14 +414,25 @@ export function App(): React.JSX.Element {
           instanceId={graph.instanceId}
           focusedTopicId={effectiveTopicId}
           liveStatuses={snapshot.exportStatuses}
+          serviceAvailable={!serviceStopped}
           onClose={() => { setExportOpen(false); }}
         />
       ) : null}
       <AppBanners
         stale={graph.stale}
         error={snapshot.error}
+        stopped={serviceStopped}
         onRefresh={() => { snapshot.refresh(); }}
       />
+      {runtimeNotice !== null ? (
+        <div
+          className={'banner ' + (runtimeNotice.tone === 'bad' ? 'banner--error' : 'banner--stale')}
+          role={runtimeNotice.tone === 'bad' ? 'alert' : 'status'}
+        >
+          <span className="banner__text">{runtimeNotice.text}</span>
+          <button type="button" onClick={() => { setRuntimeNotice(null); }}>知道了</button>
+        </div>
+      ) : null}
       {importance.error !== null ? (
         <div className="banner banner--error" role="alert">
           <span className="banner__text">{importance.error.message}</span>
@@ -406,6 +494,7 @@ export function App(): React.JSX.Element {
               anchorNodeId={anchorNodeId}
               recentNodeIds={recent}
               importanceBusyIds={importance.busyIds}
+              importanceDisabled={serviceStopped}
               onToggleImportant={importance.set}
             />
           )}
@@ -451,6 +540,7 @@ export function App(): React.JSX.Element {
               onCopyLocate={copyLocate}
               locateCopied={locateCopied}
               importanceBusy={importantBusyForSelected}
+              importanceDisabled={serviceStopped}
               importanceError={importantErrorForSelected}
               {...(selectedNode !== null
                 ? {

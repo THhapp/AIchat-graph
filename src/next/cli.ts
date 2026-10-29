@@ -7,7 +7,8 @@
  * - 默认输出紧凑 JSON；--text 输出简短人类摘要；
  * - 错误统一 stderr JSON { ok:false, error:{ code, message, details?, usage? } }。
  */
-import { promises as fs } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadProgramInfo } from '../build-info.js';
@@ -35,19 +36,29 @@ import {
 import {
   DEFAULT_SERVICE_PORT,
   defaultServiceDeps,
+  ensureService,
+  requestRuntimeStop,
   resolveService,
   submitAgentChange,
+  waitForServiceStopped,
   type ResolvedService,
   type ServiceDeps,
   type SpawnLike,
 } from './client.js';
 import {
-  defaultConfigPath,
+  canonicalRoot,
+  readDefaultConfig,
   resolveWorkspace,
   saveDefaultWorkspace,
   showDefaultConfig,
   type WorkspaceResolution,
 } from './config.js';
+import {
+  currentInstallation,
+  isPathInside,
+  writeStartupLog,
+  type InstallationPaths,
+} from './installation.js';
 import { DomainError, derivedSummary, findNode, findTopic } from './model.js';
 import { INTERFACE_VERSION } from './protocol.js';
 import type {
@@ -78,18 +89,37 @@ import {
 } from './read.js';
 import { GraphStore } from './store.js';
 
+export interface ProcessOutcome {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/** 捕获 stdout/stderr 的一次性进程调用；detached 用于浏览器/启动器，不等结果。 */
+export type RunProcess = (
+  command: string,
+  args: readonly string[],
+  options?: { readonly detached?: boolean; readonly cwd?: string },
+) => Promise<ProcessOutcome>;
+
 export interface CliRuntime {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly fetchImpl: typeof fetch;
   readonly spawnImpl: SpawnLike;
+  readonly runProcess: RunProcess;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly stdin: () => Promise<string>;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
-  readonly configPath: string | undefined;
+  /** 安装布局；默认 currentInstallation()，测试注入假 distributionRoot。 */
+  readonly installation: InstallationPaths;
+  readonly configPath: string;
   readonly startTimeoutMs: number;
   readonly pollIntervalMs: number;
+  readonly stopTimeoutMs: number;
+  /** 测试覆盖：自启动使用的 CLI 入口。 */
+  readonly entryPath: string | undefined;
   readonly shutdownSignal: AbortSignal | undefined;
 }
 
@@ -123,6 +153,24 @@ const NO_START_OPTION: OptionSpec = {
   type: 'flag',
   boolean: true,
   description: '禁止 CLI 自启动后台服务；没有 descriptor 时直接报错',
+};
+const INTERACTIVE_OPTION: OptionSpec = {
+  name: 'interactive',
+  type: 'flag',
+  boolean: true,
+  description: '交互模式：允许原生目录选择器与浏览器；由原生启动器传入',
+};
+const CHOOSE_WORKSPACE_OPTION: OptionSpec = {
+  name: 'choose-workspace',
+  type: 'flag',
+  boolean: true,
+  description: '弹出原生目录选择器选库（需同时给 --interactive）',
+};
+const NO_BROWSER_OPTION: OptionSpec = {
+  name: 'no-browser',
+  type: 'flag',
+  boolean: true,
+  description: '不打开浏览器，只启动／复用服务',
 };
 const OUTPUT_OPTIONS: readonly OptionSpec[] = [JSON_OPTION, TEXT_OPTION];
 const READ_COMMON: readonly OptionSpec[] = [WORKSPACE_OPTION, WORKSPACE_ID_OPTION, ...OUTPUT_OPTIONS];
@@ -448,16 +496,58 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: 'serve',
     group: 'workspace',
-    summary: '为指定工作区启动本机服务（默认 127.0.0.1:4317；--port 0 自动选端口）。',
+    summary: '为指定工作区启动本机服务（不传 --port 时使用库的端口偏好，其次 4317/自动）。',
     usage: ['aichat serve --workspace <dir> [--port <0-65535>] [--no-browser]'],
     options: [
       WORKSPACE_OPTION,
-      integerOptionSpec('port', '监听端口；默认 4317；0 表示自动选择', { min: 0, max: 65535, defaultValue: DEFAULT_SERVICE_PORT }),
-      flagOption('no-browser', '不打开浏览器（无头模式）'),
+      integerOptionSpec('port', '显式监听端口；省略时读取 <库>/.aichat/local/runtime.json 的 preferredPort，其次 4317，被占用则自动选择', {
+        min: 0,
+        max: 65535,
+        defaultValue: DEFAULT_SERVICE_PORT,
+      }),
+      NO_BROWSER_OPTION,
       ...OUTPUT_OPTIONS,
     ],
-    examples: ['aichat serve --workspace D:/discussions'],
+    examples: ['aichat serve --workspace D:/discussions', 'aichat serve --workspace D:/discussions --port 0'],
     resultFields: ['ok', 'command', 'url', 'workspaceId', 'instanceId', 'revision', 'state'],
+  },
+  {
+    name: 'open',
+    group: 'workspace',
+    summary: '打开讨论库：复用或启动本机服务，保存为默认库并打开浏览器。',
+    usage: [
+      'aichat open',
+      'aichat open --workspace <dir> [--no-browser]',
+      'aichat open --choose-workspace --interactive [--no-browser]',
+    ],
+    options: [WORKSPACE_OPTION, CHOOSE_WORKSPACE_OPTION, INTERACTIVE_OPTION, NO_BROWSER_OPTION, ...OUTPUT_OPTIONS],
+    constraints: [
+      '默认库取当前安装的默认配置（distributionRoot/.aichat/default.json）；--workspace 显式指定。',
+      '--choose-workspace 必须同时给 --interactive，且不能与 --workspace 同用。',
+      '只有原生选择器选中的空目录才会自动 init（目录名为库名）；已有 graph.sqlite 直接打开；非空且无库报错。',
+      '服务优先复用 descriptor；描述失效时自启动（不带 --port 0，由服务使用端口偏好）。',
+      '成功后保存默认库；浏览器通过原生启动器 --open-url 或 Windows start 打开。',
+    ],
+    examples: [
+      'aichat open',
+      'aichat open --choose-workspace --interactive',
+      'aichat open --workspace D:/discussions --no-browser',
+    ],
+    resultFields: ['ok', 'command', 'state', 'workspaceId', 'workspace', 'url', 'instanceId', 'reused', 'program'],
+  },
+  {
+    name: 'stop',
+    group: 'workspace',
+    summary: '请求当前库的本机服务自行停止（不自启动，不按 PID 杀进程）。',
+    usage: ['aichat stop', 'aichat stop --workspace <dir>'],
+    options: [WORKSPACE_OPTION, INTERACTIVE_OPTION, ...OUTPUT_OPTIONS],
+    constraints: [
+      '只读 descriptor 并 POST /api/runtime/stop；descriptor 缺失或连接拒绝视为 not-running 成功。',
+      '旧版服务没有停止端点（404）时返回具体错误，不按 PID 杀进程。',
+      '请求成功后轮询到端口不可达／descriptor 消失；超时不杀进程。',
+    ],
+    examples: ['aichat stop', 'aichat stop --workspace D:/discussions'],
+    resultFields: ['ok', 'command', 'state', 'workspaceId', 'instanceId'],
   },
   {
     name: 'config',
@@ -516,7 +606,7 @@ const COMMAND_BY_NAME = new Map(COMMANDS.map((command) => [command.name, command
 const COMMAND_GROUPS: ReadonlyArray<{ id: CommandSpec['group']; title: string; description: string }> = [
   { id: 'read', title: 'Read', description: '主题、检索、校验与渐进读取（直接读 SQLite）' },
   { id: 'write', title: 'Write', description: '通过本机服务写入；需要 descriptor 或允许自启动' },
-  { id: 'workspace', title: 'Workspace', description: '初始化、导入、服务、默认配置与身份诊断' },
+  { id: 'workspace', title: 'Workspace', description: '打开／停止、初始化、导入、服务、默认配置与身份诊断' },
   { id: 'meta', title: 'Meta', description: '版本与帮助（不需要工作区）' },
 ];
 
@@ -674,21 +764,64 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function defaultRunProcess(
+  command: string,
+  args: readonly string[],
+  options: { readonly detached?: boolean; readonly cwd?: string } = {},
+): Promise<ProcessOutcome> {
+  return new Promise<ProcessOutcome>((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(command, [...args], {
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        detached: options.detached === true,
+        stdio: options.detached === true ? 'ignore' : ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    if (options.detached === true) {
+      child.unref();
+      resolve({ code: 0, stdout: '', stderr: '' });
+      return;
+    }
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => out.push(Buffer.from(chunk)));
+    child.stderr?.on('data', (chunk: Buffer) => err.push(Buffer.from(chunk)));
+    child.on('error', (error: Error) => reject(error));
+    child.on('close', (code: number | null) => {
+      resolve({
+        code: code ?? -1,
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+      });
+    });
+  });
+}
+
 function createRuntime(context: Partial<CliRuntime>): CliRuntime {
+  const installation = context.installation ?? currentInstallation();
   return {
     cwd: context.cwd ?? process.cwd(),
     env: { ...process.env, ...(context.env ?? {}) },
     fetchImpl: context.fetchImpl ?? fetch,
     spawnImpl: context.spawnImpl ?? defaultServiceDeps().spawnImpl,
+    runProcess: context.runProcess ?? defaultRunProcess,
     sleep:
       context.sleep ??
       ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds))),
     stdin: context.stdin ?? readStdin,
     stdout: () => undefined,
     stderr: () => undefined,
-    configPath: context.configPath,
+    installation,
+    configPath: context.configPath ?? installation.configPath,
     startTimeoutMs: context.startTimeoutMs ?? 8_000,
     pollIntervalMs: context.pollIntervalMs ?? 100,
+    stopTimeoutMs: context.stopTimeoutMs ?? 10_000,
+    entryPath: context.entryPath,
     shutdownSignal: context.shutdownSignal,
   };
 }
@@ -704,6 +837,9 @@ function humanLines(command: string, payload: Record<string, unknown>): string[]
     lines.push(command + ' ' + String(state));
     if (payload['workspaceId'] !== undefined) lines.push('workspace ' + String(payload['workspaceId']));
     if (payload['topicId'] !== undefined) lines.push('topic ' + String(payload['topicId']));
+    if (payload['workspace'] !== undefined) lines.push('库 ' + String(payload['workspace']));
+    if (payload['url'] !== undefined) lines.push('url ' + String(payload['url']));
+    if (typeof payload['reused'] === 'boolean') lines.push('reused ' + String(payload['reused']));
     if (payload['revision'] !== undefined) lines.push('revision ' + String(payload['revision']));
     const created = payload['created'] as Record<string, unknown> | undefined;
     if (created !== undefined) {
@@ -1998,6 +2134,7 @@ interface GraphServiceHandle {
   readonly workspaceId: string;
   readonly instanceId: string;
   readonly revision: number;
+  readonly closed: Promise<void>;
   stop: () => Promise<void>;
 }
 
@@ -2018,7 +2155,8 @@ interface RuntimeModule {
 
 async function runServe(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntime): Promise<Record<string, unknown>> {
   const resolution = await resolveCliWorkspace(parsed, runtime);
-  const port = integerOption(parsed, spec, 'port', { min: 0, max: 65_535 }) ?? DEFAULT_SERVICE_PORT;
+  // 显式 --port 才传端口；否则由服务读取 .aichat/local/runtime.json 的端口偏好。
+  const explicitPort = integerOption(parsed, spec, 'port', { min: 0, max: 65_535 });
   // startGraphService 在 server.js（runtime.js 只导出 GraphRuntime 等，避免循环依赖）。
   const moduleSpecifier: string = './server.js';
   const moduleUnknown: unknown = await import(moduleSpecifier).catch(() => null);
@@ -2032,8 +2170,13 @@ async function runServe(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRunti
       { details: { root: resolution.root } },
     );
   }
-  const handle = await start({ root: resolution.root, port });
-  await waitForSignal(runtime);
+  const handle = await start({
+    root: resolution.root,
+    ...(explicitPort !== undefined ? { port: explicitPort } : {}),
+  });
+  // 收到 SIGINT 或服务被 --stop/页面正常关闭，都要让 serve 进程正常退出。
+  // 只等信号会在外部 stop 后留下未完成的 top-level await（Node 退出码 13）。
+  await Promise.race([waitForSignal(runtime), handle.closed]);
   await handle.stop();
   return {
     ok: true,
@@ -2066,6 +2209,362 @@ function waitForSignal(runtime: CliRuntime): Promise<void> {
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * open / stop：安装布局、原生选择器、服务复用与运行控制
+ * ------------------------------------------------------------------ */
+
+interface InspectedWorkspace {
+  readonly root: string;
+  readonly workspaceId: string;
+  readonly name: string;
+  readonly revision: number;
+  readonly initialized: boolean;
+}
+
+function openServiceDeps(runtime: CliRuntime): ServiceDeps {
+  // 不强制 installation.cliJsPath：源码运行时 argv[1] 才是当前 CLI 入口，
+  // 自启动必须与当前进程同一构建，不能抓一个可能过期的 dist 文件。
+  const entryPath = runtime.entryPath;
+  return defaultServiceDeps({
+    fetchImpl: runtime.fetchImpl,
+    spawnImpl: runtime.spawnImpl,
+    sleep: runtime.sleep,
+    startTimeoutMs: runtime.startTimeoutMs,
+    pollIntervalMs: runtime.pollIntervalMs,
+    noStart: false,
+    requireInterface: true,
+    ...(entryPath !== undefined ? { entryPath } : {}),
+  });
+}
+
+function stopServiceDeps(runtime: CliRuntime): ServiceDeps {
+  return defaultServiceDeps({
+    fetchImpl: runtime.fetchImpl,
+    spawnImpl: runtime.spawnImpl,
+    sleep: runtime.sleep,
+    startTimeoutMs: runtime.startTimeoutMs,
+    pollIntervalMs: runtime.pollIntervalMs,
+    noStart: true,
+    // 旧服务也要尝试 POST /api/runtime/stop：由 404 给出明确「不支持」错误。
+    requireInterface: false,
+  });
+}
+
+/** 打开/校验库目录；只有 allowInit（原生选择器选中的空目录）才会 init。 */
+async function inspectWorkspace(
+  runtime: CliRuntime,
+  rawRoot: string,
+  options: { readonly allowInit: boolean },
+): Promise<InspectedWorkspace> {
+  const root = await canonicalRoot(path.resolve(runtime.cwd, rawRoot));
+  const distributionRoot = await canonicalRoot(path.resolve(runtime.installation.distributionRoot));
+  if (isPathInside(distributionRoot, root)) {
+    throw workspaceFailure(
+      'WORKSPACE_FORBIDDEN',
+      '不要把讨论库放进程序目录：' +
+        root +
+        ' 位于程序目录 ' +
+        distributionRoot +
+        ' 内；请选择程序目录之外的目录（例如“文档”或临时目录）。',
+      { root, distributionRoot, hint: '讨论库、默认配置与启动日志不能放在安装／分发根内。' },
+    );
+  }
+  let stat;
+  try {
+    stat = await fs.stat(root);
+  } catch {
+    throw workspaceFailure('WORKSPACE_NOT_FOUND', '工作区目录不存在：' + root, { root });
+  }
+  if (!stat.isDirectory()) {
+    throw workspaceFailure('WORKSPACE_NOT_FOUND', '工作区不是目录：' + root, { root });
+  }
+  const dbPath = path.join(root, 'graph.sqlite');
+  if (!existsSync(dbPath)) {
+    if (!options.allowInit) {
+      throw workspaceFailure(
+        'WORKSPACE_NOT_FOUND',
+        '工作区没有 graph.sqlite：' + root + '（不会自动初始化；请先 aichat init，或用 --choose-workspace 选择空目录）',
+        { root, dbPath },
+      );
+    }
+    const entries = await fs.readdir(root);
+    if (entries.length > 0) {
+      throw workspaceFailure(
+        'WORKSPACE_NOT_FOUND',
+        '选中目录非空且没有 graph.sqlite；不会自动初始化：' + root,
+        { root, dbPath, entries: entries.slice(0, 20) },
+      );
+    }
+    let created: GraphStore;
+    try {
+      created = GraphStore.create(root, path.basename(root));
+    } catch (error) {
+      throw mapDomainError(error);
+    }
+    try {
+      const snapshot = created.snapshot();
+      return {
+        root,
+        workspaceId: snapshot.workspaceId,
+        name: snapshot.name,
+        revision: snapshot.revision,
+        initialized: true,
+      };
+    } finally {
+      created.close();
+    }
+  }
+  let store: GraphStore;
+  try {
+    store = GraphStore.open(root, { readonly: true });
+  } catch (error) {
+    throw mapDomainError(error);
+  }
+  try {
+    const snapshot = store.snapshot();
+    return {
+      root,
+      workspaceId: snapshot.workspaceId,
+      name: snapshot.name,
+      revision: snapshot.revision,
+      initialized: false,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+type PickWorkspaceResult =
+  | { readonly cancelled: true }
+  | { readonly cancelled: false; readonly root: string };
+
+/** 原生目录选择器：--pick-workspace，stdout 为 UTF-8 路径；取消 exit 2，错误 exit 1。 */
+async function pickWorkspace(runtime: CliRuntime): Promise<PickWorkspaceResult> {
+  const launcher = runtime.installation.launcherPath;
+  let outcome: ProcessOutcome;
+  try {
+    outcome = await runtime.runProcess(launcher, ['--pick-workspace'], { cwd: runtime.cwd });
+  } catch (error) {
+    throw new CliFailure(
+      'PICKER_UNAVAILABLE',
+      '无法启动原生目录选择器（' +
+        launcher +
+        '）：' +
+        (error instanceof Error ? error.message : String(error)) +
+        '；请改用 --workspace <dir>',
+      EXIT_CODES.service,
+      { details: { launcher } },
+    );
+  }
+  if (outcome.code === 2) return { cancelled: true };
+  if (outcome.code !== 0) {
+    throw new CliFailure(
+      'PICKER_FAILED',
+      '原生目录选择器失败（exit ' + String(outcome.code) + '）：' +
+        outcome.stderr.trim().slice(0, 500),
+      EXIT_CODES.service,
+      { details: { launcher, exitCode: outcome.code, stderr: outcome.stderr.slice(0, 2000) } },
+    );
+  }
+  const lines = outcome.stdout
+    .replace(/\uFEFF/g, '')
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const last = lines.length > 0 ? (lines[lines.length - 1] as string) : '';
+  if (last.length === 0) {
+    throw new CliFailure(
+      'PICKER_FAILED',
+      '原生目录选择器没有返回路径（exit 0）',
+      EXIT_CODES.service,
+      { details: { launcher, stdout: outcome.stdout.slice(0, 500) } },
+    );
+  }
+  const unquoted =
+    (last.startsWith('"') && last.endsWith('"')) || (last.startsWith("'") && last.endsWith("'"))
+      ? last.slice(1, -1)
+      : last;
+  return { cancelled: false, root: path.resolve(runtime.cwd, unquoted) };
+}
+
+async function resolveOpenWorkspace(
+  spec: CommandSpec,
+  parsed: ParsedArgs,
+  runtime: CliRuntime,
+): Promise<{ readonly cancelled: true } | { readonly cancelled: false; readonly workspace: InspectedWorkspace }> {
+  const choose = flag(parsed, 'choose-workspace');
+  const interactive = flag(parsed, 'interactive');
+  const explicit = parsed.values.get('workspace');
+  if (choose && !interactive) {
+    throw usageFailure('--choose-workspace 需要 --interactive：目录选择器只在交互模式弹出', {
+      details: { field: 'choose-workspace' },
+      usage: spec.usage[0],
+    });
+  }
+  if (choose && explicit !== undefined) {
+    throw usageFailure('--choose-workspace 与 --workspace 不能同时使用', {
+      details: { field: 'choose-workspace' },
+      usage: spec.usage[0],
+    });
+  }
+  if (choose) {
+    const picked = await pickWorkspace(runtime);
+    if (picked.cancelled) return { cancelled: true };
+    return { cancelled: false, workspace: await inspectWorkspace(runtime, picked.root, { allowInit: true }) };
+  }
+  if (explicit !== undefined) {
+    return { cancelled: false, workspace: await inspectWorkspace(runtime, explicit, { allowInit: false }) };
+  }
+  const config = await readDefaultConfig(runtime.configPath);
+  if (config !== null) {
+    return {
+      cancelled: false,
+      workspace: await inspectWorkspace(runtime, config.workspace, { allowInit: false }),
+    };
+  }
+  if (interactive) {
+    const picked = await pickWorkspace(runtime);
+    if (picked.cancelled) return { cancelled: true };
+    return { cancelled: false, workspace: await inspectWorkspace(runtime, picked.root, { allowInit: true }) };
+  }
+  throw workspaceFailure(
+    'WORKSPACE_NOT_CONFIGURED',
+    '没有默认库：请运行 aichat open --choose-workspace --interactive 选择，或 aichat open --workspace <dir>',
+    { configPath: runtime.configPath },
+  );
+}
+
+async function openBrowser(runtime: CliRuntime, url: string): Promise<boolean> {
+  const launcher = runtime.installation.launcherPath;
+  try {
+    if (existsSync(launcher)) {
+      await runtime.runProcess(launcher, ['--open-url', url], { detached: true });
+      return true;
+    }
+    if (process.platform === 'win32') {
+      // 用完整名 cmd.exe：CreateProcess 对 'cmd' 的解析依赖 PATH/App Paths。
+      await runtime.runProcess('cmd.exe', ['/c', 'start', '', url], { detached: true });
+      return true;
+    }
+    if (process.platform === 'darwin') {
+      await runtime.runProcess('open', [url], { detached: true });
+      return true;
+    }
+    await runtime.runProcess('xdg-open', [url], { detached: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runOpen(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntime): Promise<Record<string, unknown>> {
+  const resolved = await resolveOpenWorkspace(spec, parsed, runtime);
+  if (resolved.cancelled) {
+    return { ok: true, command: 'open', state: 'cancelled' };
+  }
+  const workspace = resolved.workspace;
+  const deps = openServiceDeps(runtime);
+  const ensured = await ensureService(workspace.root, workspace.workspaceId, deps);
+  const service = ensured.service;
+  await saveDefaultWorkspace(runtime.configPath, workspace.root);
+  if (!flag(parsed, 'no-browser')) {
+    const opened = await openBrowser(runtime, service.baseUrl);
+    if (!opened) {
+      await writeStartupLog(
+        runtime.installation,
+        'open: 服务已就绪但无法打开浏览器（' + service.baseUrl + '）；可手动打开该地址。',
+      );
+    }
+  }
+  return {
+    ok: true,
+    command: 'open',
+    state: 'opened',
+    workspaceId: service.workspaceId,
+    workspace: workspace.root,
+    url: service.baseUrl,
+    instanceId: service.instanceId,
+    reused: ensured.reused,
+    program: service.program ?? programInfo(),
+  };
+}
+
+interface StopWorkspace {
+  readonly root: string;
+  readonly workspaceId: string;
+}
+
+async function resolveStopWorkspace(
+  spec: CommandSpec,
+  parsed: ParsedArgs,
+  runtime: CliRuntime,
+): Promise<StopWorkspace> {
+  const explicit = parsed.values.get('workspace');
+  let rawRoot = explicit;
+  if (rawRoot === undefined) {
+    const config = await readDefaultConfig(runtime.configPath);
+    rawRoot = config?.workspace;
+  }
+  if (rawRoot === undefined) {
+    throw workspaceFailure('WORKSPACE_NOT_CONFIGURED', '没有可停止的默认库：请用 aichat stop --workspace <dir>', {
+      configPath: runtime.configPath,
+      ...(spec.usage.length > 0 ? { usage: spec.usage[0] } : {}),
+    });
+  }
+  const workspace = await inspectWorkspace(runtime, rawRoot, { allowInit: false });
+  return { root: workspace.root, workspaceId: workspace.workspaceId };
+}
+
+async function runStop(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntime): Promise<Record<string, unknown>> {
+  const target = await resolveStopWorkspace(spec, parsed, runtime);
+  const deps = stopServiceDeps(runtime);
+  let service: ResolvedService;
+  try {
+    service = await resolveService(target.root, target.workspaceId, deps);
+  } catch (error) {
+    if (
+      error instanceof CliFailure &&
+      (error.code === 'SERVICE_NOT_RUNNING' || error.code === 'SERVICE_UNREACHABLE')
+    ) {
+      return { ok: true, command: 'stop', state: 'not-running', workspaceId: target.workspaceId };
+    }
+    throw error;
+  }
+  const notRunning = { ok: true, command: 'stop', state: 'not-running', workspaceId: service.workspaceId };
+  try {
+    await requestRuntimeStop(service, deps);
+    await waitForServiceStopped(target.root, service.baseUrl, deps, runtime.stopTimeoutMs);
+  } catch (error) {
+    // 响应前连接断开：服务已经不可达，按 not-running 成功处理。
+    if (error instanceof CliFailure && error.code === 'SERVICE_UNREACHABLE') return notRunning;
+    throw error;
+  }
+  return {
+    ok: true,
+    command: 'stop',
+    state: 'stopped',
+    workspaceId: service.workspaceId,
+    instanceId: service.instanceId,
+  };
+}
+
+/** open/stop 失败写 installation.startupLogPath（覆盖写，帮助原生启动器诊断）。 */
+async function logCommandFailure(
+  runtime: CliRuntime,
+  command: 'open' | 'stop',
+  failure: CliFailure,
+): Promise<void> {
+  const entry = {
+    at: new Date().toISOString(),
+    command,
+    code: failure.code,
+    message: failure.message,
+    ...(failure.details !== undefined ? { details: failure.details } : {}),
+  };
+  await writeStartupLog(runtime.installation, JSON.stringify(entry));
+}
+
 async function runConfig(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntime): Promise<Record<string, unknown>> {
   const show = flag(parsed, 'show');
   const workspace = parsed.values.get('workspace');
@@ -2075,7 +2574,7 @@ async function runConfig(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRunt
       usage: spec.usage[0],
     });
   }
-  const configPath = runtime.configPath ?? defaultConfigPath();
+  const configPath = runtime.configPath;
   if (show) return { ...(await showDefaultConfig(configPath)) };
   return { ...(await saveDefaultWorkspace(configPath, workspace as string)) };
 }
@@ -2153,8 +2652,7 @@ async function runWhoami(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRunt
  * 主入口
  * ------------------------------------------------------------------ */
 
-function failureEnvelope(error: unknown, commandName: string | undefined): { payload: Record<string, unknown>; exitCode: number } {
-  const failure = mapDomainError(error, commandName !== undefined ? COMMAND_BY_NAME.get(commandName) : undefined);
+function failureEnvelopeFrom(failure: CliFailure): { payload: Record<string, unknown>; exitCode: number } {
   const body: Record<string, unknown> = {
     code: failure.code,
     message: failure.message,
@@ -2226,7 +2724,12 @@ export async function main(argv: readonly string[], context: Partial<CliRuntime>
     }
     return { exitCode: EXIT_CODES.ok, stdout, stderr };
   } catch (error) {
-    const { payload, exitCode } = failureEnvelope(error, commandName);
+    const spec = commandName === undefined ? undefined : COMMAND_BY_NAME.get(commandName);
+    const failure = mapDomainError(error, spec);
+    if (commandName === 'open' || commandName === 'stop') {
+      await logCommandFailure(runtime, commandName, failure);
+    }
+    const { payload, exitCode } = failureEnvelopeFrom(failure);
     if (rest.includes('--text')) {
       const failure = payload['error'] as Record<string, unknown>;
       runtime.stderr(String(failure['message']) + '\n');
@@ -2245,6 +2748,10 @@ async function dispatch(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRunti
       return runImport(spec, parsed, runtime);
     case 'serve':
       return runServe(spec, parsed, runtime);
+    case 'open':
+      return runOpen(spec, parsed, runtime);
+    case 'stop':
+      return runStop(spec, parsed, runtime);
     case 'config':
       return runConfig(spec, parsed, runtime);
     case 'topics':

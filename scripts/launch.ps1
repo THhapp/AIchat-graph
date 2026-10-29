@@ -1,34 +1,35 @@
 ﻿<#
 .SYNOPSIS
-  AIchat-graph 日用／开发启动与显式快照更新，共用 Windows PowerShell 5.1 实现。
+  AIchat-graph 源码开发启动（仅 Development）。正式日用请使用 start.cmd / .local\daily\AIchat-graph.exe。
 
 .DESCRIPTION
   - 工程目录只由本脚本自身位置推导（<工程>\scripts\launch.ps1），不依赖当前目录或机器级配置。
-  - 日用仅使用 launcher.local.json 明确选择的工作区与 .local/daily 固定构建。
-  - 开发使用独立配置和工作区，默认端口 4318；显式更新日用版不自动构建。
+  - 开发使用独立工作区（默认 .local/development-workspace）与端口 4318，不读写正式日用配置；
+    正式日用由便携包程序自行管理默认库，本脚本不复制也不改写它。
   - 同一工作区已有服务时只打开浏览器：不启动第二个写进程，也不重新构建。
-  - 默认端口 4317 被其他程序占用时明确失败：不换端口、不结束他人进程。
-  - 只有开发启动会安装工程依赖，并在源码变化时重建；日用启动绝不自动更新。
-  - 新服务就绪后才打开浏览器；服务在当前可见窗口前台运行，进程加入 KILL_ON_JOB_CLOSE
-    作业对象，关闭窗口或 Ctrl+C 都不会留下后台写进程。
+  - 端口被其他程序占用时明确失败：不换端口、不结束他人进程。
+  - 源码变化时自动 npm run build；服务就绪后才打开浏览器。
+  - 服务在当前可见窗口前台运行，进程加入 KILL_ON_JOB_CLOSE 作业对象；
+    关闭窗口或 Ctrl+C 都不会留下后台写进程。
+  - 旧 Markdown 工作区不自动迁移：先用 CLI import 一次性导入 graph.sqlite。
 
 .PARAMETER Workspace
-  工作区目录。不存在或空目录会初始化；非空且不是 AIchat-graph 工作区的目录会被拒绝。
-  由 start.cmd 启动时，该值通过 AICHAT_LAUNCH_WORKSPACE 传入，因此路径末尾的分隔符、
-  空格与中文都不会破坏命令行引号配对。
+  开发工作区目录。不存在或空目录会初始化；非空且不是 AIchat-graph 工作区的目录会被拒绝。
+  由 start-dev.cmd 启动时，该值通过 AICHAT_LAUNCH_WORKSPACE 传入，避免路径末尾的分隔符、
+  空格与中文破坏命令行引号配对。
 
 .PARAMETER NoBrowser
-  不打开浏览器（非交互验收用）。失败时的等待回车由 start.cmd 负责。
+  不打开浏览器（非交互验收用）。失败时的等待回车由 start-dev.cmd 负责。
 
 .PARAMETER Help
   打印用法并退出。
 #>
 [CmdletBinding()]
 param(
-  # start.cmd 解析 -Workspace 后放进环境变量，避免路径末尾的 \ 吃掉参数的结束引号。
+  # start-dev.cmd 解析 -Workspace 后放进环境变量，避免路径末尾的 \ 吃掉参数的结束引号。
   [string] $Workspace = $env:AICHAT_LAUNCH_WORKSPACE,
-  [ValidateSet('Daily', 'Development', 'UpdateDaily')]
-  [string] $Mode = 'Daily',
+  [ValidateSet('Development')]
+  [string] $Mode = 'Development',
   [ValidateRange(0, 65535)]
   [int] $Port = $(if ($env:AICHAT_LAUNCH_PORT) { [int]$env:AICHAT_LAUNCH_PORT } else { 0 }),
   [switch] $NoBrowser,
@@ -40,28 +41,15 @@ $ProgressPreference = 'SilentlyContinue'
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $LocalRoot = Join-Path $ProjectRoot '.local'
-$DailyRoot = Join-Path $LocalRoot 'daily'
-$RuntimeRoot = $ProjectRoot
-$ConfigPath = Join-Path $ProjectRoot 'launcher.development.local.json'
-if ($Mode -eq 'Daily') {
-  $RuntimeRoot = $DailyRoot
-  $ConfigPath = Join-Path $ProjectRoot 'launcher.local.json'
-}
-$CliPath = Join-Path $RuntimeRoot 'dist\next\cli.js'
+$DefaultWorkspace = Join-Path $LocalRoot 'development-workspace'
+$DailyDefaultConfig = Join-Path $LocalRoot 'daily\.aichat\default.json'
+$CliPath = Join-Path $ProjectRoot 'dist\next\cli.js'
 # 与 src/next/protocol.ts 的 INTERFACE_VERSION 保持一致；用于识别旧接口服务。
 $ExpectedInterfaceVersion = 4
-if ($Port -eq 0) {
-  $Port = 4317
-  if ($Mode -eq 'Development') { $Port = 4318 }
-}
-# 构建产物：构建后必须齐全，也是判断源码是否比产物新的基准。
+if ($Port -eq 0) { $Port = 4318 }
+# 开发构建产物：构建后必须齐全，也是判断源码是否比产物新的基准。
 $BuildOutputs = @('dist\next\cli.js', 'dist\web\index.html', 'dist\offline\reader.js', 'dist\offline\reader.css', 'dist\build-info.json')
-# 分发文件：根入口与程序手册随每日快照复制，让使用者无需安装 Skill 也能调用。
-$DistributionFiles = @('aichat.cmd', 'docs\cli.md')
-# 日用快照完整性的必查项：全部构建产物 + 分发文件。
-$RequiredOutputs = @($BuildOutputs) + @($DistributionFiles)
 $InputPaths = @('src', 'index.html', 'package.json', 'package-lock.json', 'vite.config.ts', 'vite.offline.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'tsconfig.web.json', 'tsconfig.build.json', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'licenses', 'scripts\generate-notices.mjs', 'scripts\generate-build-info.mjs')
-. (Join-Path $PSScriptRoot 'daily-snapshot.ps1')
 
 # ===========================================================================
 # 辅助函数
@@ -71,7 +59,7 @@ function Write-Info([string] $Message) {
   Write-Host ('[AIchat-graph] ' + $Message)
 }
 
-<# 失败一律走这里：说明原因与提示，然后以非零码退出；等待回车由 start.cmd 统一处理。 #>
+<# 失败一律走这里：说明原因与提示，然后以非零码退出；等待回车由 start-dev.cmd 统一处理。 #>
 function Fail([string] $Message, [string] $Hint) {
   Write-Host ''
   Write-Host ('[AIchat-graph] 启动失败：' + $Message) -ForegroundColor Red
@@ -151,13 +139,13 @@ function Resolve-WorkspacePath([string] $Path, [string] $Base = (Get-Location).P
   }
   return $full
 }
+
 <#
   运行本工程的 CLI 并取回退出码与输出；不经过控制台，避免与服务输出混在一起。
   用 Process／ProcessStartInfo 直接继承环境启动，不走 Start-Process：当环境块里含有
   仅大小写不同的重复变量（例如同时存在 NO_PROXY 与 no_proxy）时，Windows PowerShell
   5.1 的 Start-Process 会在内部合并大小写不敏感的字典处抛 "Item has already been added"。
-  那是启动环境本身的形状，不该要求用户去改环境变量。两条输出流异步读取，避免任一侧
-  写满管道而互相等待。
+  两条输出流异步读取，避免任一侧写满管道而互相等待。
 #>
 function Invoke-Cli {
   param([string[]] $Arguments, [switch] $NodeOnly)
@@ -169,7 +157,7 @@ function Invoke-Cli {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $nodeExe
     $startInfo.Arguments = $argumentLine
-    $startInfo.WorkingDirectory = $RuntimeRoot
+    $startInfo.WorkingDirectory = $ProjectRoot
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
@@ -201,6 +189,7 @@ function Get-CanonicalWorkspacePath([string] $Path) {
   if ($result.ExitCode -ne 0) { Fail ('无法核对工作区实际路径：' + $Path) $result.StdErr }
   return $result.StdOut.Trim().TrimEnd('\')
 }
+
 function Get-NpmCommand {
   foreach ($name in @('npm.cmd', 'npm')) {
     $command = Get-Command $name -ErrorAction SilentlyContinue
@@ -228,7 +217,7 @@ function Assert-WorkspaceUsable([string] $Path) {
   if ($entries.Count -eq 0) { return }
   if (Test-Path -LiteralPath (Join-Path $Path 'graph.sqlite') -PathType Leaf) { return }
   if (Test-Path -LiteralPath (Join-Path $Path 'workspace.json') -PathType Leaf) {
-    Fail ('该目录是旧版 Markdown 资料，还没有 graph.sqlite：' + $Path) ('先用 aichat.cmd import --workspace "' + $Path + '" 一次性导入，再启动；启动器不会自动迁移或改写旧文件。')
+    Fail ('该目录是旧版 Markdown 资料，还没有 graph.sqlite：' + $Path) ('先用 CLI import --workspace "' + $Path + '" 一次性导入，再启动；启动器不会自动迁移或改写旧文件。')
   }
   Fail ('目录非空且不是 AIchat-graph 工作区：' + $Path) '为避免破坏已有资料，启动器不会在此初始化。请用 -Workspace 指定空目录或已有工作区。'
 }
@@ -261,6 +250,7 @@ function Ensure-Workspace([string] $Path) {
     Fail ('init 失败（退出码 ' + $result.ExitCode + '）。') $detail
   }
 }
+
 <# 该工作区是否已有可复用的同版本服务：直接读 <ws>/.aichat/runtime/service.json，
    再 GET /api/workspace 核对 workspaceId。不依赖 CLI 输出格式，不猜其他路径或端口；
    任何一步不成立都视为没有可复用服务。 #>
@@ -286,7 +276,7 @@ function Get-ExistingService([string] $Path) {
   if ($identity.program -and $identity.program.interfaceVersion) { $serviceInterface = [int]$identity.program.interfaceVersion }
   if ($serviceInterface -ne $ExpectedInterfaceVersion) {
     $actual = if ($null -eq $serviceInterface) { '未声明' } else { [string]$serviceInterface }
-    Fail ('该工作区已有服务，但接口版本不匹配（启动器需要 ' + $ExpectedInterfaceVersion + '，实际 ' + $actual + '）：' + [string]$descriptor.url) '这不是当前程序版本的服务。请先停止该服务并确认 graph.sqlite 已导入；启动器不会结束其他进程。'
+    Fail ('该工作区已有服务，但接口版本不匹配（开发启动器需要 ' + $ExpectedInterfaceVersion + '，实际 ' + $actual + '）：' + [string]$descriptor.url) '这不是当前源码版本的服务。请先停止该服务；启动器不会结束其他进程。'
   }
   $instanceId = ''
   if ($descriptor.instanceId) { $instanceId = [string]$descriptor.instanceId }
@@ -294,23 +284,6 @@ function Get-ExistingService([string] $Path) {
     Url = [string]$descriptor.url
     WorkspaceId = [string]$descriptor.workspaceId
     InstanceId = $instanceId
-  }
-}
-
-function Save-WorkspaceChoice([string] $Path) {
-  try {
-    $payload = [ordered]@{}
-    if (Test-Path -LiteralPath $ConfigPath) {
-      $previous = ([IO.File]::ReadAllText($ConfigPath).TrimStart([char]0xFEFF)) | ConvertFrom-Json
-      foreach ($property in $previous.PSObject.Properties) { $payload[$property.Name] = $property.Value }
-    }
-    $payload['workspace'] = $Path
-    $payload['updatedAt'] = (Get-Date).ToString('o')
-    $json = ($payload | ConvertTo-Json -Depth 32) + [Environment]::NewLine
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($ConfigPath, $json, $utf8NoBom)
-  } catch {
-    Write-Info ('无法保存工作区配置（不影响本次启动）：' + $_.Exception.Message)
   }
 }
 
@@ -346,6 +319,7 @@ function Get-NewestWriteTime([string[]] $Paths) {
   }
   return $newest
 }
+
 <#
   让服务进程跟随本窗口：KILL_ON_JOB_CLOSE 作业对象。关闭窗口或 Ctrl+C 时
   句柄随进程释放，服务被系统一并结束，不依赖它是否来得及优雅退出。
@@ -409,20 +383,15 @@ public static class AichatJob {
 # ===========================================================================
 
 if ($Help) {
-  Write-Host '日用：start.cmd [-Workspace <目录>] [-Port <端口>] [-NoBrowser] [-Help]'
   Write-Host '开发：start-dev.cmd [-Workspace <目录>] [-Port <端口>] [-NoBrowser] [-Help]'
-  Write-Host '更新：update-daily.cmd [-NoBrowser] [-Help]'
   Write-Host ''
-  Write-Host '  日用读取 .local/daily 固定程序，不自动安装依赖或构建。端口默认 4317。'
-  Write-Host '  正式工作区必须在 launcher.local.json 中指定，或首次用 -Workspace 选择。'
-  Write-Host '  开发读取当前工程，独立 launcher.development.local.json，默认 .local/development-workspace:4318。'
-  Write-Host '  旧 Markdown 工作区先执行 aichat.cmd import --workspace <目录> 一次性导入 graph.sqlite；'
-  Write-Host '  启动器不自动迁移或改写旧文件，也不会结束其他服务进程。'
-  Write-Host '  -Workspace <目录>  使用指定工作区，确认可用后记住到当前模式的本机配置。'
-  Write-Host '                     路径含空格或中文时请加引号；start.cmd 会原样转交。'
+  Write-Host '  开发读取当前工程源码，独立工作区默认 .local/development-workspace，端口默认 4318。'
+  Write-Host '  不读写正式日用的默认库与配置；正式日用请用 start.cmd（.local\daily\AIchat-graph.exe）。'
+  Write-Host '  -Workspace <目录>  使用指定开发工作区（路径含空格或中文时请加引号）。'
+  Write-Host '  -Port <端口>       指定开发服务端口。'
   Write-Host '  -NoBrowser         不打开浏览器（非交互验收用）'
-  Write-Host '  更新日用版不会自动构建；先在工程根执行 npm ci、npm run build，并完成必要验证。'
-  Write-Host '  再执行 update-daily.cmd，安装快照自己的运行依赖；日用服务运行时拒绝更新。'
+  Write-Host '  旧 Markdown 工作区先执行 CLI import --workspace <目录> 一次性导入 graph.sqlite；'
+  Write-Host '  启动器不自动迁移或改写旧文件，也不会结束其他服务进程。'
   exit 0
 }
 
@@ -431,7 +400,7 @@ if ($Help) {
 # ===========================================================================
 
 if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'package.json'))) {
-  Fail ('工程目录不完整：' + $ProjectRoot) 'launch.ps1 应位于工程根的 scripts 目录下，start.cmd 应位于工程根目录。'
+  Fail ('工程目录不完整：' + $ProjectRoot) 'launch.ps1 应位于工程根的 scripts 目录下，start-dev.cmd 应位于工程根目录。'
 }
 
 $nodeExe = 'node.exe'
@@ -447,66 +416,42 @@ if (-not $nodeVersion) {
   Fail '无法执行 node。' '请确认 Node.js 已安装并在 PATH 中（本工程要求 Node 24）。'
 }
 
-if ($Mode -eq 'UpdateDaily') {
-  if ($Workspace) { Fail '更新日用程序不接受 -Workspace。' '程序快照与用户工作区分离，启动时再选择工作区。' }
-  Update-DailySnapshot
-  exit 0
-}
-
 # ===========================================================================
-# 2. 工作区路径（只解析与只读检查，不建目录）
+# 2. 开发工作区（只解析与只读检查，不建目录）
 # ===========================================================================
-
-$workspaceSource = 'default'
-$workspacePath = $null
-if ($Mode -eq 'Development') { $workspacePath = Join-Path $LocalRoot 'development-workspace' }
 
 if ($Workspace) {
   try {
     $workspacePath = Resolve-WorkspacePath $Workspace
-    $workspaceSource = 'parameter'
   } catch {
     Fail ('工作区路径无法解析：' + $Workspace) $_.Exception.Message
   }
-} elseif (Test-Path -LiteralPath $ConfigPath) {
+} else {
+  $workspacePath = Resolve-WorkspacePath $DefaultWorkspace
+}
+
+# 开发不能继承正式日用默认库：读取便携包自己的 <daily>/.aichat/default.json。
+if (Test-Path -LiteralPath $DailyDefaultConfig) {
   try {
-    $configText = [System.IO.File]::ReadAllText($ConfigPath).TrimStart([char]0xFEFF)
-    $config = $configText | ConvertFrom-Json
-    if ($config -and $config.workspace -and ([string]$config.workspace).Trim().Length -gt 0) {
-      $workspacePath = Resolve-WorkspacePath ([string]$config.workspace) $ProjectRoot
-      $workspaceSource = 'config'
-    }
+    $dailyConfig = ([IO.File]::ReadAllText($DailyDefaultConfig)).TrimStart([char]0xFEFF) | ConvertFrom-Json
   } catch {
-    Fail ('工作区配置无法读取：' + $ConfigPath) $_.Exception.Message
+    Fail '正式日用默认配置无法读取，不能确认开发隔离。' $_.Exception.Message
   }
-}
-
-if (-not $workspacePath) {
-  Fail '尚未指定正式工作区。' '请用 start.cmd -Workspace "<长期工作区目录>"，或在 launcher.local.json 设置 workspace。不会改用旧默认库。'
-}
-
-# 开发不能继承正式库，即使有人把开发配置或参数误设成相同路径。
-if ($Mode -eq 'Development') {
-  $dailyConfigPath = Join-Path $ProjectRoot 'launcher.local.json'
-  if (Test-Path -LiteralPath $dailyConfigPath) {
-    try { $dailyConfig = ([IO.File]::ReadAllText($dailyConfigPath).TrimStart([char]0xFEFF)) | ConvertFrom-Json }
-    catch { Fail '正式工作区配置无法读取，不能确认开发隔离。' $_.Exception.Message }
-    if ($dailyConfig.workspace) {
-      $dailyWorkspace = Resolve-WorkspacePath ([string]$dailyConfig.workspace) $ProjectRoot
-      $dailyWorkspace = Get-CanonicalWorkspacePath $dailyWorkspace
-      $developmentWorkspace = Resolve-WorkspacePath $workspacePath
-      $developmentWorkspace = Get-CanonicalWorkspacePath $developmentWorkspace
-      if ($dailyWorkspace.Equals($developmentWorkspace, [StringComparison]::OrdinalIgnoreCase) -or $dailyWorkspace.StartsWith($developmentWorkspace + '\', [StringComparison]::OrdinalIgnoreCase) -or $developmentWorkspace.StartsWith($dailyWorkspace + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        Fail '开发与正式工作区相同或相互包含，拒绝启动。' '请为开发选择独立目录，或移除错误的开发本机配置。'
-      }
+  if ($dailyConfig -and $dailyConfig.workspace) {
+    $dailyWorkspace = Resolve-WorkspacePath ([string]$dailyConfig.workspace) $ProjectRoot
+    $dailyWorkspace = Get-CanonicalWorkspacePath $dailyWorkspace
+    $developmentWorkspace = Resolve-WorkspacePath $workspacePath
+    $developmentWorkspace = Get-CanonicalWorkspacePath $developmentWorkspace
+    if ($dailyWorkspace.Equals($developmentWorkspace, [StringComparison]::OrdinalIgnoreCase) -or $dailyWorkspace.StartsWith($developmentWorkspace + '\', [StringComparison]::OrdinalIgnoreCase) -or $developmentWorkspace.StartsWith($dailyWorkspace + '\', [StringComparison]::OrdinalIgnoreCase)) {
+      Fail '开发与正式日用工作区相同或相互包含，拒绝启动。' '请用 -Workspace 为开发选择独立目录；本脚本不会改用正式库。'
     }
   }
 }
-
-if ($Mode -eq 'Daily') {
-  Assert-DailySnapshot
-  try { $script:DailyUseLock = Open-DailyLock -Exclusive $false }
-  catch { Fail '日用快照正在更新，暂时不能启动。' '等更新完成后重试，不要并行修改快照。' }
+$dailyRoot = Join-Path $LocalRoot 'daily'
+$canonicalDailyRoot = [IO.Path]::GetFullPath($dailyRoot).TrimEnd('\')
+$canonicalDevelopment = [IO.Path]::GetFullPath($workspacePath).TrimEnd('\')
+if ($canonicalDevelopment.Equals($canonicalDailyRoot, [StringComparison]::OrdinalIgnoreCase) -or $canonicalDevelopment.StartsWith($canonicalDailyRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+  Fail '开发工作区不能放在 .local\daily 程序目录内。' '请用 -Workspace 指定独立目录。'
 }
 
 Assert-WorkspaceUsable $workspacePath
@@ -515,33 +460,26 @@ Assert-WorkspaceUsable $workspacePath
 # 3. 先看该工作区是否已有服务（与服务监听哪个端口无关）
 # ===========================================================================
 
-# whoami 会核对描述文件、服务身份与磁盘根，只有真实匹配才 exit 0。
-# 必须在端口判断之前做：工作区可能跑在别的端口上，那时 4317 是空的，
-# 直接启动第二个写进程只会撞锁。
 $existing = Get-ExistingService $workspacePath
 if ($existing) {
   Write-Info ('该工作区已有服务在运行：' + $existing.Url)
   if ($existing.InstanceId) { Write-Info ('服务实例：' + $existing.InstanceId) }
   Write-Info '不会启动第二个写进程，也不会重新构建。'
-  if ($workspaceSource -eq 'parameter') {
-    # 显式选择的库即使已在运行，也应记住为下次默认。
-    Save-WorkspaceChoice $workspacePath
-  }
   Open-Reader $existing.Url
   exit 0
 }
 
-# 没有同工作区的服务时，默认端口必须空闲；被占用就明确失败，不换端口、不动他人进程。
+# 没有同工作区的服务时，开发端口必须空闲；被占用就明确失败，不换端口、不动他人进程。
 if (Test-PortOpen $Port) {
   $ownerText = Get-PortOwnerText $Port
-  Fail ('默认端口 ' + $Port + ' 已被其他程序占用' + $ownerText + '。') '启动器不会切换端口或结束他人进程。请先关闭该程序；若不是本工作区的服务，可先确认它是什么。'
+  Fail ('开发端口 ' + $Port + ' 已被其他程序占用' + $ownerText + '。') '启动器不会切换端口或结束他人进程。请先关闭该程序，或用 -Port 指定其他端口。'
 }
 
 # ===========================================================================
 # 4. 依赖与构建
 # ===========================================================================
 
-if ($Mode -eq 'Development' -and -not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'node_modules'))) {
+if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'node_modules'))) {
   $npmCmd = Get-NpmCommand
   Write-Info '首次运行：安装依赖（npm ci，需要网络）…'
   Push-Location -LiteralPath $ProjectRoot
@@ -556,12 +494,10 @@ if ($Mode -eq 'Development' -and -not (Test-Path -LiteralPath (Join-Path $Projec
   }
 }
 
-# 服务运行时真正需要的产物：CLI 入口、前端页面、离线读者资源与构建标识。
-# 只有产物缺失或源码比产物新才重建，避免每次启动都重编；入口与手册不参与构建判断。
 $outputsMissing = $false
 $oldestOutput = [datetime]::MaxValue
 foreach ($relative in $BuildOutputs) {
-  $output = Join-Path $RuntimeRoot $relative
+  $output = Join-Path $ProjectRoot $relative
   if (-not (Test-Path -LiteralPath $output)) {
     $outputsMissing = $true
   } else {
@@ -570,10 +506,8 @@ foreach ($relative in $BuildOutputs) {
   }
 }
 
-$newestInput = [datetime]::MinValue
-if ($Mode -eq 'Development') { $newestInput = Get-NewestWriteTime $InputPaths }
-
-if ($Mode -eq 'Development' -and ($outputsMissing -or ($newestInput -gt $oldestOutput))) {
+$newestInput = Get-NewestWriteTime $InputPaths
+if ($outputsMissing -or ($newestInput -gt $oldestOutput)) {
   $npmCmd = Get-NpmCommand
   if ($outputsMissing) {
     Write-Info '构建产物缺失：开始 npm run build（首次可能较慢）…'
@@ -603,9 +537,6 @@ if ($Mode -eq 'Development' -and ($outputsMissing -or ($newestInput -gt $oldestO
 
 Ensure-Workspace $workspacePath
 
-if ($workspaceSource -eq 'parameter') {
-  Save-WorkspaceChoice $workspacePath
-}
 # ===========================================================================
 # 6. 前台启动服务，就绪后打开浏览器
 # ===========================================================================
@@ -641,7 +572,7 @@ try {
     $serveStartInfo = New-Object System.Diagnostics.ProcessStartInfo
     $serveStartInfo.FileName = $nodeExe
     $serveStartInfo.Arguments = $argumentLine
-    $serveStartInfo.WorkingDirectory = $RuntimeRoot
+    $serveStartInfo.WorkingDirectory = $ProjectRoot
     $serveStartInfo.UseShellExecute = $false
     $serveStartInfo.CreateNoWindow = $false
     $serveStartInfo.RedirectStandardOutput = $false
@@ -672,7 +603,7 @@ try {
     while ((Get-Date) -lt $deadline) {
       if ($serveProcess.HasExited) {
         $failure = '服务进程已退出（退出码 ' + $serveProcess.ExitCode + '）。'
-        $failureHint = '请查看上方服务输出中的具体错误；端口占用、写锁冲突或工作区校验失败都会在这里体现。'
+        $failureHint = '请查看上方服务输出中的具体错误；端口占用、工作区校验失败都会在这里体现。'
         break
       }
       if (Test-Path -LiteralPath $descriptorPath) {
