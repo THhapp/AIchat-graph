@@ -46,6 +46,8 @@ resources/
 - exports.json 保存本机 HTML 目标，由页面设置；它不是正文来源。
 - 主题 key 是库内自命名标识，不要求存在同名目录。
 
+数据库格式版本为 schemaVersion 2。旧 schemaVersion 1 库只读打开可直接读取且不改写；可写打开时一次性升级为 2，保留节点 ID、正文、摘要、连接、顺序、重要性、节点 revision、主题最近更新和工作区 revision，不把升级记为最近更新。新库与 import 得到的库都是 2。
+
 不要直接修改数据库、运行描述或 HTML 来绕过 CLI 报错。
 日常维护不需要 workspace.json、topics/ 或节点 Markdown。
 
@@ -103,6 +105,7 @@ Skill 是可选组件，首次打开程序不会安装。包内可用 app/tools/
 
 在页面导出设置中选择一个工作区及程序目录之外的 .html 路径。
 已有绑定会在主题有效变化后更新；没有绑定则不会生成文件。
+程序或阅读器升级不会单独重写已有成品；只有主题内容变化或显式重新导出才用当前阅读器生成。旧成品（含多余 state 字段）仍可读取。
 取消绑定不删除成品，失败保留旧成品。
 
 HTML 是完整、独立、只读的主题快照；保存位置可与知识库放在一起。
@@ -117,6 +120,7 @@ aichat.cmd import --workspace D:/old-workspace
 import 只读当前旧 V2 / isolated 格式，在该目录新建 graph.sqlite，
 保留原 workspace.json、topics/ 和资源；已有 graph.sqlite 时拒绝覆盖。
 之后正常运行只使用数据库，不恢复对旧文件的监听或写回。
+旧 frontmatter 的 state 会被读取但忽略，不转成正文；它是遗留导入格式，新节点契约没有状态。
 
 切换时停止同一资料库的旧服务，导入一次，再启动新服务；
 不让两个版本分别向文件和数据库维护同一讨论。

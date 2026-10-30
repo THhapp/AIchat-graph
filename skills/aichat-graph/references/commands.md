@@ -1,6 +1,6 @@
 # 命令参考
 
-适用接口：4。本参考随 Skill 分发，可独立完成接入、读取和图维护，不依赖程序手册。
+适用接口：5。本参考随 Skill 分发，可独立完成接入、读取和图维护，不依赖程序手册。
 以下 aichat 指实际入口：Windows 便携包用包根 aichat.cmd；源码开发用
 node <程序目录>/dist/next/cli.js。
 <...>、n_a、t_... 等均为占位，使用真实返回的 ID 与版本。
@@ -18,7 +18,7 @@ aichat topics --workspace <dir>
 目录按 --workspace、AICHAT_WORKSPACE、该程序根 .aichat/default.json 选择。
 --workspace-id 只校验身份，不查目录；已知目标后持续沿用，不每轮重新接入。
 默认 JSON，--text 为人类摘要；写入 --verbose 仅增加诊断。
-程序、服务和参考对应接口 4。Skill 包装脚本只定位 cli，不自动使用配置中的 workspace。
+程序、服务和参考对应接口 5。Skill 包装脚本只定位 cli，不自动使用配置中的 workspace。
 
 `init <dir> --name <名称>` 用于新库；`import --workspace <旧V2目录> [--name <名称>]`
 只在明确需要时一次导入，原件不改，已有 graph.sqlite 拒绝覆盖。
@@ -72,7 +72,7 @@ aichat edit --node <id> --if-revision <n> --description "新的入边说明"
 
 | 内容 | 参数 |
 | --- | --- |
-| 标题 / 状态 | --title；--state agreed / proposed / reference |
+| 标题 | --title |
 | 摘要 | --summary 或 --clear-summary |
 | 正文三选一 | --body、--body-file、--body-stdin |
 | 追加 / 替换 | --append-file、--replace-file，与其他正文模式互斥 |
@@ -99,8 +99,8 @@ aichat important --node <id> --off
 ~~~
 
 创建正文也可用 --body 或 --body-stdin。
-next / branch / insert 可给 --summary 和 --state，branch 可给 --order；
-side 只是保留元数据，不控制画布左右。默认状态 proposed。
+next / branch / insert 可给 --summary，branch 可给 --order；
+side 只是保留元数据，不控制画布左右。
 create-topic 的根卡目前只由标题和正文创建，摘要派生；其他根字段可用返回 ID / 版本再 edit。
 key 是库内唯一标识，不是真目录；没有明确新建需求不另造主题。
 
@@ -123,7 +123,6 @@ important 单独设值可仅给 ID，提供 --if-revision 则检查；它不替�
 ~~~json
 {
   "title": "当前问题",
-  "state": "proposed",
   "summary": "当前需要判断的核心。",
   "body": "完整说明。",
   "important": true,
@@ -141,6 +140,7 @@ important 单独设值可仅给 ID，提供 --if-revision 则检查；它不替�
 body / append / replace 三选一；replace.old 必须恰好匹配一次。
 incoming 的来源用实际节点版本；root 整体拒绝 incoming，不能自连或跨主题。
 CLI edit 没有 order 参数，需改它时用 batch 的 patch.incoming.order。
+节点没有确认状态，NodePatch / NodeCreate 都不含 state；batch 输入中出现 state 会按未知字段拒绝。
 
 ## 补旧卡并新建卡：batch
 
@@ -173,7 +173,7 @@ aichat batch --input <batch.json> --dry-run
 
 既有选择器使用本批前版本；新建可从 {"local":"newQ"} 继续创建，
 local 名称只在本批有效，最终 ID 见 created.aliases。
-create.node 支持 title、body、summary、state、important、side、order；
+create.node 支持 title、body、summary、important、side、order；
 next 不带 side / order。删除操作为
 {"op":"delete","target":{"id":"n_leaf","revision":1}}。
 
@@ -206,14 +206,14 @@ aichat rearrange --input <edits.json>
 
 ## 写后继续维护与错误处理
 
-成功结果包含 state、工作区 revision、nodeRevisions、changedNodeIds、
+成功结果包含提交状态 state（committed／noop／checked）、工作区 revision、nodeRevisions、changedNodeIds、
 created.aliases、requestId 和诊断。节点下一版本取 nodeRevisions[nodeId]，
 不能用工作区 revision；不只为获取它再发一次 read。
 
 映射覆盖新建、修改和明确操作且仍存在的目标，noop 也给；删除节点省略。
 insert 的 after 仅作相邻前置条件，不作为修改目标返回。
 replay 保留当时结果，dry-run 不给虚构新版本。
-内容、状态、入边等实际变化按主题替换最近一批；important、纯删除等不替换，
+内容、入边等实际变化按主题替换最近一批；important、纯删除等不替换，
 删除时清除已不存在的节点 ID。
 
 - 412：重读相关节点，理解新内容后再判断，不能静默取最新版本覆盖。

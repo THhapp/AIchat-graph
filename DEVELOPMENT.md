@@ -104,18 +104,22 @@ Markdown AST 章节读取、正文渲染及确有调用者的 IO / 资源辅助�
 工作区由 graph.sqlite、resources/ 和 .aichat/ 下的本机状态组成。
 数据库包含 meta、workspace、topics、nodes、requests：
 workspace 保存身份及总 revision；topics 保存 key、标题、版本和各自最近一批；
-nodes 保存正文、摘要、状态、连接、重要性及节点版本；
+nodes 保存正文、摘要、连接、重要性及节点版本；
 requests 保存有限的请求结果，用于幂等和 status。
 
 - 节点真实变化才增加其 revision；重要性变化也增加，但不替换内容更新集合。
 - 主题和工作区版本随实际变化更新；noop 不增加；服务重启不重置持久版本。
 - summary 为 null 表示没有显式摘要，读取时按正文首段派生。
 - 编号、坐标和 children 是派生值；side 只保留已有元数据，界面统一向右。
-- schemaVersion 为数据库格式版本，interfaceVersion 为 CLI / 服务协议版本，两者独立。
+- 当前 interfaceVersion 为 5、schemaVersion 为 2；两者独立，前者是 CLI／服务协议版本，后者是数据库格式版本。
+- nodes 表无 state 列。旧 v1 库只读打开可直接读取且不迁移；可写打开时一次性升级为 v2，保留 ID、正文、摘要、连接、顺序、important、节点 revision、主题最近更新与工作区 revision，不把升级记为最近更新。新库和导入均为 v2。
+- interfaceVersion 常量只在 src/next/protocol.ts 定义，build-info 与程序信息直接复用，不另设副本。
+- 旧 Markdown 导入仍读取旧 frontmatter 的 state 但忽略、不转成正文；它只是遗留导入格式，不属于新节点契约。
 
 ## 写入、读取与提交边界
 
-单卡与 batch 使用同一 NodePatch：内容、状态、摘要、important 和 incoming。
+单卡与 batch 使用同一 NodePatch：内容、摘要、important 和 incoming。
+NodePatch / NodeCreate 不含 state，CLI 与 batch JSON 中出现时按未知字段拒绝。
 已有节点按调用者提供的 id / revision 检查，不能预读最新值静默覆盖。
 important 的独立设值允许仅给节点 ID；给版本时则检查版本。
 
@@ -144,6 +148,7 @@ resume 优先给 anchor 正文，来路和邻居为摘要级；较长内容按�
 ## 阅读器与导出
 
 保留现有主线、分支、卡片、连线、目录、重要性、最近更新和阅读位置。
+当前讨论节点用中性的“当前”标记；不再显示节点确认状态标签、状态点或状态边色，重要、最近更新、选择／焦点与目录当前加粗仍保留。
 Web 接收领域 DTO，不查询 SQL，也不依赖源 MD 路径、哈希或源码范围。
 实例身份只用于服务连接等运行状态，不决定节点版本有效性。
 
@@ -155,6 +160,7 @@ Web 接收领域 DTO，不查询 SQL，也不依赖源 MD 路径、哈希或源�
 目标位于工作区与应用根之外，保存完整主题；取消绑定不删除文件。
 沿用先生成后替换、失败保留旧文件、拒绝覆盖外部改动和安全资源处理。
 没有绑定时不生成 HTML；独立文件不会主动联网刷新。
+已有成品不因程序或阅读器升级自动重写：只有主题内容变化或用户显式重新绑定／重导出时才用当前阅读器生成。新旧 HTML 都可读取，旧文件中多余的节点 state 字段会被忽略。
 
 ## 文档与 Skill 分发
 

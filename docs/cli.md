@@ -1,6 +1,6 @@
 # AIchat-graph 程序 CLI 手册
 
-适用接口：4。程序可独立使用，不要求安装 Skill。
+适用接口：5。程序可独立使用，不要求安装 Skill。
 Windows 便携包中 aichat 表示包根 aichat.cmd；源码开发时可用 aichat.cmd 或
 node <程序目录>/dist/next/cli.js。普通用户用包内 AIchat-graph.exe 打开，不必执行 CLI。
 
@@ -62,6 +62,8 @@ serve 默认优先本库 .aichat/local/runtime.json 记录的端口，其次 127
 工作区保存 graph.sqlite、resources/ 及 .aichat/ 本机状态。
 正常运行不扫描、监听或写回旧节点 Markdown。
 
+数据库格式为 schemaVersion 2；旧 schemaVersion 1 库只读打开可直接读取且不修改，可写打开时一次性升级为 2，保留节点 ID、正文、摘要、连接、顺序、重要性与节点 revision、主题最近更新和工作区版本，不把升级记为最近更新。新库和 import 得到的库都是 2。
+
 ## 读取与检索
 
 ~~~text
@@ -118,6 +120,7 @@ aichat read --cursor "<page.next>" --budget 12000
 已有节点的内容、入边或删除使用实际读到的 {id,revision}。
 节点版本跨服务重启持久，不能用工作区 revision 代替，也不在提交前偷取最新值覆盖。
 独立 important 设值可仅给节点 ID；提供 --if-revision 时再核对版本。
+节点没有确认状态：读取、写入和 HTML 都不含节点状态字段，写命令也没有 --state。
 
 ### 完整编辑一张卡
 
@@ -129,7 +132,7 @@ aichat edit --node <id> --if-revision <n>
 
 | 内容 | 参数 |
 | --- | --- |
-| 标题和状态 | --title；--state agreed / proposed / reference |
+| 标题 | --title |
 | 显式摘要 | --summary 或 --clear-summary |
 | 正文 | --body、--body-file、--body-stdin 三选一 |
 | 追加 / 唯一替换 | --append-file 或 --replace-file，与其他正文模式互斥 |
@@ -154,7 +157,6 @@ aichat edit --node <id> --if-revision 3 --body-file "./正文.md"
 ~~~json
 {
   "title": "新的标题",
-  "state": "proposed",
   "summary": "当前需要判断的问题。",
   "body": "完整正文。",
   "important": true,
@@ -180,6 +182,7 @@ aichat edit --node <id> --if-revision 3 --body-file "./正文.md"
 replace.old 必须非空且恰好匹配一次。summary:null 清除显式摘要。
 incoming.from 使用来源节点实际版本；只改 description 无需重给来源。
 CLI edit 未暴露 order 参数，需要时可通过 batch 的 incoming.order 修改。
+NodePatch 不含 state；batch 的 patch 或 create.node 出现 state 会按未知字段拒绝。
 
 长正文用文件或显式 stdin。PowerShell 管道示例：
 
@@ -206,9 +209,9 @@ aichat important --node <id> --off
 ~~~
 
 创建正文也可用 --body 或 --body-stdin。
-next / branch / insert 支持 --summary、--state；
+next / branch / insert 支持 --summary；
 branch 另支持 --order 和保留为元数据的 --side，界面仍统一向右。
-create-topic 当前只提供主题 / 根标题及正文，根状态默认 proposed，摘要从正文派生；
+create-topic 当前只提供主题 / 根标题及正文，摘要从正文派生；
 若要改根的其他字段，可直接使用返回 ID 和版本 edit。
 
 key 在库内唯一，不是真实目录。next 已有后继会冲突，不自动挤走。
@@ -252,7 +255,7 @@ aichat batch --input <batch.json> --dry-run
       "from": {"id": "n_a", "revision": 2},
       "flow": "branch",
       "description": "进一步讨论独立方向",
-      "node": {"title": "新问题", "bodyFile": "./新问题.md", "state": "proposed"}
+      "node": {"title": "新问题", "bodyFile": "./新问题.md"}
     },
     {
       "op": "delete",
@@ -262,7 +265,7 @@ aichat batch --input <batch.json> --dry-run
 }
 ~~~
 
-create.node 支持 title、body 及可选 summary / state / important / side / order；
+create.node 支持 title、body 及可选 summary / important / side / order；
 bodyFile 是 CLI 输入形式，不能与 body 同给。后续创建可用 {"local":"new-question"} 作为 from。
 前向引用须最终可解析且不成环。--dry-run 返回 checked 和变化计划，不写库或请求记录。
 
@@ -308,13 +311,14 @@ aichat rearrange --input <edits.json>
 ~~~
 
 - revision 是工作区版本，nodeRevisions 是本次节点实际版本；下一次 edit 可直接使用映射值。
+- state 是提交状态（committed／noop；dry-run 为 checked），不是节点状态。
 - 映射覆盖新建、实际修改及明确操作且仍存在的目标，noop 也返回；删除节点省略。
 - insert 的 after 仅作相邻前置条件，映射包含实际改接的 before 与新节点。
 - created.aliases 将本批名称映射到稳定 ID，不是后续批次仍可使用的别名。
 - 幂等重放返回当时保存的结果和版本，不拼入最新数据；dry-run 不返回伪造的新版本。
 
 只读、布局、被动编号、important 及纯删除不替换内容更新集合。
-内容 / 状态 / 入边等实际变化按主题更新各自最近一批；删除会清掉其中已不存在的 ID。
+内容 / 入边等实际变化按主题更新各自最近一批；删除会清掉其中已不存在的 ID。
 
 写入由程序生成 requestId。结果未知先 `status <requestId>`；
 同一 ID 和相同请求体重放原结果，不同请求体则冲突。
@@ -327,6 +331,7 @@ aichat rearrange --input <edits.json>
 绑定后主题的可见数据变化会自动重建；没有绑定就不生成文件。
 失败保留旧成品，外部改动的目标不直接覆盖，解绑不删除已有文件。
 完整独立 HTML 包含主题、阅读器、样式及必要资源。
+程序或阅读器升级不会单独重写已有成品；主题内容变化或用户显式重新导出时，才用当前阅读器重新生成。旧成品（包括带多余节点 state 字段的 HTML）仍可读取。
 
 ## 帮助、错误和恢复
 
