@@ -26,8 +26,6 @@ export interface SnapshotQuery {
   revision: number;
 }
 
-export type NodeState = 'agreed' | 'proposed' | 'reference';
-
 /** Connection role of a node inside the layout. */
 export type NodeFlow = 'root' | 'next' | 'branch';
 
@@ -44,7 +42,6 @@ export interface GraphNode {
   number: string;
   from: string | null;
   flow: NodeFlow;
-  state: NodeState;
   /**
    * branch only; present only when the source record declares a side explicitly.
    * Absent means "the source did not choose"; the reading side picks the side.
@@ -370,7 +367,6 @@ export interface AgentPatchNodeAction {
   action: 'patchNode';
   editRef: string;
   title?: string;
-  state?: NodeState;
   /** null removes an explicit summary. */
   summary?: string | null;
   replace?: AgentReplace[];
@@ -392,7 +388,6 @@ export interface AgentCreateBranchAction {
   title: string;
   body: string;
   description: string;
-  state?: NodeState;
   /** 显式摘要；缺省由正文首段派生。 */
   summary?: string;
   side?: BranchSide;
@@ -411,7 +406,6 @@ export interface AgentCreateNextAction {
   title: string;
   body: string;
   description: string;
-  state?: NodeState;
   /** 显式摘要；缺省由正文首段派生。 */
   summary?: string;
   /** Defaults to the source node's topic. */
@@ -465,7 +459,6 @@ export interface AgentCreateRootAction {
   topicTitle: string;
   title: string;
   body: string;
-  state?: NodeState;
   summary?: string;
   description?: string;
 }
@@ -476,7 +469,6 @@ export interface AgentCreateTopicAction {
   directory?: string;
   title?: string;
   body: string;
-  state?: NodeState;
   summary?: string;
 }
 
@@ -493,7 +485,6 @@ export interface AgentNodeSelector {
 /** 批次内一次属性／正文修改；与 patchNode 的字段一致，target 只能是已有节点。 */
 export interface AgentBatchEditPatch {
   title?: string;
-  state?: NodeState;
   /** null 删除显式摘要。 */
   summary?: string | null;
   body?: string;
@@ -518,7 +509,6 @@ export interface AgentBatchCreateOp {
   /** 为什么接到来源，非空单行。 */
   description: string;
   summary?: string;
-  state?: NodeState;
   important?: boolean;
   /** 仅 flow=branch 允许。 */
   side?: BranchSide;
@@ -572,7 +562,6 @@ export interface AgentInsertAction {
   /** before 为什么接到新节点。 */
   nextDescription: string;
   summary?: string;
-  state?: NodeState;
 }
 
 export type AgentChangeAction =
@@ -767,7 +756,6 @@ export interface ReadOverviewItem {
   title: string;
   summary: string;
   number: string;
-  state: NodeState;
   flow: NodeFlow;
   from: string | null;
   description?: string;
@@ -783,7 +771,6 @@ export interface ReadStructureItem {
   title: string;
   summary: string;
   number: string;
-  state: NodeState;
   flow: NodeFlow;
   from: string | null;
   description?: string;
