@@ -72,7 +72,6 @@ export function Sidebar(props: SidebarProps): React.JSX.Element {
           <span className="nav-item__title">{node.title}</span>
           {folded && hiddenCount > 0 ? <span className="nav-item__meta">+{String(hiddenCount)}</span> : null}
         </button>
-        <span className="nav-item__state" data-state={node.state} title={node.state} />
       </li>
     );
   };

@@ -2,7 +2,7 @@ import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import type { GraphNode } from '../../next/protocol.js';
-import { StateChip, stateLabel } from './display.js';
+import { CurrentMarker } from './display.js';
 
 export interface TopicCardData extends Record<string, unknown> {
   node: GraphNode;
@@ -38,18 +38,17 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
     <article
       className="topic-card"
       style={{ height }}
-      data-state={node.state}
       data-flow={node.flow}
       data-active={active ? 'true' : 'false'}
       data-selected={selected === true ? 'true' : 'false'}
       data-recent={recent ? 'true' : 'false'}
       data-important={important ? 'true' : 'false'}
-      aria-label={node.number + ' ' + node.title + '，' + stateLabel(node.state) + (important ? '，重要' : '') + (recent ? '，最近更新' : '')}
+      aria-label={node.number + ' ' + node.title + (active ? '，当前讨论' : '') + (important ? '，重要' : '') + (recent ? '，最近更新' : '')}
     >
       <Handle type="target" position={Position.Top} className="rf-handle" isConnectable={false} />
       <header className="topic-card__head">
         <span className="topic-card__number">{node.number}</span>
-        <StateChip node={node} active={active} />
+        {active ? <CurrentMarker /> : null}
         <span className="topic-card__spacer" />
         {onToggleImportant !== undefined ? (
           <button

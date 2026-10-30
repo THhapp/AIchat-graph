@@ -1,29 +1,16 @@
-import type { GraphNode, NodeState } from '../../next/protocol.js';
+import type { GraphNode } from '../../next/protocol.js';
 
-const STATE_LABEL: Record<NodeState, string> = {
-  agreed: '已确认',
-  proposed: '待确认',
-  reference: '参考',
-};
-
-export function stateLabel(state: NodeState): string {
-  return STATE_LABEL[state];
-}
-
-/** Branch entries of agreed chains are cyan; every other agreed node is green. */
-export function stateChipTone(node: Pick<GraphNode, 'state' | 'flow'>): NodeState | 'branch' {
-  return node.state === 'agreed' && node.flow === 'branch' ? 'branch' : node.state;
-}
-
-export function StateChip({ node, active = false }: { node: Pick<GraphNode, 'state' | 'flow' | 'id'>; active?: boolean }): React.JSX.Element {
+/**
+ * Neutral marker for the current discussion node (activeNode).
+ *
+ * The product no longer maintains a node classification, so this only says
+ * "this is where the conversation currently is". It is deliberately not a
+ * colour-coded state: important / recent / selected have their own cues.
+ */
+export function CurrentMarker(): React.JSX.Element {
   return (
-    <span
-      className="state-chip"
-      data-state={stateChipTone(node)}
-      data-active={active ? 'true' : 'false'}
-      title={active ? '当前讨论节点（activeNode）' : stateLabel(node.state)}
-    >
-      {active ? '当前' : stateLabel(node.state)}
+    <span className="current-marker" title="当前讨论节点（activeNode）">
+      当前
     </span>
   );
 }

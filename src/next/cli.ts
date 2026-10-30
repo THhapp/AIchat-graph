@@ -87,7 +87,7 @@ import {
   readView,
   type ReadRequest,
 } from './read.js';
-import { GraphStore } from './store.js';
+import { GraphStore, SCHEMA_VERSION } from './store.js';
 
 export interface ProcessOutcome {
   readonly code: number;
@@ -299,7 +299,7 @@ const COMMANDS: readonly CommandSpec[] = [
     group: 'write',
     summary: '按节点 ID＋revision 修改一张卡片（内容／入边说明／来源关系／重要性，一次事务）。',
     usage: [
-      'aichat edit --node <id> [--if-revision <n>] [--title <t>] [--state agreed|proposed|reference]',
+      'aichat edit --node <id> [--if-revision <n>] [--title <t>]',
       '            [--summary <s>|--clear-summary] [--important true|false]',
       '            [--body <text>|--body-file <file>|--body-stdin]',
       '            [--append-file <file>|--replace-file <json>]',
@@ -310,7 +310,6 @@ const COMMANDS: readonly CommandSpec[] = [
       stringOption('node', '节点 ID', { valueName: '<id>', required: true }),
       IF_REVISION,
       stringOption('title', '新标题'),
-      enumOption('state', ['agreed', 'proposed', 'reference'], '节点状态'),
       stringOption('summary', '新摘要；删除显式摘要请用 --clear-summary', { valueName: '<s>', allowEmpty: true }),
       flagOption('clear-summary', '显式删除显式摘要；与 --summary 互斥'),
       enumOption('important', ['true', 'false'], 'true 设为重要，false 取消'),
@@ -323,7 +322,7 @@ const COMMANDS: readonly CommandSpec[] = [
       enumOption('flow', ['next', 'branch'], '节点关系类型（不改变时省略）'),
     ],
     constraints: [
-      '至少给出 title／state／summary／--clear-summary／正文模式／--important／--description／--from-node 中一项。',
+      '至少给出 --title／--summary／--clear-summary／正文模式／--important／--description／--from-node 中一项。',
       '--summary 与 --clear-summary 互斥；空摘要请用 --clear-summary。',
       '--from-node 必须同时给 --from-revision、--flow 与 --description；只给 --flow 时保留当前来源。',
       '仅 important 变化不替换最近内容更新集合。',
@@ -366,7 +365,6 @@ const COMMANDS: readonly CommandSpec[] = [
       stringOption('description', '为什么在这条线继续'),
       ...BODY_OPTIONS,
       stringOption('summary', '摘要；省略时由正文派生'),
-      enumOption('state', ['agreed', 'proposed', 'reference'], '节点状态'),
     ],
     constraints: ['正文必须给出：--body／--body-file／--body-stdin 三选一。'],
     examples: ['aichat next --from-node <id> --from-revision <n> --title "下一步" --description "继续追问" --body-stdin'],
@@ -385,7 +383,6 @@ const COMMANDS: readonly CommandSpec[] = [
       stringOption('description', '为什么从这里旁出'),
       ...BODY_OPTIONS,
       stringOption('summary', '摘要；省略时由正文派生'),
-      enumOption('state', ['agreed', 'proposed', 'reference'], '节点状态'),
       enumOption('side', ['left', 'right'], '侧向元数据'),
       integerOptionSpec('order', '同一来源下旁支排序值', { min: 0 }),
     ],
@@ -412,7 +409,6 @@ const COMMANDS: readonly CommandSpec[] = [
       stringOption('next-description', '新卡到 before 的说明'),
       ...BODY_OPTIONS,
       stringOption('summary', '摘要；省略时由正文派生'),
-      enumOption('state', ['agreed', 'proposed', 'reference'], '节点状态'),
     ],
     constraints: ['正文必须给出：--body／--body-file／--body-stdin 三选一。', '非相邻 next 由服务整体拒绝，不降级。'],
     examples: ['aichat insert --after-node <a> --after-revision <n> --before-node <b> --before-revision <m> --title "补一问" --description "先追问" --next-description "再回到原问题" --body-stdin'],
@@ -1249,7 +1245,6 @@ async function buildEditAction(
   const revision = integerOption(parsed, spec, 'if-revision') ?? node.revision;
 
   const title = parsed.values.get('title');
-  const stateRaw = parsed.values.get('state');
   const summary = parsed.values.get('summary');
   const clearSummary = flag(parsed, 'clear-summary');
   const importantRaw = parsed.values.get('important');
@@ -1318,7 +1313,6 @@ async function buildEditAction(
   const hasBody = bodyPatch.body !== undefined || bodyPatch.append !== undefined || bodyPatch.replace !== undefined;
   if (
     title === undefined &&
-    stateRaw === undefined &&
     summary === undefined &&
     !clearSummary &&
     important === undefined &&
@@ -1327,7 +1321,7 @@ async function buildEditAction(
     !hasBody
   ) {
     throw usageFailure(
-      'edit 至少需要一项修改：--title／--state／--summary／--clear-summary／正文模式／--important／--description／--from-node',
+      'edit 至少需要一项修改：--title／--summary／--clear-summary／正文模式／--important／--description／--from-node',
       { details: { field: 'modification' }, usage: spec.usage[0] },
     );
   }
@@ -1344,7 +1338,6 @@ async function buildEditAction(
       : undefined;
   const patch: NodePatch = {};
   if (title !== undefined) patch.title = title;
-  if (stateRaw !== undefined) patch.state = stateRaw as NonNullable<NodePatch['state']>;
   if (clearSummary) patch.summary = null;
   else if (summary !== undefined) patch.summary = summary;
   if (bodyPatch.body !== undefined) patch.body = bodyPatch.body;
@@ -1388,12 +1381,10 @@ function nodeCreateFrom(
   options: { title: string; allowSide?: boolean },
 ): NodeCreate {
   const summary = parsed.values.get('summary');
-  const state = parsed.values.get('state');
   const side = parsed.values.get('side');
   const orderRaw = parsed.values.get('order');
   const node: NodeCreate = { title: options.title, body };
   if (summary !== undefined) node.summary = summary;
-  if (state !== undefined) node.state = state as NonNullable<NodeCreate['state']>;
   if (options.allowSide === true && side !== undefined) node.side = side as NonNullable<NodeCreate['side']>;
   if (options.allowSide === true && orderRaw !== undefined) node.order = Number(orderRaw);
   return node;
@@ -1792,7 +1783,7 @@ async function convertPatchInput(
   label: string,
 ): Promise<NodePatch> {
   const record = ensureRecord(value, label);
-  const allowed = new Set(['title', 'state', 'summary', 'body', 'append', 'replace', 'important', 'incoming', 'bodyFile', 'appendFile', 'replaceFile']);
+  const allowed = new Set(['title', 'summary', 'body', 'append', 'replace', 'important', 'incoming', 'bodyFile', 'appendFile', 'replaceFile']);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
       throw usageFailure(label + ' 未知字段：' + key, { details: { field: label + '.' + key } });
@@ -1837,10 +1828,6 @@ async function convertPatchInput(
   if (title !== undefined && typeof title !== 'string') {
     throw usageFailure(label + '.title 必须是字符串', { details: { field: label + '.title' } });
   }
-  const state = record['state'];
-  if (state !== undefined && state !== 'agreed' && state !== 'proposed' && state !== 'reference') {
-    throw usageFailure(label + '.state 只能是 agreed／proposed／reference', { details: { field: label + '.state' } });
-  }
   let summary: string | null | undefined;
   if ('summary' in record) {
     const value = record['summary'];
@@ -1856,7 +1843,6 @@ async function convertPatchInput(
   const incoming = record['incoming'] !== undefined ? convertIncoming(record['incoming'], label + '.incoming') : undefined;
   const patch: NodePatch = {};
   if (title !== undefined) patch.title = title;
-  if (state !== undefined) patch.state = state as NonNullable<NodePatch['state']>;
   if (summary !== undefined) patch.summary = summary;
   if (body !== undefined) patch.body = body;
   if (appendText !== undefined) patch.append = appendText;
@@ -1941,7 +1927,7 @@ async function readRelativeText(baseDir: string, relative: string, label: string
 
 function convertCreateNode(value: unknown, label: string): { node: NodeCreate; bodyFile: string | undefined } {
   const record = ensureRecord(value, label);
-  const allowed = new Set(['title', 'body', 'bodyFile', 'summary', 'state', 'important', 'side', 'order']);
+  const allowed = new Set(['title', 'body', 'bodyFile', 'summary', 'important', 'side', 'order']);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
       throw usageFailure(label + ' 未知字段：' + key, { details: { field: label + '.' + key } });
@@ -1959,13 +1945,6 @@ function convertCreateNode(value: unknown, label: string): { node: NodeCreate; b
       throw usageFailure(label + '.summary 必须是字符串', { details: { field: label + '.summary' } });
     }
     node.summary = record['summary'];
-  }
-  if (record['state'] !== undefined) {
-    const state = record['state'];
-    if (state !== 'agreed' && state !== 'proposed' && state !== 'reference') {
-      throw usageFailure(label + '.state 只能是 agreed／proposed／reference', { details: { field: label + '.state' } });
-    }
-    node.state = state;
   }
   if (record['important'] !== undefined) {
     if (typeof record['important'] !== 'boolean') {
@@ -2093,7 +2072,7 @@ async function runInit(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntim
       dbPath: store.dbPath,
       workspaceId: snapshot.workspaceId,
       name: snapshot.name,
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
     };
   } finally {
     store.close();

@@ -70,7 +70,7 @@ async function newFixture(): Promise<Fixture> {
         action: 'createTopic',
         key: 'topic-a',
         topicTitle: '讨论主题',
-        node: { title: '根卡', body: '根卡正文。', state: 'agreed' },
+        node: { title: '根卡', body: '根卡正文。' },
       },
     },
     'hash-create-topic',
@@ -92,7 +92,6 @@ async function newFixture(): Promise<Fixture> {
           title: '续卡',
           summary: '续卡的显式摘要',
           body: '续卡正文。\n\n![图片](resources/pic.png)',
-          state: 'proposed',
         },
       },
     },
@@ -195,6 +194,7 @@ describe('SQLite topic export manager', () => {
       // 领域节点只带真实字段：不应伪造 Markdown 文件路径或文件哈希。
       expect(node).not.toHaveProperty('path');
       expect(node).not.toHaveProperty('fileHash');
+      expect(node).not.toHaveProperty('state');
       expect(typeof node.important).toBe('boolean');
       expect(typeof node.revision).toBe('number');
       expect(node.revision).toBeGreaterThan(0);
@@ -216,6 +216,41 @@ describe('SQLite topic export manager', () => {
     // 状态回调覆盖 pending → ready，服务端据此发 SSE。
     expect(statuses.some((status) => status.state === 'pending' || status.state === 'writing')).toBe(true);
     expect(statuses.some((status) => status.state === 'ready')).toBe(true);
+  });
+
+  it('does not rewrite an existing export just because the reader changed; content changes still refresh it', async () => {
+    const readerHash = (html: string): string => /name="aichat-export-reader-sha256" content="([^"]+)"/.exec(html)?.[1] ?? '';
+    const fixture = await newFixture();
+    const firstManager = managerFor(fixture);
+    await firstManager.init();
+    const target = path.join(fixture.output, 'topic.html');
+    const bound = await firstManager.bindTarget(fixture.topicId, target);
+    expect(bound.state).toBe('ready');
+    const firstHtml = await fs.readFile(target, 'utf8');
+    const firstReaderHash = readerHash(firstHtml);
+    expect(firstReaderHash).not.toBe('');
+
+    // Simulate a program update with a new reader/model while content is unchanged.
+    firstManager.close();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await fs.writeFile(path.join(fixture.offline, 'reader.js'), READER_SCRIPT + '/*new-reader-marker*/');
+
+    const secondManager = managerFor(fixture);
+    await secondManager.init();
+    expect(await fs.readFile(target, 'utf8')).toBe(firstHtml);
+
+    // An explicit re-export is a new generation and uses the current reader.
+    const explicit = await secondManager.bindTarget(fixture.topicId, target);
+    expect(explicit.state).toBe('ready');
+    expect(readerHash(await fs.readFile(target, 'utf8'))).not.toBe(firstReaderHash);
+
+    // A real content change still regenerates the file with the current reader.
+    editBody(fixture, 'req-reader-update', fixture.rootNodeId, 1, { append: '新内容。' });
+    const refreshed = await secondManager.bindTarget(fixture.topicId, target);
+    expect(refreshed.state).toBe('ready');
+    const updatedHtml = await fs.readFile(target, 'utf8');
+    expect(updatedHtml).not.toBe(firstHtml);
+    expect(readerHash(updatedHtml)).not.toBe(firstReaderHash);
   });
 
   it('updates the same path after a content change without touching other topics', async () => {

@@ -193,8 +193,9 @@ function removeCreatedDatabase(dbPath: string): void {
 /**
  * Import one format-2 isolated Markdown workspace into <root>/graph.sqlite.
  *
- * Stable IDs, topic keys (old directory names), bodies, explicit summaries, state,
+ * Stable IDs, topic keys (old directory names), bodies, explicit summaries,
  * connections, side/order, important flags and per-topic recent updates are kept.
+ * The retired confirmation state is ignored, never converted into content.
  * An existing graph.sqlite is rejected; a failed import removes the database created
  * by this call so no half graph stays visible.
  */
@@ -252,7 +253,6 @@ export async function importV2(root: string, name?: string): Promise<ImportSumma
       title: node.title,
       body: normalizeBodyLinks(node.body, node.sourcePath, nodeByPath),
       summary: node.summaryExplicit ? node.summary : null,
-      state: node.state,
       from: node.from,
       flow: node.flow,
       description: node.description ?? null,

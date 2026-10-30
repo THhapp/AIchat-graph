@@ -128,11 +128,14 @@ describe("importV2", () => {
 
       const nodes = new Map(snapshot.nodes.map((node) => [node.id, node]));
       expect([...nodes.keys()].sort()).toEqual([NEXT_ID, ROOT_ID, BRANCH_ID].sort());
+      // 旧 Markdown 的 state: 字段仍由旧解析器接受，但 NodeRecord 不保留它。
+      for (const node of snapshot.nodes) {
+        expect(Object.prototype.hasOwnProperty.call(node, "state")).toBe(false);
+      }
       const rootNode = nodes.get(ROOT_ID);
       expect(rootNode).toMatchObject({
         topicId: TOPIC_ID,
         title: "根问题",
-        state: "agreed",
         flow: "root",
         from: null,
         important: true,
@@ -147,7 +150,6 @@ describe("importV2", () => {
       expect(nextNode).toMatchObject({
         from: ROOT_ID,
         flow: "next",
-        state: "proposed",
         description: "由根问题推进",
         summary: null,
         revision: 1,

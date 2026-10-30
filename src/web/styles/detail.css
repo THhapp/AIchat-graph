@@ -56,9 +56,6 @@
 }
 .nav-item__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
 .nav-item__meta { flex: none; font-size: var(--text-2xs); color: var(--text-muted); }
-.nav-item__state { width: 6px; height: 6px; border-radius: 50%; flex: none; margin-right: var(--space-3); background: var(--state-reference-fg); }
-.nav-item__state[data-state='agreed'] { background: var(--state-agreed-fg); }
-.nav-item__state[data-state='proposed'] { background: var(--state-proposed-fg); }
 .nav-list--tree .nav-item--chain { padding-right: var(--space-1); }
 .topic-folder > .nav-list--tree { margin-left: 12px; border-left: 1px solid var(--border); }
 .sidebar__placeholder { padding: var(--space-2) var(--space-4); color: var(--text-muted); font-size: var(--text-sm); }
@@ -202,7 +199,6 @@
   border-radius: var(--radius-pill);
   padding: 0 0.6em;
 }
-.detail__origin[data-source='disk'] { color: var(--state-proposed-fg); border-color: color-mix(in srgb, var(--state-proposed-fg) 35%, transparent); }
 .detail__connection {
   margin: var(--space-3) 0 0;
   padding: var(--space-2) var(--space-3);

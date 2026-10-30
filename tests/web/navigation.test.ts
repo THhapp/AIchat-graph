@@ -23,7 +23,7 @@ import { ApiError } from '../../src/web/data/client.js';
 
 function node(id: string, from: string | null, flow: 'root' | 'next' | 'branch', number: string, title: string, topicId = 't_1'): GraphNode {
   return {
-    id, topicId, title, summary: title + ' 摘要', number, from, flow, state: 'agreed', important: false, revision: 1,
+    id, topicId, title, summary: title + ' 摘要', number, from, flow, important: false, revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, order: 10 } : {}),
   };
 }

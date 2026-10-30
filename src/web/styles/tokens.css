@@ -74,14 +74,12 @@
   --edge-label-bg: var(--bg);
   --canvas-dot: hsl(40 6% 86%);
 
+  /* Feedback tones only (sync dot, banners, export status). Node classification
+     was removed from the product; these do not describe a card. */
   --state-agreed-fg: var(--green-700);
   --state-agreed-bg: var(--green-100);
-  --state-branch-fg: var(--cyan-700);
-  --state-branch-bg: var(--cyan-100);
   --state-proposed-fg: var(--amber-700);
   --state-proposed-bg: var(--amber-100);
-  --state-reference-fg: var(--slate-700);
-  --state-reference-bg: var(--slate-100);
 
   /* component */
   --card-bg: var(--bg-raised);
@@ -120,12 +118,8 @@
 
   --state-agreed-fg: hsl(146 48% 68%);
   --state-agreed-bg: hsl(146 30% 18%);
-  --state-branch-fg: hsl(184 52% 66%);
-  --state-branch-bg: hsl(184 30% 17%);
   --state-proposed-fg: hsl(42 82% 68%);
   --state-proposed-bg: hsl(40 35% 17%);
-  --state-reference-fg: hsl(220 10% 76%);
-  --state-reference-bg: hsl(220 8% 22%);
 
   --card-bg: hsl(220 12% 14%);
   --card-border: hsl(220 8% 27%);

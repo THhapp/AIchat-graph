@@ -372,7 +372,9 @@ class SqliteExportManager implements ExportManagerLike {
   /* ------------------------------ 导出任务 ------------------------------ */
 
   private requestExport(topicId: string, reason: string): Promise<TopicExportStatus> {
-    void reason;
+    // Startup/schedule may preserve an already-current old-reader HTML; an explicit
+    // bind or retry is a new export request and may use the current reader.
+    const force = reason === 'target' || reason === 'retry';
     if (this.stopped || this.config?.entries.has(topicId) !== true) {
       return Promise.resolve(this.status(topicId));
     }
@@ -384,7 +386,7 @@ class SqliteExportManager implements ExportManagerLike {
         const prepared = await this.prepare(topicId, generation);
         await this.runExclusive(async () => {
           if (this.stopped || this.generations.get(topicId) !== generation) return;
-          await this.finalize(prepared);
+          await this.finalize(prepared, force);
         });
       } catch (error) {
         if (this.stopped) return;
@@ -492,7 +494,7 @@ class SqliteExportManager implements ExportManagerLike {
     };
   }
 
-  private async finalize(prepared: PreparedExport): Promise<void> {
+  private async finalize(prepared: PreparedExport, force: boolean): Promise<void> {
     const topicId = prepared.topicId;
     const config = this.config;
     if (config === null) return;
@@ -518,7 +520,7 @@ class SqliteExportManager implements ExportManagerLike {
       const current = this.config?.entries.get(topicId);
       if (current === undefined) return;
       const target = await this.validateTarget(topicId, current.targetPath, current);
-      if (await this.alreadyCurrent(target.absolute, current, prepared)) {
+      if (!force && await this.alreadyCurrent(target.absolute, current, prepared)) {
         this.emitStatus(topicId, true);
         return;
       }
@@ -619,16 +621,18 @@ class SqliteExportManager implements ExportManagerLike {
     record: ExportTargetRecord,
     prepared: PreparedExport,
   ): Promise<boolean> {
+    // A reader/build upgrade alone must not rewrite a previously exported HTML.
+    // Existing files are refreshed only when their source content changed (or the
+    // user binds/regenerates with a changed content fingerprint). New exports
+    // always use the current reader and model.
     if (record.exportedContentFingerprint !== prepared.sourceFingerprint) return false;
-    if (record.exportedReaderFingerprint !== prepared.readerFingerprint) return false;
     if (record.targetHash === null) return false;
     const bytes = await fs.readFile(absolute).catch(() => null);
     if (bytes === null) return false;
     if (sha256Bytes(bytes) !== record.targetHash) return false;
     const markers = readExportMarkers(bytes.toString('utf8'));
     if (markers === null) return false;
-    if (markers.workspaceId !== this.expectedWorkspaceId || markers.topicId !== prepared.topicId) return false;
-    return markers.exportFingerprint === prepared.exportFingerprint;
+    return markers.workspaceId === this.expectedWorkspaceId && markers.topicId === prepared.topicId;
   }
 
   /** 绑定时校验：目标必须是外部普通 .html，已存在时必须是同一主题的成品。 */

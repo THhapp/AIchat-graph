@@ -5,11 +5,11 @@
 import { createServer } from 'node:http';
 
 const nodes = [
-  { id: 'n1', topicId: 't1', title: '记录的目的', summary: '保留有用的思路来路和关键转折，便于以后继续讨论。', number: '01', from: null, flow: 'root', state: 'agreed', important: false, revision: 1 },
-  { id: 'n2', topicId: 't1', title: '原位维护', summary: '默认更新现有内容，不按聊天轮次新增副本。', number: '02', from: 'n1', flow: 'next', state: 'agreed', important: true, revision: 2 },
-  { id: 'n3', topicId: 't1', title: '一个具体情境', summary: '某个观点改变后，怎样保留理解新观点所需的理由？', number: '01-01', from: 'n1', flow: 'branch', side: 'right', order: 10, state: 'proposed', important: false, revision: 1 },
-  { id: 'n4', topicId: 't1', title: '侧枝继续', summary: '从 06-03 继续的局部讨论。', number: '01-02', from: 'n3', flow: 'next', state: 'agreed', important: false, revision: 1 },
-  { id: 'n5', topicId: 't2', title: '另一个主题的卡片', summary: '跨主题文件连接。', number: '03', from: 'n2', flow: 'next', state: 'reference', important: false, revision: 1 },
+  { id: 'n1', topicId: 't1', title: '记录的目的', summary: '保留有用的思路来路和关键转折，便于以后继续讨论。', number: '01', from: null, flow: 'root', important: false, revision: 1 },
+  { id: 'n2', topicId: 't1', title: '原位维护', summary: '默认更新现有内容，不按聊天轮次新增副本。', number: '02', from: 'n1', flow: 'next', important: true, revision: 2 },
+  { id: 'n3', topicId: 't1', title: '一个具体情境', summary: '某个观点改变后，怎样保留理解新观点所需的理由？', number: '01-01', from: 'n1', flow: 'branch', side: 'right', order: 10, important: false, revision: 1 },
+  { id: 'n4', topicId: 't1', title: '侧枝继续', summary: '从 06-03 继续的局部讨论。', number: '01-02', from: 'n3', flow: 'next', important: false, revision: 1 },
+  { id: 'n5', topicId: 't2', title: '另一个主题的卡片', summary: '跨主题文件连接。', number: '03', from: 'n2', flow: 'next', important: false, revision: 1 },
 ];
 const topics = [
   { id: 't1', key: '条目整理', title: '条目整理', nodeIds: ['n1','n2','n3','n4'], revision: 4 },

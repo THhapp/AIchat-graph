@@ -43,7 +43,8 @@ import type {
   ChangeStatusResponse,
 } from './protocol.js';
 
-const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 const DB_FILE = 'graph.sqlite';
 
 interface State {
@@ -90,7 +91,12 @@ export class GraphStore {
     try {
       configure(db, options.readonly === true);
       const version = Number((db.prepare("SELECT value FROM meta WHERE key='schemaVersion'").get() as any)?.value);
-      if (version !== SCHEMA_VERSION) throw new DomainError('DB_SCHEMA_UNSUPPORTED', '不支持的数据库 schema 版本：' + String(version), 422);
+      if (version === LEGACY_SCHEMA_VERSION) {
+        // 旧库只读时按 v1 结构直接读取，不升级、不写库；下一次可写打开再迁移。
+        if (options.readonly !== true) upgradeLegacySchema(db);
+      } else if (version !== SCHEMA_VERSION) {
+        throw new DomainError('DB_SCHEMA_UNSUPPORTED', '不支持的数据库 schema 版本：' + String(version), 422);
+      }
     } catch (error) {
       db.close();
       throw error;
@@ -130,10 +136,10 @@ export class GraphStore {
       insertTopic.run(topic.id, topic.key, topic.title, topic.revision, topic.lastChangeAt, JSON.stringify(topic.lastChangeIds));
     }
     const insertNode = this.db.prepare(
-      'INSERT INTO nodes(id,topic_id,title,body,summary,state,from_id,flow,description,side,ord,important,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO nodes(id,topic_id,title,body,summary,from_id,flow,description,side,ord,important,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
     );
     for (const node of state.nodes) {
-      insertNode.run(node.id, node.topicId, node.title, node.body, node.summary, node.state, node.from,
+      insertNode.run(node.id, node.topicId, node.title, node.body, node.summary, node.from,
         node.flow, node.description, node.side, node.order, node.important ? 1 : 0, node.revision);
     }
     this.db.prepare('UPDATE workspace SET active_node=?,revision=? WHERE id=?').run(
@@ -352,18 +358,18 @@ export class GraphStore {
       if (!candidateNodes.has(node.id)) deleteNode.run(node.id);
     }
     const insertNode = this.db.prepare(
-      'INSERT INTO nodes(id,topic_id,title,body,summary,state,from_id,flow,description,side,ord,important,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO nodes(id,topic_id,title,body,summary,from_id,flow,description,side,ord,important,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
     );
     const updateNode = this.db.prepare(
-      'UPDATE nodes SET topic_id=?,title=?,body=?,summary=?,state=?,from_id=?,flow=?,description=?,side=?,ord=?,important=?,revision=? WHERE id=?',
+      'UPDATE nodes SET topic_id=?,title=?,body=?,summary=?,from_id=?,flow=?,description=?,side=?,ord=?,important=?,revision=? WHERE id=?',
     );
     for (const node of candidate.nodes) {
       const old = beforeNodes.get(node.id);
       if (old === undefined) {
-        insertNode.run(node.id, node.topicId, node.title, node.body, node.summary, node.state, node.from,
+        insertNode.run(node.id, node.topicId, node.title, node.body, node.summary, node.from,
           node.flow, node.description, node.side, node.order, node.important ? 1 : 0, node.revision);
       } else if (!nodeRowsEqual(old, node)) {
-        updateNode.run(node.topicId, node.title, node.body, node.summary, node.state, node.from,
+        updateNode.run(node.topicId, node.title, node.body, node.summary, node.from,
           node.flow, node.description, node.side, node.order, node.important ? 1 : 0, node.revision, node.id);
       }
     }
@@ -403,7 +409,6 @@ function nodeFieldsEqual(left: NodeRecord, right: NodeRecord): boolean {
     left.title === right.title &&
     left.body === right.body &&
     left.summary === right.summary &&
-    left.state === right.state &&
     left.from === right.from &&
     left.flow === right.flow &&
     left.description === right.description &&
@@ -759,7 +764,7 @@ class CommitContext {
     const before = this.state.nodes[index] as NodeRecord;
     this.state.nodes[index] = {
       id: before.id, topicId: before.topicId, title: after.title, body: after.body, summary: after.summary,
-      state: after.state, from: after.from, flow: after.flow, description: after.description, side: after.side,
+      from: after.from, flow: after.flow, description: after.description, side: after.side,
       order: after.order, important: after.important, revision: before.revision,
     };
   }
@@ -803,6 +808,54 @@ function configure(db: DatabaseSync, readonly = false): void {
   else db.exec('PRAGMA busy_timeout=5000;');
 }
 
+/**
+ * One-time v1 → v2 upgrade on writable open. Rebuild the nodes table without the
+ * retired state column. Only the schema changes: ids, content, connections,
+ * important flags, revisions and topic last-change metadata are copied as-is.
+ * Read-only opens never call this.
+ */
+function upgradeLegacySchema(db: DatabaseSync): void {
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    const columns = db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name?: unknown }>;
+    const hasState = columns.some((column) => column.name === 'state');
+    if (!hasState) throw new Error('nodes 表缺少预期的 state 列');
+    db.exec(`
+      CREATE TABLE nodes_v2(
+        id TEXT PRIMARY KEY,
+        topic_id TEXT NOT NULL REFERENCES topics(id),
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        summary TEXT,
+        from_id TEXT,
+        flow TEXT NOT NULL,
+        description TEXT,
+        side TEXT,
+        ord INTEGER,
+        important INTEGER NOT NULL DEFAULT 0,
+        revision INTEGER NOT NULL
+      );
+      INSERT INTO nodes_v2(id,topic_id,title,body,summary,from_id,flow,description,side,ord,important,revision)
+        SELECT id,topic_id,title,body,summary,from_id,flow,description,side,ord,important,revision FROM nodes;
+      DROP TABLE nodes;
+      ALTER TABLE nodes_v2 RENAME TO nodes;
+      CREATE INDEX nodes_topic ON nodes(topic_id);
+      CREATE INDEX nodes_from ON nodes(from_id);
+    `);
+    const updated = db.prepare("UPDATE meta SET value=? WHERE key='schemaVersion'").run(String(SCHEMA_VERSION));
+    if (Number(updated.changes) !== 1) throw new Error('meta.schemaVersion 更新失败');
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw new DomainError(
+      'DB_SCHEMA_UPGRADE_FAILED',
+      '旧数据库结构升级失败，原有数据未变：' + (error instanceof Error ? error.message : String(error)),
+      500,
+      { fromSchemaVersion: LEGACY_SCHEMA_VERSION, toSchemaVersion: SCHEMA_VERSION },
+    );
+  }
+}
+
 function createSchema(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -826,7 +879,6 @@ function createSchema(db: DatabaseSync): void {
       title TEXT NOT NULL,
       body TEXT NOT NULL,
       summary TEXT,
-      state TEXT NOT NULL,
       from_id TEXT,
       flow TEXT NOT NULL,
       description TEXT,
@@ -851,7 +903,7 @@ function createSchema(db: DatabaseSync): void {
 function nodeRow(row: any): NodeRecord {
   return {
     id: row.id, topicId: row.topic_id, title: row.title, body: row.body,
-    summary: row.summary ?? null, state: row.state, from: row.from_id ?? null,
+    summary: row.summary ?? null, from: row.from_id ?? null,
     flow: row.flow, description: row.description ?? null, side: row.side ?? null,
     order: row.ord ?? null, important: row.important === 1 || row.important === true,
     revision: row.revision,

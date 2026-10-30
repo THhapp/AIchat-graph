@@ -3,9 +3,8 @@
  * No file paths, file hashes, edit refs or expected files are part of this contract.
  */
 
-export const INTERFACE_VERSION = 4;
+export const INTERFACE_VERSION = 5;
 
-export type NodeState = 'agreed' | 'proposed' | 'reference';
 export type NodeFlow = 'root' | 'next' | 'branch';
 export type BranchSide = 'left' | 'right';
 
@@ -34,7 +33,6 @@ export interface GraphNode {
   number: string;
   from: string | null;
   flow: NodeFlow;
-  state: NodeState;
   side?: BranchSide;
   order?: number;
   important: boolean;
@@ -231,7 +229,6 @@ export interface IncomingPatch {
  */
 export interface NodePatch {
   title?: string;
-  state?: NodeState;
   summary?: string | null;
   body?: string;
   append?: string;
@@ -244,7 +241,6 @@ export interface NodeCreate {
   title: string;
   body: string;
   summary?: string;
-  state?: NodeState;
   important?: boolean;
   side?: BranchSide;
   order?: number;

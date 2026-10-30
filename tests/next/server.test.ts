@@ -12,6 +12,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { GraphStore } from '../../src/next/store.js';
+import { INTERFACE_VERSION } from '../../src/next/protocol.js';
 import type {
   AgentChangeRequest,
   AgentChangeResponse,
@@ -245,6 +246,7 @@ describe('next service：读取与描述', () => {
       revision: 1,
     });
     expect(graph.body.nodes[0]).not.toHaveProperty('sourcePath');
+    expect(graph.body.nodes[0]).not.toHaveProperty('state');
     expect(graph.body.topics[0]).toMatchObject({ id: seeded.topicId, key: '主线' });
     expect(graph.body.lastChanges?.[seeded.topicId]?.nodeIds).toContain(seeded.rootNodeId);
 
@@ -256,6 +258,7 @@ describe('next service：读取与描述', () => {
     }>(handle.url + '/api/nodes/' + seeded.rootNodeId);
     expect(detail.status).toBe(200);
     expect(detail.body.node.id).toBe(seeded.rootNodeId);
+    expect(detail.body.node).not.toHaveProperty('state');
     expect(detail.body.body).toContain('起点正文');
     // 正文里的 resources/ 引用映射成同源 URL；../ 前缀与百分号编码都归一到同一 key。
     expect(detail.body.resources).toMatchObject({
@@ -267,6 +270,7 @@ describe('next service：读取与描述', () => {
     expect(topic.status).toBe(200);
     expect(topic.body).toMatchObject({ source: 'database', valid: true });
     expect(topic.body.topic.id).toBe(seeded.topicId);
+    expect(topic.body.nodes[0]).not.toHaveProperty('state');
     expect(topic.body.nodes[0]?.body).toContain('起点正文');
     expect(topic.body.resources).toMatchObject({
       'resources/pic.png': '/api/resources/pic.png',
@@ -644,7 +648,7 @@ describe('next service：service.json 生命周期', () => {
       rootPath: seeded.root,
       stale: false,
     });
-    expect(viaDescriptor.body.program?.interfaceVersion).toBe(4);
+    expect(viaDescriptor.body.program?.interfaceVersion).toBe(INTERFACE_VERSION);
 
     await handle.stop();
     await expect(fs.readFile(descriptorPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });

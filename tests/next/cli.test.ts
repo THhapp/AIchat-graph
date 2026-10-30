@@ -38,13 +38,18 @@ async function newParent(prefix = 'aichat-next-cli-'): Promise<string> {
   return parent;
 }
 
-async function initWorkspace(): Promise<{ parent: string; root: string; workspaceId: string }> {
+async function initWorkspace(): Promise<{ parent: string; root: string; workspaceId: string; schemaVersion: number }> {
   const parent = await newParent();
   const root = path.join(parent, 'db');
   const result = await main(['init', root], { cwd: parent });
   expect(result.exitCode, result.stderr).toBe(0);
   const payload = jsonOf(result.stdout);
-  return { parent, root, workspaceId: payload['workspaceId'] as string };
+  return {
+    parent,
+    root,
+    workspaceId: payload['workspaceId'] as string,
+    schemaVersion: payload['schemaVersion'] as number,
+  };
 }
 
 function testProgram(): ProgramInfo {
@@ -290,8 +295,10 @@ async function readOf(args: readonly string[], context: Parameters<typeof main>[
 
 describe('Interface 4 CLI', () => {
   it('init／topics／validate／version／help 不依赖服务', async () => {
-    const { parent, root, workspaceId } = await initWorkspace();
+    const { parent, root, workspaceId, schemaVersion } = await initWorkspace();
     expect(workspaceId.startsWith('w_')).toBe(true);
+    // 节点状态删除后新库 schemaVersion=2。
+    expect(schemaVersion).toBe(2);
 
     const topics = writePayloadOf(await cli(['topics', '--workspace', root], { cwd: parent }));
     expect(topics).toMatchObject({ ok: true, command: 'topics', workspaceId, revision: 1, topics: [] });
@@ -667,6 +674,104 @@ describe('Interface 4 CLI', () => {
     expect(dry['nodeRevisions']).toBeUndefined();
   });
 
+  it('节点状态已删除：--state 旧参数失败、batch state 被拒绝、无 state 的 edit/create 成功', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+
+    // help 不再暴露节点状态。
+    for (const command of ['edit', 'next', 'branch', 'insert']) {
+      const help = await cli([command, '--help'], context);
+      expect(help.exitCode, help.stderr).toBe(0);
+      expect(help.stdout).not.toContain('--state');
+      expect(help.stdout).not.toContain('节点状态');
+    }
+
+    // 无状态创建：接口 5 的节点对象没有 state 字段，但响应 state=committed 保留。
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '无状态', '--body', '正文', '--workspace', root], context),
+    );
+    expect(created['state']).toBe('committed');
+    const topicId = created['topicId'] as string;
+    const nodeId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const freshNode = (await readOf(['--node', nodeId, '--workspace', root], context)).payload.items[0]
+      ?.node as unknown as Record<string, unknown>;
+    expect(freshNode).not.toHaveProperty('state');
+
+    // 旧的合法值也不接受：--state 已是未知选项。
+    const legacyEdit = await cli(['edit', '--node', nodeId, '--state', 'agreed', '--workspace', root], context);
+    expect(legacyEdit.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(legacyEdit.stderr).error.message).toContain('--state');
+    const revision = freshNode['revision'] as number;
+    const legacyNext = await cli(
+      ['next', '--from-node', nodeId, '--from-revision', String(revision), '--title', '旧参数', '--description', '继续', '--body', '正文', '--state', 'agreed', '--workspace', root],
+      context,
+    );
+    expect(legacyNext.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(legacyNext.stderr).error.message).toContain('--state');
+
+    // 无 state 的 edit 与 next/create 成功。
+    const edited = writePayloadOf(
+      await cli(['edit', '--node', nodeId, '--title', '无状态标题', '--workspace', root], context),
+    );
+    expect(edited['state']).toBe('committed');
+    expect(edited['nodeRevisions']).toEqual({ [nodeId]: 2 });
+    const next = writePayloadOf(
+      await cli(
+        ['next', '--from-node', nodeId, '--from-revision', '2', '--title', '下一步', '--description', '继续', '--body', '正文', '--workspace', root],
+        context,
+      ),
+    );
+    expect(next['state']).toBe('committed');
+    const nextNode = (await readOf(['--node', (next['created'] as { nodeIds: string[] }).nodeIds[0] as string, '--workspace', root], context)).payload.items[0]
+      ?.node as unknown as Record<string, unknown>;
+    expect(nextNode).not.toHaveProperty('state');
+
+    // batch edit.patch.state 与 create.node.state 都按未知字段拒绝，不能静默吞。
+    const batchEditFile = path.join(parent, 'state-edit.json');
+    await fs.writeFile(
+      batchEditFile,
+      JSON.stringify({
+        topicId,
+        ops: [{ op: 'edit', target: { id: nodeId, revision: 2 }, patch: { title: '批量', state: 'agreed' } }],
+      }),
+      'utf8',
+    );
+    const batchEdit = await cli(['batch', '--input', batchEditFile, '--workspace', root], context);
+    expect(batchEdit.exitCode).toBe(2);
+    const batchEditError = jsonOf<{ error: { message: string; details?: Record<string, unknown> } }>(batchEdit.stderr).error;
+    expect(batchEditError.message).toContain('未知字段');
+    expect(batchEditError.message).toContain('state');
+
+    const batchCreateFile = path.join(parent, 'state-create.json');
+    await fs.writeFile(
+      batchCreateFile,
+      JSON.stringify({
+        topicId,
+        ops: [{
+          op: 'create', as: '新卡', from: { id: nodeId, revision: 2 }, flow: 'branch', description: '旁支',
+          node: { title: '卡', body: '正文', state: 'agreed' },
+        }],
+      }),
+      'utf8',
+    );
+    const batchCreate = await cli(['batch', '--input', batchCreateFile, '--workspace', root], context);
+    expect(batchCreate.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(batchCreate.stderr).error.message).toContain('state');
+
+    // 无 state 的 batch 仍成功。
+    const batchOkFile = path.join(parent, 'state-ok.json');
+    await fs.writeFile(
+      batchOkFile,
+      JSON.stringify({ topicId, ops: [{ op: 'edit', target: { id: nodeId, revision: 2 }, patch: { title: '批量无状态' } }] }),
+      'utf8',
+    );
+    const batchOk = writePayloadOf(await cli(['batch', '--input', batchOkFile, '--workspace', root], context));
+    expect(batchOk['state']).toBe('committed');
+  });
+
   it('错误映射：过期 revision 412→4、422→6、服务不可达结果未知→8', async () => {
     const { parent, root, workspaceId } = await initWorkspace();
     const service = await startMockService({ root, workspaceId });
@@ -685,8 +790,9 @@ describe('Interface 4 CLI', () => {
     expect(stale.exitCode).toBe(4);
     expect(jsonOf<{ error: { code: string } }>(stale.stderr).error.code).toBe('VERSION_CONFLICT');
 
-    const badState = await cli(['edit', '--node', nodeId, '--state', 'bogus', '--workspace', root], context);
-    expect(badState.exitCode).toBe(2);
+    const legacyState = await cli(['edit', '--node', nodeId, '--state', 'bogus', '--workspace', root], context);
+    expect(legacyState.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(legacyState.stderr).error.message).toContain('--state');
 
     // 422：非 root 节点改接到自己（自连）→ 结构校验失败。
     const rootNode = (await readOf(['--node', nodeId, '--workspace', root], context)).payload.items[0]?.node as unknown as { revision: number };

@@ -19,7 +19,6 @@ function node(
     number: id,
     from,
     flow,
-    state: 'agreed',
     important: false,
     revision: 1,
     ...(flow === 'branch' ? { order: order ?? 10 } : {}),

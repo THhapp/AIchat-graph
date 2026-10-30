@@ -77,26 +77,22 @@
   padding: 12px;
   background: var(--card-bg);
   border: 1px solid var(--card-border);
-  border-left: 3px solid var(--state-reference-fg);
+  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius-card);
   box-shadow: var(--card-shadow-rest);
   color: var(--text);
   overflow: hidden;
   transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
 }
-/* Only the neutral sides change on hover; the 3px state edge keeps saying
-   agreed / proposed / reference without being repainted. */
+/* Only the neutral sides change on hover; the 3px left edge stays neutral. */
 .topic-card:hover {
   border-top-color: var(--border-strong);
   border-right-color: var(--border-strong);
   border-bottom-color: var(--border-strong);
   box-shadow: var(--card-shadow-hover);
 }
-.topic-card[data-state='agreed'] { border-left-color: var(--state-agreed-fg); }
-.topic-card[data-state='proposed'] { border-left-color: var(--state-proposed-fg); }
-.topic-card[data-flow='branch'][data-state='agreed'] { border-left-color: var(--state-branch-fg); }
 /* Active is deliberately quieter than selected: a faint accent border and an
-   accent number, while the chip still says 当前. Selected owns the bold ring. */
+   accent number, while the marker still says 当前. Selected owns the bold ring. */
 .topic-card[data-active='true'] {
   border-top-color: color-mix(in srgb, var(--accent) 38%, var(--card-border));
   border-right-color: color-mix(in srgb, var(--accent) 38%, var(--card-border));
@@ -121,9 +117,9 @@
   letter-spacing: 0.06em;
   font-variant-numeric: tabular-nums;
 }
-/* Keep the chip a light reading cue inside the 24px head. Scoped to the card:
-   the same display component is also used at full size in the detail panel. */
-.topic-card .state-chip {
+/* Keep the current marker a light reading cue inside the 24px head. Scoped to
+   the card: the same display component is also used in the detail panel. */
+.topic-card .current-marker {
   padding: 0.08em 0.48em;
   line-height: 1.45;
   letter-spacing: 0.02em;

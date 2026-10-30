@@ -43,7 +43,7 @@ export function buildContinuationPrompt(context: ContinuationContext): string {
     lines.push(
       '节点：' + node.number + ' ' + node.title +
         ' · nodeId=' + node.id + ' · revision=' + String(node.revision) +
-        ' · state=' + node.state + ' · flow=' + node.flow +
+        ' · flow=' + node.flow +
         (node.from !== null ? ' · from=' + node.from : '') +
         ((node.description ?? '').trim() !== '' ? ' · 入边说明=' + node.description : ''),
     );

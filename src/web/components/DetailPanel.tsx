@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { GraphNode, GraphResponse, GraphTopic, NodeDetailResponse, TopicDetailResponse } from '../../next/protocol.js';
 import { MarkdownBody } from './MarkdownBody.js';
-import { StateChip, flowLabel } from './display.js';
+import { CurrentMarker, flowLabel } from './display.js';
 
 export type DetailTab = 'node' | 'topic';
 
@@ -138,7 +138,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
             <article className="detail__article" aria-labelledby="detail-node-title">
               <div className="detail__meta">
                 <span className="detail__number">{node.number}</span>
-                <StateChip node={node} active={node.id === activeNodeId} />
+                {node.id === activeNodeId ? <CurrentMarker /> : null}
                 {node.id === selectedNodeId ? <span className="detail__flag">已选中</span> : null}
                 <span className="detail__flag">{flowLabel(node)}</span>
                 {important ? <span className="detail__flag detail__flag--important">重要</span> : null}
@@ -274,7 +274,7 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                           <p className="topic-reader__desc">{(item.description ?? '').trim()}</p>
                         ) : null}
                       </div>
-                      <StateChip node={item} active={item.id === activeNodeId} />
+                      {item.id === activeNodeId ? <CurrentMarker /> : null}
                     </div>
                     <MarkdownBody
                       source={item.body}
@@ -290,14 +290,13 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
               <section className="boundary" aria-label="其他主题的边界节点">
                 <h3 className="boundary__title">其他主题的来历（仅元数据）</h3>
                 <p className="boundary__hint">
-                  这些卡片属于别的主题，只保留编号、标题和状态用于说明来路；这里没有它们的正文。
+                  这些卡片属于别的主题，只保留编号、标题和主题用于说明来路；这里没有它们的正文。
                 </p>
                 <ul className="boundary__list">
                   {boundaryNodes.map((item) => (
                     <li key={item.id} className="boundary__item">
                       <span className="boundary__number">{item.number}</span>
                       <span className="boundary__label">{item.title}</span>
-                      <StateChip node={item} />
                       <span className="boundary__topic">{item.topicId}</span>
                     </li>
                   ))}

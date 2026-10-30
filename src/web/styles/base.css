@@ -202,8 +202,8 @@ code, pre, kbd { font-family: var(--font-mono); }
 .banner__text { flex: 1; }
 .banner strong { font-weight: 650; }
 
-/* state chip */
-.state-chip {
+/* current-discussion marker: identifies activeNode only, no classification */
+.current-marker {
   display: inline-flex;
   align-items: center;
   gap: 0.3em;
@@ -215,13 +215,10 @@ code, pre, kbd { font-family: var(--font-mono); }
   letter-spacing: 0.02em;
   line-height: 1.6;
   white-space: nowrap;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
 }
-.state-chip::before { content: ''; width: 0.45em; height: 0.45em; border-radius: 50%; background: currentColor; opacity: 0.85; }
-.state-chip[data-state='agreed'] { color: var(--state-agreed-fg); background: var(--state-agreed-bg); }
-.state-chip[data-state='branch'] { color: var(--state-branch-fg); background: var(--state-branch-bg); }
-.state-chip[data-state='proposed'] { color: var(--state-proposed-fg); background: var(--state-proposed-bg); }
-.state-chip[data-state='reference'] { color: var(--state-reference-fg); background: var(--state-reference-bg); }
-.state-chip[data-active='true'] { color: var(--accent-strong); background: var(--accent-soft); }
+.current-marker::before { content: ''; width: 0.45em; height: 0.45em; border-radius: 50%; background: currentColor; opacity: 0.85; }
 
 /* empty / loading / error */
 .state-block {

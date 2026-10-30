@@ -38,7 +38,6 @@ function node(
     number,
     from,
     flow,
-    state: 'agreed',
     important: false,
     revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, order: 10 } : {}),
@@ -239,6 +238,19 @@ describe('frozen offline document', () => {
     expect(response.nodes[0]?.revision).toBe(1);
   });
 
+  it('still reads an old export whose nodes carry the retired state field', () => {
+    const doc = offlineDocument();
+    const legacyRaw = {
+      ...doc,
+      nodes: doc.nodes.map((item) => ({ ...item, state: 'agreed' })),
+    } as unknown;
+    const parsed = parseOfflineDocument(legacyRaw);
+    const response = toGraphResponse(parsed);
+    expect(response.nodes).toHaveLength(1);
+    expect(response.nodes[0]).not.toHaveProperty('state');
+    expect(response.nodes[0]?.id).toBe('n01');
+  });
+
   it('rejects a document that lost the frozen identity fields', () => {
     expect(() => parseOfflineDocument({ format: 1, topic: { id: 't1' }, nodes: [] }))
       .toThrow('导出数据缺少主题信息');
@@ -264,5 +276,9 @@ describe('continuation prompt identity', () => {
     expect(text).not.toContain('topics/');
     expect(text).not.toContain('topic.md');
     expect(text).not.toContain('源文件');
+    // Node classification was removed from the product; the prompt has no state.
+    expect(text).not.toContain('state=');
+    expect(text).not.toContain('待确认');
+    expect(text).not.toContain('已确认');
   });
 });

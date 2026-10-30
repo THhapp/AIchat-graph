@@ -22,7 +22,6 @@ function node(
     number,
     from,
     flow,
-    state: 'agreed',
     important: false,
     revision: 1,
     ...(flow === 'branch' ? { side: 'right' as const, ...(order !== undefined ? { order } : {}) } : {}),

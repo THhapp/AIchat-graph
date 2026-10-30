@@ -65,7 +65,6 @@ function offlineGraphNode(node: OfflineTopicDocument['nodes'][number]): GraphNod
     number: node.number,
     from: node.from,
     flow: node.flow,
-    state: node.state,
     ...(node.side !== undefined ? { side: node.side } : {}),
     ...(node.order !== undefined ? { order: node.order } : {}),
     important,

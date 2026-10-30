@@ -16,14 +16,13 @@ import type {
   NodeCreate,
   NodeFlow,
   NodePatch,
-  NodeState,
   NodeSelector,
   ExistingSelector,
   ReadViewKind,
   Diagnostic,
 } from './protocol.js';
 
-export type { NodeState, NodeFlow, BranchSide };
+export type { NodeFlow, BranchSide };
 
 export interface NodeRecord {
   id: string;
@@ -32,7 +31,6 @@ export interface NodeRecord {
   body: string;
   /** null means no explicit summary; readers derive one from body. */
   summary: string | null;
-  state: NodeState;
   from: string | null;
   flow: NodeFlow;
   description: string | null;
@@ -116,7 +114,6 @@ export function publicNode(node: NodeView): GraphNode {
     number: node.number,
     from: node.from,
     flow: node.flow,
-    state: node.state,
     ...(node.side !== null ? { side: node.side } : {}),
     ...(node.order !== null ? { order: node.order } : {}),
     important: node.important,
@@ -338,7 +335,7 @@ export function applyBodyPatch(body: string, patch: NodePatch): { body: string; 
   return { body, changed: false };
 }
 
-const CONTENT_FIELDS = ['title', 'body', 'summary', 'state', 'from', 'flow', 'description', 'side', 'order'] as const;
+const CONTENT_FIELDS = ['title', 'body', 'summary', 'from', 'flow', 'description', 'side', 'order'] as const;
 
 export function contentChanged(before: NodeRecord, after: NodeRecord): boolean {
   for (const field of CONTENT_FIELDS) {
@@ -367,7 +364,6 @@ export function applyNodePatch(
   }
   const hasAny =
     patch.title !== undefined ||
-    patch.state !== undefined ||
     patch.summary !== undefined ||
     patch.body !== undefined ||
     patch.append !== undefined ||
@@ -383,7 +379,6 @@ export function applyNodePatch(
     }
     next.title = patch.title.trim();
   }
-  if (patch.state !== undefined) next.state = patch.state;
   if (patch.summary !== undefined) {
     if (patch.summary === null) next.summary = null;
     else if (patch.summary.trim().length === 0 || /[\r\n]/.test(patch.summary)) {
@@ -455,7 +450,6 @@ export function normalizeCreate(
     title: input.title.trim(),
     body: input.body,
     summary: input.summary === undefined ? null : input.summary.trim(),
-    state: input.state ?? 'proposed',
     from: null,
     flow: 'root',
     description: null,

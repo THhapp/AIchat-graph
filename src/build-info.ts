@@ -12,9 +12,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProgramInfo } from "./shared/protocol.js";
+import { INTERFACE_VERSION } from "./next/protocol.js";
 
-/** 与 CLI／service 对外的接口版本；缺失或不匹配时普通读写报 INTERFACE_MISMATCH。 */
-export const INTERFACE_VERSION = 4;
+/** 与 CLI／service 对外的接口版本；与 next/protocol 的运行时契约共用同一常量。 */
+export { INTERFACE_VERSION };
 
 /** 对外程序名，也写入 ProgramInfo.program。 */
 export const PROGRAM_NAME = "aichat-graph";
