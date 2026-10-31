@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { main, type RunProcess, type RunResult } from '../../src/next/cli.js';
 import type { SpawnLike } from '../../src/next/client.js';
 import type { InstallationPaths } from '../../src/next/installation.js';
@@ -313,6 +314,78 @@ async function diffOf(args: readonly string[], context: Parameters<typeof main>[
   const result = await cli(['diff', ...args], context);
   expect(result.exitCode, result.stderr).toBe(0);
   return { payload: jsonOf<Record<string, unknown>>(result.stdout), stdout: result.stdout };
+}
+
+interface DiffPageView {
+  readonly payload: Record<string, unknown>;
+  readonly page: { hasMore: boolean; next?: string };
+  readonly budget: { unit: string; limit: number; used: number; truncated: boolean };
+}
+
+/** 校验整次 JSON 预算契约：used == stdout 长度、≤ limit、truncated == page.hasMore。 */
+function diffPageOf(result: RunResult, limit: number): DiffPageView {
+  expect(result.exitCode, result.stderr).toBe(0);
+  const payload = jsonOf<Record<string, unknown>>(result.stdout);
+  const page = payload['page'] as { hasMore: boolean; next?: string } | undefined;
+  const budget = payload['budget'] as
+    | { unit: string; limit: number; used: number; truncated: boolean }
+    | undefined;
+  expect(page).toBeTruthy();
+  expect(budget).toBeTruthy();
+  expect(budget?.unit).toBe('utf16');
+  expect(budget?.limit).toBe(limit);
+  expect(budget?.used).toBe(result.stdout.length);
+  expect(result.stdout.length).toBeLessThanOrEqual(limit);
+  expect(budget?.truncated).toBe(page?.hasMore);
+  return { payload, page: page as { hasMore: boolean; next?: string }, budget: budget as DiffPageView['budget'] };
+}
+
+/** 从当前页出发用 --cursor 续读直到 hasMore=false；只带 --budget/--workspace。 */
+async function collectDiffPages(
+  first: RunResult,
+  context: Parameters<typeof main>[1],
+  limit: number,
+  root: string,
+  collect: (payload: Record<string, unknown>) => void,
+): Promise<{ pages: number; last: DiffPageView }> {
+  let current = diffPageOf(first, limit);
+  collect(current.payload);
+  let pages = 1;
+  while (current.page.hasMore) {
+    const next = current.page.next;
+    expect(typeof next).toBe('string');
+    const result = await cli(
+      ['diff', '--cursor', next as string, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    current = diffPageOf(result, limit);
+    collect(current.payload);
+    pages += 1;
+    expect(pages).toBeLessThan(200);
+  }
+  return { pages, last: current };
+}
+
+/** 先探测最小分页单元与单页全长，取中间预算，保证既不分页过小也不会一页读完。 */
+async function diffPagingLimit(
+  args: readonly string[],
+  context: Parameters<typeof main>[1],
+): Promise<number> {
+  const probe = await cli(['diff', ...args, '--budget', '20'], context);
+  expect(probe.exitCode).toBe(2);
+  const probeError = jsonOf<{ error: { code: string; details?: Record<string, unknown> } }>(
+    probe.stderr,
+  ).error;
+  expect(probeError.code).toBe('BUDGET_TOO_SMALL');
+  const minimum = probeError.details?.['minimum'] as number;
+  expect(typeof minimum).toBe('number');
+  const full = await cli(['diff', ...args, '--budget', '100000'], context);
+  expect(full.exitCode, full.stderr).toBe(0);
+  const fullLength = full.stdout.length;
+  expect(fullLength).toBeGreaterThan(minimum);
+  const limit = Math.max(minimum + 50, Math.floor((minimum + fullLength) / 2));
+  expect(limit).toBeLessThan(fullLength);
+  return limit;
 }
 
 describe('Interface 4 CLI', () => {
@@ -1275,6 +1348,14 @@ describe('Interface 4 CLI', () => {
     expect(summary.nodes[0]?.fields).toContain('title');
     expect(summary.nodes[0]?.body).toBeUndefined();
     expect(summary.nodes[0]?.fieldDiffs).toBeUndefined();
+    expect(latest.payload['page']).toEqual({ hasMore: false });
+    expect(latest.payload['budget']).toMatchObject({
+      unit: 'utf16',
+      limit: 12000,
+      used: latest.stdout.length,
+      truncated: false,
+    });
+    expect(latest.stdout.length).toBeLessThanOrEqual(12000);
 
     // --text 输出简短摘要。
     const textDiff = await cli(['diff', topicId, '--text', '--workspace', root], context);
@@ -1331,6 +1412,13 @@ describe('Interface 4 CLI', () => {
     expect(patchedNode?.body?.addedLines).toBeGreaterThan(0);
     expect(patchedNode?.body?.removedLines).toBeGreaterThan(0);
     expect(typeof patchedNode?.body?.patch).toBe('string');
+    expect(patched.payload['page']).toEqual({ hasMore: false });
+    expect(patched.payload['budget']).toMatchObject({
+      unit: 'utf16',
+      limit: 12000,
+      used: patched.stdout.length,
+      truncated: false,
+    });
 
     // 用法：--patch 必须配 --node；缺少主题。
     const patchOnly = await cli(['diff', topicId, '--patch', '--workspace', root], context);
@@ -1399,40 +1487,110 @@ describe('Interface 4 CLI', () => {
     // 预览默认只输出摘要：不带字段差异与 body patch。
     expect(batch.nodes[0]?.fieldDiffs).toBeUndefined();
     expect(batch.nodes[0]?.body).toBeUndefined();
+    expect(preview.payload['page']).toEqual({ hasMore: false });
+    expect(preview.payload['budget']).toMatchObject({
+      unit: 'utf16',
+      limit: 12000,
+      used: preview.stdout.length,
+      truncated: false,
+    });
     const previewRequest = service.requests.filter((request) => request.url === '/api/agent/changes').pop();
     expect(previewRequest?.body).toContain('"includeDiff":true');
     const after = GraphStore.open(root, { readonly: true });
     expect(after.snapshot().revision).toBe(revisionBefore);
     after.close();
 
+    // 预览可能合法地没有最终变化；仍应返回零项摘要，而不是 CURSOR_INVALID。
+    const noopFile = path.join(parent, 'diff-preview-noop.json');
+    await fs.writeFile(
+      noopFile,
+      JSON.stringify({
+        topicId,
+        ops: [{ op: 'edit', target: { id: nodeId, revision: 1 }, patch: { title: '预览' } }],
+      }),
+      'utf8',
+    );
+    const noopPreview = await diffOf(['--input', noopFile, '--workspace', root], context);
+    expect(noopPreview.payload['source']).toBe('preview');
+    expect(noopPreview.payload['batch']).toMatchObject({
+      counts: { added: 0, modified: 0, deleted: 0 },
+      nodes: [],
+    });
+    expect(noopPreview.payload['page']).toEqual({ hasMore: false });
+    expect(noopPreview.payload['budget']).toMatchObject({ used: noopPreview.stdout.length, truncated: false });
+
     const combo = await cli(['diff', '--input', batchFile, '--patch', '--workspace', root], context);
     expect(combo.exitCode).toBe(2);
     expect(jsonOf<{ error: { message: string } }>(combo.stderr).error.message).toContain('--patch');
   });
 
-  it('diff --budget 只截断 unified patch 并报告 truncated', async () => {
+  it('diff patch 行分页：整次 JSON 预算，每页重复 fieldDiffs 与完整 added/removed', async () => {
     const { parent, root, workspaceId } = await initWorkspace();
     const service = await startMockService({ root, workspaceId });
     cleanup.push(() => service.close());
     await service.writeDescriptor();
     const context = { cwd: parent };
+    const oldBody = Array.from({ length: 80 }, (_value, index) => '旧行 ' + String(index)).join('\n');
+    const newBody = Array.from({ length: 80 }, (_value, index) => '新行 ' + String(index)).join('\n');
     const created = writePayloadOf(
-      await cli(['create-topic', '--title', '预算', '--body', 'A'.repeat(4000), '--workspace', root], context),
+      await cli(['create-topic', '--title', '补丁分页', '--body', oldBody, '--workspace', root], context),
     );
     const topicId = created['topicId'] as string;
     const nodeId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
-    writePayloadOf(await cli(['edit', '--node', nodeId, '--body', 'B'.repeat(4000), '--workspace', root], context));
+    writePayloadOf(await cli(['edit', '--node', nodeId, '--body', newBody, '--workspace', root], context));
 
-    const truncated = await diffOf([topicId, '--node', nodeId, '--patch', '--budget', '50', '--workspace', root], context);
-    const batch = truncated.payload['batch'] as {
-      nodes: Array<{ body?: { patch: string; truncated: boolean } }>;
+    // 先取完整 patch 作为期望值（大预算单页）。
+    const fullRun = await cli(
+      ['diff', topicId, '--node', nodeId, '--patch', '--budget', '100000', '--workspace', root],
+      context,
+    );
+    const full = diffPageOf(fullRun, 100000);
+    expect(full.page.hasMore).toBe(false);
+    const fullNode = (full.payload['batch'] as {
+      nodes: Array<{
+        fieldDiffs: unknown;
+        body: { patch: string; addedLines: number; removedLines: number; truncated: boolean };
+      }>;
+    }).nodes[0] as {
+      fieldDiffs: unknown;
+      body: { patch: string; addedLines: number; removedLines: number; truncated: boolean };
     };
-    const budget = truncated.payload['budget'] as { limit: number; used: number; truncated: boolean };
-    expect(budget.limit).toBe(50);
-    expect(budget.truncated).toBe(true);
-    expect(budget.used).toBeLessThanOrEqual(50);
-    expect(batch.nodes[0]?.body?.truncated).toBe(true);
-    expect(batch.nodes[0]?.body?.patch).toContain('截断');
+    const fullLines = fullNode.body.patch.split('\n');
+    expect(fullLines.length).toBeGreaterThan(3);
+    expect(fullNode.body.addedLines).toBeGreaterThan(0);
+    expect(fullNode.body.removedLines).toBeGreaterThan(0);
+
+    const limit = 1000;
+    const pageNodes: Array<{
+      fieldDiffs: unknown;
+      body: { patch: string; addedLines: number; removedLines: number; truncated: boolean };
+    }> = [];
+    const first = await cli(
+      ['diff', topicId, '--node', nodeId, '--patch', '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    const collected = await collectDiffPages(first, context, limit, root, (payload) => {
+      const batch = payload['batch'] as {
+        nodes: Array<{
+          fieldDiffs: unknown;
+          body: { patch: string; addedLines: number; removedLines: number; truncated: boolean };
+        }>;
+      };
+      pageNodes.push(batch.nodes[0] as (typeof pageNodes)[number]);
+    });
+    expect(collected.pages).toBeGreaterThan(1);
+    expect(pageNodes.length).toBe(collected.pages);
+    for (const [index, entry] of pageNodes.entries()) {
+      expect(entry.fieldDiffs).toEqual(fullNode.fieldDiffs);
+      expect(entry.body.addedLines).toBe(fullNode.body.addedLines);
+      expect(entry.body.removedLines).toBe(fullNode.body.removedLines);
+      if (index < pageNodes.length - 1) expect(entry.body.truncated).toBe(true);
+    }
+    const lastEntry = pageNodes[pageNodes.length - 1] as (typeof pageNodes)[number];
+    expect(lastEntry.body.truncated).toBe(fullNode.body.truncated);
+    expect(pageNodes.flatMap((entry) => entry.body.patch.split('\n'))).toEqual(fullLines);
+    // 最后一页应没有 page.next；完整 budget.used 已由 diffPageOf 校验。
+    expect(collected.last.page.hasMore).toBe(false);
   });
 
   it('batch patch.description 误用给出 patch.incoming.description 与最小片段；diff 帮助无别名', async () => {
@@ -1469,5 +1627,344 @@ describe('Interface 4 CLI', () => {
     for (const alias of ['--compact', '--preview', '--inspect', '--review']) {
       expect(diffHelp.stdout).not.toContain(alias);
     }
+  });
+
+  it('diff summary 多页：按节点分页、整批 counts、cursor 只带预算/workspace', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '摘要分页', '--body', '根', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const rootId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+
+    const createOps = Array.from({ length: 12 }, (_value, index) => ({
+      op: 'create',
+      as: 'b' + String(index),
+      from: { id: rootId, revision: 1 },
+      flow: 'branch',
+      description: '旁支' + String(index),
+      node: { title: '分支' + String(index), body: '正文' + String(index) },
+    }));
+    const createFile = path.join(parent, 'summary-create.json');
+    await fs.writeFile(createFile, JSON.stringify({ topicId, ops: createOps }), 'utf8');
+    const createBatch = writePayloadOf(await cli(['batch', '--input', createFile, '--workspace', root], context));
+    const createdIds = (createBatch['created'] as { nodeIds: string[] }).nodeIds;
+    const revisions = createBatch['nodeRevisions'] as Record<string, number>;
+    expect(createdIds).toHaveLength(12);
+
+    const editOps = createdIds.map((id, index) => ({
+      op: 'edit',
+      target: { id, revision: revisions[id] as number },
+      patch: { title: '改标题' + String(index) },
+    }));
+    const editFile = path.join(parent, 'summary-edit.json');
+    await fs.writeFile(editFile, JSON.stringify({ topicId, ops: editOps }), 'utf8');
+    const editBatch = writePayloadOf(await cli(['batch', '--input', editFile, '--workspace', root], context));
+    const latestRequest = editBatch['requestId'] as string;
+
+    const limit = 900;
+    const first = await cli(['diff', topicId, '--budget', String(limit), '--workspace', root], context);
+    const pages: Array<Record<string, unknown>> = [];
+    const collected = await collectDiffPages(first, context, limit, root, (payload) => {
+      pages.push(payload);
+    });
+    expect(collected.pages).toBeGreaterThan(1);
+    expect(pages).toHaveLength(collected.pages);
+    const collectedIds = new Set<string>();
+    for (const payload of pages) {
+      expect(payload['source']).toBe('database');
+      const batch = payload['batch'] as {
+        requestId: string;
+        counts: { added: number; modified: number; deleted: number };
+        nodes: Array<{ nodeId: string; kind: string }>;
+      };
+      expect(batch.requestId).toBe(latestRequest);
+      expect(batch.counts).toMatchObject({ added: 0, modified: 12, deleted: 0 });
+      expect(batch.nodes.length).toBeGreaterThan(0);
+      for (const node of batch.nodes) {
+        expect(node.kind).toBe('modified');
+        collectedIds.add(node.nodeId);
+      }
+      const page = payload['page'] as { hasMore: boolean };
+      expect((payload['budget'] as { truncated: boolean }).truncated).toBe(page.hasMore);
+    }
+    expect(collectedIds.size).toBe(12);
+    expect(collected.last.page.hasMore).toBe(false);
+
+    // cursor 只能与 --budget/--json/--text/--workspace 同用。
+    const firstPage = diffPageOf(first, limit);
+    const next = firstPage.page.next as string;
+    const withNode = await cli(
+      ['diff', '--cursor', next, '--node', createdIds[0] as string, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    expect(withNode.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(withNode.stderr).error.message).toContain('--cursor');
+    const withTopic = await cli(
+      ['diff', topicId, '--cursor', next, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    expect(withTopic.exitCode).toBe(2);
+    const withRequest = await cli(
+      ['diff', '--cursor', next, '--request', latestRequest, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    expect(withRequest.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(withRequest.stderr).error.message).toContain('--cursor');
+    const badToken = await cli(['diff', '--cursor', 'not-a-real-token', '--workspace', root], context);
+    expect(badToken.exitCode).toBe(2);
+    expect(jsonOf<{ error: { code: string } }>(badToken.stderr).error.code).toBe('CURSOR_INVALID');
+  });
+
+  it('最新 cursor 旧批次：新批次后报 BATCH_SUPERSEDED，不跨批次续读', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '旧cursor', '--body', '根', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const rootId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const createOps = Array.from({ length: 8 }, (_value, index) => ({
+      op: 'create',
+      as: 's' + String(index),
+      from: { id: rootId, revision: 1 },
+      flow: 'branch',
+      description: '分支' + String(index),
+      node: { title: '旧分支' + String(index), body: '正文' + String(index) },
+    }));
+    const createFile = path.join(parent, 'stale-create.json');
+    await fs.writeFile(createFile, JSON.stringify({ topicId, ops: createOps }), 'utf8');
+    const firstBatch = writePayloadOf(await cli(['batch', '--input', createFile, '--workspace', root], context));
+    const createdIds = (firstBatch['created'] as { nodeIds: string[] }).nodeIds;
+    const revisions = firstBatch['nodeRevisions'] as Record<string, number>;
+
+    const limit = await diffPagingLimit([topicId, '--workspace', root], context);
+    const first = await cli(['diff', topicId, '--budget', String(limit), '--workspace', root], context);
+    const firstPage = diffPageOf(first, limit);
+    expect(firstPage.page.hasMore).toBe(true);
+    const next = firstPage.page.next as string;
+
+    const editOps = createdIds.map((id) => ({
+      op: 'edit',
+      target: { id, revision: revisions[id] as number },
+      patch: { title: '新标题' },
+    }));
+    const editFile = path.join(parent, 'stale-edit.json');
+    await fs.writeFile(editFile, JSON.stringify({ topicId, ops: editOps }), 'utf8');
+    const newBatch = writePayloadOf(await cli(['batch', '--input', editFile, '--workspace', root], context));
+    const newLatest = newBatch['requestId'] as string;
+
+    const stale = await cli(
+      ['diff', '--cursor', next, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    expect(stale.exitCode).toBe(5);
+    const error = jsonOf<{ error: { code: string; details?: Record<string, unknown> } }>(stale.stderr).error;
+    expect(error.code).toBe('BATCH_SUPERSEDED');
+    expect(error.details?.['latest']).toBe(newLatest);
+  });
+
+  it('diff 预览 --node --patch：具体 fieldDiffs 与 body patch，且不落库', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '预览补丁', '--body', '原文。', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const nodeId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const reader = GraphStore.open(root, { readonly: true });
+    const revisionBefore = reader.snapshot().revision;
+    reader.close();
+
+    const batchFile = path.join(parent, 'preview-patch.json');
+    await fs.writeFile(
+      batchFile,
+      JSON.stringify({
+        topicId,
+        ops: [{
+          op: 'edit',
+          target: { id: nodeId, revision: 1 },
+          patch: { title: '预览标题', body: '预览正文。' },
+        }],
+      }),
+      'utf8',
+    );
+    const result = await cli(
+      ['diff', '--input', batchFile, '--node', nodeId, '--patch', '--workspace', root],
+      context,
+    );
+    const view = diffPageOf(result, 12000);
+    expect(view.payload['source']).toBe('preview');
+    expect(typeof view.payload['requestId']).toBe('string');
+    const batch = view.payload['batch'] as {
+      counts: { modified: number };
+      nodes: Array<{
+        nodeId: string;
+        fieldDiffs: Array<{ field: string; before: unknown; after: unknown }>;
+        body?: { patch: string };
+      }>;
+    };
+    expect(batch.counts.modified).toBe(1);
+    expect(batch.nodes).toHaveLength(1);
+    expect(batch.nodes[0]).toMatchObject({ nodeId });
+    expect(batch.nodes[0]?.fieldDiffs.some((diff) => diff.field === 'title')).toBe(true);
+    expect(typeof batch.nodes[0]?.body?.patch).toBe('string');
+    const after = GraphStore.open(root, { readonly: true });
+    expect(after.snapshot().revision).toBe(revisionBefore);
+    after.close();
+  });
+
+  it('diff 预览 cursor：同 requestId 重放不落库；目标版本变化按 412 报错', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '预览cursor', '--body', '根', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const rootId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const createFile = path.join(parent, 'preview-cursor-create.json');
+    await fs.writeFile(
+      createFile,
+      JSON.stringify({
+        topicId,
+        ops: Array.from({ length: 16 }, (_value, index) => ({
+          op: 'create',
+          as: 'p' + String(index),
+          from: { id: rootId, revision: 1 },
+          flow: 'branch',
+          description: '预览' + String(index),
+          node: { title: '预览节点' + String(index), body: '正文' + String(index) },
+        })),
+      }),
+      'utf8',
+    );
+    const createdBatch = writePayloadOf(await cli(['batch', '--input', createFile, '--workspace', root], context));
+    const targetIds = (createdBatch['created'] as { nodeIds: string[] }).nodeIds;
+    const revisions = createdBatch['nodeRevisions'] as Record<string, number>;
+    const batchFile = path.join(parent, 'preview-cursor.json');
+    await fs.writeFile(
+      batchFile,
+      JSON.stringify({
+        topicId,
+        ops: targetIds.map((id, index) => ({
+          op: 'edit',
+          target: { id, revision: revisions[id] as number },
+          patch: { title: '预览改' + String(index) },
+        })),
+      }),
+      'utf8',
+    );
+    const reader = GraphStore.open(root, { readonly: true });
+    const revisionBefore = reader.snapshot().revision;
+    reader.close();
+
+    const limit = await diffPagingLimit(['--input', batchFile, '--workspace', root], context);
+    const first = await cli(
+      ['diff', '--input', batchFile, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    const firstPage = diffPageOf(first, limit);
+    expect(firstPage.page.hasMore).toBe(true);
+    const previewRequestId = firstPage.payload['requestId'] as string;
+    const next = firstPage.page.next as string;
+
+    const resume = await cli(
+      ['diff', '--cursor', next, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    const resumeView = diffPageOf(resume, limit);
+    expect(resumeView.payload['source']).toBe('preview');
+    expect(resumeView.payload['requestId']).toBe(previewRequestId);
+    const readerStill = GraphStore.open(root, { readonly: true });
+    expect(readerStill.snapshot().revision).toBe(revisionBefore);
+    readerStill.close();
+
+    // 重放全部预览页也不写库。
+    const collected = await collectDiffPages(first, context, limit, root, () => undefined);
+    expect(collected.pages).toBeGreaterThan(1);
+    const readerAfterPages = GraphStore.open(root, { readonly: true });
+    expect(readerAfterPages.snapshot().revision).toBe(revisionBefore);
+    readerAfterPages.close();
+
+    // 目标版本被真实写入推进后，旧预览 cursor 用同 requestId 重放应得到 412（退出码 4）。
+    writePayloadOf(
+      await cli(['edit', '--node', targetIds[0] as string, '--title', '真实修改', '--workspace', root], context),
+    );
+    const changed = await cli(
+      ['diff', '--cursor', next, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    expect(changed.exitCode).toBe(4);
+    expect(jsonOf<{ error: { code: string } }>(changed.stderr).error.code).toBe('VERSION_CONFLICT');
+  });
+
+  it('diff 预算过小、无批次与 cursor 非法组合', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '边界', '--body', '根', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const rootId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+
+    const tiny = await cli(['diff', topicId, '--budget', '20', '--workspace', root], context);
+    expect(tiny.exitCode).toBe(2);
+    const tinyError = jsonOf<{ error: { code: string; details?: Record<string, unknown> } }>(tiny.stderr).error;
+    expect(tinyError.code).toBe('BUDGET_TOO_SMALL');
+    expect(tinyError.details?.['unit']).toBe('utf16');
+
+    const createFile = path.join(parent, 'edge-create.json');
+    await fs.writeFile(
+      createFile,
+      JSON.stringify({
+        topicId,
+        ops: Array.from({ length: 6 }, (_value, index) => ({
+          op: 'create',
+          as: 'e' + String(index),
+          from: { id: rootId, revision: 1 },
+          flow: 'branch',
+          description: '边界' + String(index),
+          node: { title: '边界' + String(index), body: '正文' },
+        })),
+      }),
+      'utf8',
+    );
+    writePayloadOf(await cli(['batch', '--input', createFile, '--workspace', root], context));
+
+    const limit = await diffPagingLimit([topicId, '--workspace', root], context);
+    const first = await cli(['diff', topicId, '--budget', String(limit), '--workspace', root], context);
+    const firstPage = diffPageOf(first, limit);
+    expect(firstPage.page.hasMore).toBe(true);
+    const next = firstPage.page.next as string;
+    const withInput = await cli(
+      ['diff', '--input', createFile, '--cursor', next, '--budget', String(limit), '--workspace', root],
+      context,
+    );
+    expect(withInput.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(withInput.stderr).error.message).toContain('--cursor');
+
+    // 模拟旧库/无批次：删除 topic_changes 后应明确 CHANGE_NOT_FOUND，不伪造空批次。
+    const db = new DatabaseSync(path.join(root, 'graph.sqlite'));
+    db.exec('DELETE FROM topic_changes');
+    db.close();
+    const noBatch = await cli(['diff', topicId, '--workspace', root], context);
+    expect(noBatch.exitCode).toBe(11);
+    expect(jsonOf<{ error: { code: string } }>(noBatch.stderr).error.code).toBe('CHANGE_NOT_FOUND');
   });
 });

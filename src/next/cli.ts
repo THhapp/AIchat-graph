@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { loadProgramInfo } from '../build-info.js';
 import { searchDocuments } from '../index/search.js';
 import type { SearchDocument } from '../index/types.js';
@@ -210,8 +211,8 @@ const BODY_OPTIONS: readonly OptionSpec[] = [
 ];
 const NODE_REQUIRED = stringOption('node', '节点 ID', { valueName: '<id>', required: true, repeatable: true });
 const IF_REVISION = integerOptionSpec('if-revision', '仅当节点 revision 等于该值时写入', { min: 0 });
-/** diff --patch 的 unified patch 文本预算（字符）；--budget 只截断 patch，不截断字段元数据。 */
-const DIFF_DEFAULT_PATCH_BUDGET = 12_000;
+/** diff 的整次 JSON 响应预算（UTF-16，含末尾换行）：JSON.stringify(payload).length + 1。 */
+const DIFF_DEFAULT_RESPONSE_BUDGET = 12_000;
 
 const COMMANDS: readonly CommandSpec[] = [
   /* -------------------------------- read -------------------------------- */
@@ -302,10 +303,10 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: 'diff',
     group: 'read',
-    summary: '查看主题最新内容变化批次；--node --patch 看单节点字段差异与 unified 正文 patch。',
+    summary: '查看变化批次（最新批次或 batch 预览）；--node --patch 看字段差异与 unified 正文 patch；按整次 JSON 预算分页。',
     usage: [
-      'aichat diff <topicId|key> [--request <id>] [--node <id> --patch] [--budget <n>]',
-      'aichat diff (--input <batch.json>|--input-stdin)',
+      'aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>] [--cursor <token>]',
+      'aichat diff (--input <batch.json>|--input-stdin) [--node <id> [--patch]] [--budget <n>] [--cursor <token>]',
     ],
     positionals: [{ name: '<topicId|key>', required: false, description: '最新批次所在主题；--input 预览时省略' }],
     options: [
@@ -313,27 +314,32 @@ const COMMANDS: readonly CommandSpec[] = [
       stringOption('request', '指定要查看的批次 requestId；必须仍是当前最新批次', { valueName: '<id>' }),
       stringOption('node', '只看该节点在本批次中的变化', { valueName: '<id>' }),
       flagOption('patch', '输出字段差异与 unified 正文 patch；必须与 --node 同用'),
-      integerOptionSpec('budget', 'patch 文本预算（字符），默认 12000；只截断 patch 并报告 truncated', {
+      integerOptionSpec('budget', '整次 JSON 响应预算（UTF-16，JSON.stringify(payload).length+1），默认 12000；summary 与 patch 都分页', {
         min: 1,
         max: MAX_READ_BUDGET,
-        defaultValue: DIFF_DEFAULT_PATCH_BUDGET,
+        defaultValue: DIFF_DEFAULT_RESPONSE_BUDGET,
       }),
+      stringOption('cursor', '续读标记 page.next；只能与 --budget／--json／--text／--workspace 同用', { valueName: '<token>' }),
       pathOption('input', '用 batch JSON 做 dry-run 预览（不落库）', { valueName: '<batch.json>' }),
       flagOption('input-stdin', '从 stdin 读 batch JSON 做 dry-run 预览（不落库）'),
     ],
     constraints: [
+      '--budget 是整次 JSON 响应预算：JSON.stringify(payload).length+1 必须 ≤ limit，budget.used 等于该长度；page.hasMore 时用 page.next 作为 --cursor 续读。',
+      '--cursor 只能与 --budget／--json／--text／--workspace 同用；token 内含 source/form/requestId/nodeId 与节点或 patch 行偏移。latest 续页校验 requestId 仍最新（旧批次 BATCH_SUPERSEDED）；preview 续页用同 requestId 重新 dry-run，不落库。',
       '最新批次直接读 SQLite（只读，不需要服务）；旧 schema 没有变化历史时报 CHANGE_HISTORY_UNAVAILABLE，不伪造空批次。',
-      '--input／--input-stdin 走与 batch 相同的解析，只输出 dry-run 预览摘要（可带 includeDiff 的完整预览），不落库。',
-      '--patch 必须与 --node 同用，且只用于最新批次；--input 预览不接受 --patch／--node／--request。',
+      '--input／--input-stdin 走与 batch 相同的解析；预览支持 --node <id> [--patch] 查看具体差异，不接受 --request／主题位置参数。',
+      '--patch 必须与 --node 同用（最新与预览相同）；summary 按节点分页，patch 按 unified patch 行分页（每页重复 fieldDiffs 与完整 added/removed 统计）。',
+      '预算不足以容纳最小分页单元时报 BUDGET_TOO_SMALL，不输出半个 JSON。',
       '--request 必须是当前最新批次；旧批次报 BATCH_SUPERSEDED（带最新 requestId），未知批次报 BATCH_UNAVAILABLE，不静默换批次。',
       'batch 的入边说明写在 patch.incoming.description，patch 顶层没有 description。',
     ],
     examples: [
       'aichat diff <topicId>',
-      'aichat diff <topicId> --node <id> --patch',
-      'aichat diff --input batch.json',
+      'aichat diff <topicId> --node <id> --patch --budget 800',
+      'aichat diff --input batch.json --node <id> --patch',
+      'aichat diff --cursor <page.next>',
     ],
-    resultFields: ['ok', 'command', 'source', 'workspaceId', 'topicId', 'batch', 'requestId?', 'budget?', 'diagnostics'],
+    resultFields: ['ok', 'command', 'source', 'workspaceId', 'topicId', 'batch', 'requestId?', 'page', 'budget', 'diagnostics'],
   },
 
   /* -------------------------------- write ------------------------------- */
@@ -941,9 +947,16 @@ function humanLines(command: string, payload: Record<string, unknown>): string[]
         for (const patchLine of String(body['patch']).split('\n')) lines.push('      ' + patchLine);
       }
     }
+    const page = payload['page'] as Record<string, unknown> | undefined;
+    if (page !== undefined && page['hasMore'] === true) {
+      lines.push('更多：--cursor ' + String(page['next'] ?? ''));
+    }
     const budget = payload['budget'] as Record<string, unknown> | undefined;
-    if (budget !== undefined && budget['truncated'] === true) {
-      lines.push('budget truncated at ' + String(budget['limit']));
+    if (budget !== undefined) {
+      lines.push(
+        'budget ' + String(budget['used']) + '/' + String(budget['limit']) +
+          (budget['truncated'] === true ? ' (truncated)' : ''),
+      );
     }
     return lines;
   }
@@ -1695,43 +1708,334 @@ async function runSearch(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRunt
  * diff：最新批次直接读 SQLite；--input 只做 dry-run includeDiff 预览
  * ------------------------------------------------------------------ */
 
-interface DiffBudgetInfo {
-  readonly limit: number;
-  readonly used: number;
-  readonly truncated: boolean;
+type DiffSource = 'database' | 'preview';
+type DiffForm = 'summary' | 'patch';
+
+/** 续读 token（v2 用 deflateRaw 压缩 JSON）：定位 source/form、requestId、节点与行偏移。 */
+interface DiffCursorV1 {
+  readonly v: 2;
+  readonly source: DiffSource;
+  readonly form: DiffForm;
+  readonly topicId: string;
+  readonly requestId: string;
+  readonly nodeId?: string;
+  readonly nodeIndex: number;
+  readonly lineOffset: number;
+  /** preview 续页需要用同一 requestId 重放同一 action。 */
+  readonly action?: AgentChangeAction;
 }
 
-/** 只截断 unified patch 文本；字段差异与节点摘要不占预算。 */
-function applyDiffBudget(
-  detail: ChangeBatchDetail,
+interface DiffBatchMeta {
+  readonly requestId: string;
+  readonly topicId: string;
+  readonly at: string;
+  readonly counts: ChangeBatchSummary['counts'];
+}
+
+interface DiffPageBase {
+  readonly source: DiffSource;
+  readonly workspaceId: string;
+  readonly topicId: string;
+  /** 仅 preview：dry-run 的 requestId（顶层输出）。 */
+  readonly requestId?: string | undefined;
+  readonly diagnostics: readonly unknown[];
+}
+
+interface DiffPageContext {
+  readonly base: DiffPageBase;
+  /** cursor token 里的 source 与 requestId（latest 为最新批次 requestId）。 */
+  readonly cursorSource: DiffSource;
+  readonly cursorRequestId: string;
+  readonly nodeId?: string;
+  readonly action?: AgentChangeAction;
+}
+
+function diffBudgetTooSmall(limit: number, minimum: number): CliFailure {
+  return new CliFailure(
+    'BUDGET_TOO_SMALL',
+    '--budget ' + String(limit) + ' 不足以容纳最小分页单元（至少需要 ' + String(minimum) +
+      ' 个 UTF-16 单元）；请增大 --budget，不会输出半个 JSON。',
+    EXIT_CODES.usage,
+    { details: { limit, minimum, unit: 'utf16' } },
+  );
+}
+
+function diffCursorInvalid(message: string, details: Record<string, unknown> = {}): CliFailure {
+  return new CliFailure('CURSOR_INVALID', message, EXIT_CODES.usage, { details });
+}
+
+function encodeDiffCursor(token: DiffCursorV1): string {
+  // v2：压缩 JSON（preview token 内嵌 action，未压缩会挤占整页预算）。
+  const json = JSON.stringify({ ...token, v: 2 });
+  return deflateRawSync(Buffer.from(json, 'utf8')).toString('base64url');
+}
+
+function decodeDiffCursor(raw: string): DiffCursorV1 {
+  let text: string;
+  try {
+    text = inflateRawSync(Buffer.from(raw, 'base64url')).toString('utf8');
+  } catch {
+    // 兼容未压缩的旧 token（v1）。
+    try {
+      text = Buffer.from(raw, 'base64url').toString('utf8');
+    } catch {
+      throw diffCursorInvalid('--cursor 不是合法续读标记', { field: 'cursor' });
+    }
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw diffCursorInvalid('--cursor 不是合法续读标记', { field: 'cursor' });
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw diffCursorInvalid('--cursor 不是合法续读标记', { field: 'cursor' });
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record['v'] !== 1 && record['v'] !== 2) {
+    throw diffCursorInvalid('--cursor 版本不支持', { field: 'cursor', version: record['v'] });
+  }
+  const source = record['source'];
+  if (source !== 'database' && source !== 'preview') {
+    throw diffCursorInvalid('--cursor 缺少合法 source', { field: 'cursor.source' });
+  }
+  const form = record['form'];
+  if (form !== 'summary' && form !== 'patch') {
+    throw diffCursorInvalid('--cursor 缺少合法 form', { field: 'cursor.form' });
+  }
+  const topicId = record['topicId'];
+  if (typeof topicId !== 'string' || topicId.length === 0) {
+    throw diffCursorInvalid('--cursor 缺少合法 topicId', { field: 'cursor.topicId' });
+  }
+  const requestId = record['requestId'];
+  if (typeof requestId !== 'string' || requestId.length === 0) {
+    throw diffCursorInvalid('--cursor 缺少合法 requestId', { field: 'cursor.requestId' });
+  }
+  const nodeIndex = record['nodeIndex'];
+  if (typeof nodeIndex !== 'number' || !Number.isInteger(nodeIndex) || nodeIndex < 0) {
+    throw diffCursorInvalid('--cursor 缺少合法 nodeIndex', { field: 'cursor.nodeIndex' });
+  }
+  const lineOffset = record['lineOffset'];
+  if (typeof lineOffset !== 'number' || !Number.isInteger(lineOffset) || lineOffset < 0) {
+    throw diffCursorInvalid('--cursor 缺少合法 lineOffset', { field: 'cursor.lineOffset' });
+  }
+  let nodeId: string | undefined;
+  if (record['nodeId'] !== undefined) {
+    if (typeof record['nodeId'] !== 'string' || (record['nodeId'] as string).length === 0) {
+      throw diffCursorInvalid('--cursor 的 nodeId 不合法', { field: 'cursor.nodeId' });
+    }
+    nodeId = record['nodeId'] as string;
+  }
+  let action: AgentChangeAction | undefined;
+  if (source === 'preview') {
+    if (typeof record['action'] !== 'object' || record['action'] === null || Array.isArray(record['action'])) {
+      throw diffCursorInvalid('preview --cursor 缺少 action', { field: 'cursor.action' });
+    }
+    action = record['action'] as AgentChangeAction;
+  }
+  return {
+    v: 2,
+    source,
+    form,
+    topicId,
+    requestId,
+    ...(nodeId !== undefined ? { nodeId } : {}),
+    nodeIndex,
+    lineOffset,
+    ...(action !== undefined ? { action } : {}),
+  };
+}
+
+function buildDiffPayload(
+  ctx: DiffPageContext,
+  meta: DiffBatchMeta,
+  nodes: readonly (ChangeNodeSummary | ChangeNodeDiff)[],
+  next: string | undefined,
   limit: number,
-): { batch: ChangeBatchDetail; budget: DiffBudgetInfo } {
-  let remaining = limit;
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    ok: true,
+    command: 'diff',
+    source: ctx.base.source,
+    workspaceId: ctx.base.workspaceId,
+    ...(ctx.base.source === 'preview' && ctx.base.requestId !== undefined
+      ? { requestId: ctx.base.requestId }
+      : {}),
+    topicId: ctx.base.topicId,
+    batch: {
+      requestId: meta.requestId,
+      topicId: meta.topicId,
+      at: meta.at,
+      counts: meta.counts,
+      nodes: [...nodes],
+    },
+    page: next !== undefined ? { hasMore: true, next } : { hasMore: false },
+    budget: {
+      unit: 'utf16',
+      limit,
+      used: 0,
+      truncated: next !== undefined,
+    },
+    diagnostics: [...ctx.base.diagnostics],
+  };
+  const budget = payload['budget'] as Record<string, unknown>;
   let used = 0;
-  let truncated = false;
-  const nodes = detail.nodes.map((node): ChangeNodeDiff => {
-    if (node.body === undefined || truncated) {
-      if (node.body !== undefined && truncated) {
-        return { ...node, body: { ...node.body, patch: '', truncated: true } };
-      }
-      return node;
-    }
-    const body = node.body;
-    if (body.patch.length <= remaining) {
-      remaining -= body.patch.length;
-      used += body.patch.length;
-      return { ...node, body: { ...body } };
-    }
-    truncated = true;
-    const kept = remaining > 0 ? body.patch.slice(0, remaining) : '';
-    used += kept.length;
-    remaining = 0;
-    return {
-      ...node,
-      body: { ...body, patch: kept + '\n…（patch 已按 --budget 截断）', truncated: true },
-    };
+  for (let i = 0; i < 8; i += 1) {
+    budget['used'] = used;
+    const nextUsed = JSON.stringify(payload).length + 1;
+    if (nextUsed === used) break;
+    used = nextUsed;
+  }
+  budget['used'] = used;
+  return payload;
+}
+
+function diffNextCursor(
+  ctx: DiffPageContext,
+  form: DiffForm,
+  position: { readonly nodeIndex: number; readonly lineOffset: number },
+): string {
+  return encodeDiffCursor({
+    v: 2,
+    source: ctx.cursorSource,
+    form,
+    topicId: ctx.base.topicId,
+    requestId: ctx.cursorRequestId,
+    ...(ctx.nodeId !== undefined ? { nodeId: ctx.nodeId } : {}),
+    nodeIndex: position.nodeIndex,
+    lineOffset: position.lineOffset,
+    ...(ctx.action !== undefined ? { action: ctx.action } : {}),
   });
-  return { batch: { ...detail, nodes }, budget: { limit, used, truncated } };
+}
+
+function payloadLength(payload: Record<string, unknown>): number {
+  return JSON.stringify(payload).length + 1;
+}
+
+/** summary 按 nodes 分页；每页带整批 counts。 */
+function paginateSummary(
+  ctx: DiffPageContext,
+  meta: DiffBatchMeta,
+  nodes: readonly ChangeNodeSummary[],
+  startIndex: number,
+  limit: number,
+): Record<string, unknown> {
+  if (nodes.length === 0) {
+    // dry-run 可能合法地没有最终变化（改回原值、新建后删除等）；空预览仍要
+    // 返回可解析的零项摘要，而不是把它当成越界 cursor。
+    if (startIndex !== 0) {
+      throw diffCursorInvalid('--cursor 已越过 summary 末尾', {
+        nodeIndex: startIndex,
+        nodeCount: 0,
+      });
+    }
+    const empty = buildDiffPayload(ctx, meta, [], undefined, limit);
+    if (payloadLength(empty) > limit) throw diffBudgetTooSmall(limit, payloadLength(empty));
+    return empty;
+  }
+  const remaining = nodes.length - startIndex;
+  if (remaining <= 0) {
+    throw diffCursorInvalid('--cursor 已越过 summary 末尾', {
+      nodeIndex: startIndex,
+      nodeCount: nodes.length,
+    });
+  }
+  // 剩余节点一页放得下时直接单页（最后页没有 page.next，长度更短）。
+  const fullPage = buildDiffPayload(ctx, meta, nodes.slice(startIndex), undefined, limit);
+  if (payloadLength(fullPage) <= limit) return fullPage;
+  let low = 1;
+  let high = remaining - 1;
+  let best: Record<string, unknown> | null = null;
+  while (low <= high) {
+    const take = Math.floor((low + high) / 2);
+    const next = diffNextCursor(ctx, 'summary', { nodeIndex: startIndex + take, lineOffset: 0 });
+    const candidate = buildDiffPayload(ctx, meta, nodes.slice(startIndex, startIndex + take), next, limit);
+    if (payloadLength(candidate) <= limit) {
+      best = candidate;
+      low = take + 1;
+    } else {
+      high = take - 1;
+    }
+  }
+  if (best !== null) return best;
+  const singleNode = nodes[startIndex] as ChangeNodeSummary;
+  const singleNext = diffNextCursor(ctx, 'summary', { nodeIndex: startIndex + 1, lineOffset: 0 });
+  const minimum = Math.min(
+    payloadLength(fullPage),
+    payloadLength(buildDiffPayload(ctx, meta, [singleNode], singleNext, limit)),
+  );
+  throw diffBudgetTooSmall(limit, minimum);
+}
+
+function patchNodeSlice(
+  node: ChangeNodeDiff,
+  lines: readonly string[],
+  offset: number,
+  take: number,
+): ChangeNodeDiff {
+  if (node.body === undefined) return node;
+  const hasMoreLines = offset + take < lines.length;
+  return {
+    ...node,
+    body: {
+      ...node.body,
+      patch: lines.slice(offset, offset + take).join('\n'),
+      truncated: node.body.truncated === true || hasMoreLines,
+    },
+  };
+}
+
+/** patch 按 unified patch 行分页；每页重复 fieldDiffs 与完整 added/removed 统计。 */
+function paginatePatch(
+  ctx: DiffPageContext,
+  meta: DiffBatchMeta,
+  node: ChangeNodeDiff,
+  lineOffset: number,
+  limit: number,
+): Record<string, unknown> {
+  if (node.body === undefined) {
+    const candidate = buildDiffPayload(ctx, meta, [node], undefined, limit);
+    if (payloadLength(candidate) > limit) throw diffBudgetTooSmall(limit, payloadLength(candidate));
+    return candidate;
+  }
+  const lines = node.body.patch.split('\n');
+  const remaining = lines.length - lineOffset;
+  if (remaining <= 0) {
+    throw diffCursorInvalid('--cursor 已越过 patch 末尾', {
+      lineOffset,
+      lineCount: lines.length,
+    });
+  }
+  // 剩余行一页放得下时直接单页（最后页没有 page.next，长度更短）。
+  const fullPage = buildDiffPayload(
+    ctx,
+    meta,
+    [patchNodeSlice(node, lines, lineOffset, remaining)],
+    undefined,
+    limit,
+  );
+  if (payloadLength(fullPage) <= limit) return fullPage;
+  let low = 1;
+  let high = remaining - 1;
+  let best: Record<string, unknown> | null = null;
+  while (low <= high) {
+    const take = Math.floor((low + high) / 2);
+    const next = diffNextCursor(ctx, 'patch', { nodeIndex: 0, lineOffset: lineOffset + take });
+    const candidate = buildDiffPayload(ctx, meta, [patchNodeSlice(node, lines, lineOffset, take)], next, limit);
+    if (payloadLength(candidate) <= limit) {
+      best = candidate;
+      low = take + 1;
+    } else {
+      high = take - 1;
+    }
+  }
+  if (best !== null) return best;
+  const singleNext = diffNextCursor(ctx, 'patch', { nodeIndex: 0, lineOffset: lineOffset + 1 });
+  const minimum = Math.min(
+    payloadLength(fullPage),
+    payloadLength(buildDiffPayload(ctx, meta, [patchNodeSlice(node, lines, lineOffset, 1)], singleNext, limit)),
+  );
+  throw diffBudgetTooSmall(limit, minimum);
 }
 
 function summarizeChangeDetail(detail: ChangeBatchDetail): ChangeBatchSummary {
@@ -1749,6 +2053,15 @@ function summarizeChangeDetail(detail: ChangeBatchDetail): ChangeBatchSummary {
   };
 }
 
+function diffBatchMeta(source: { requestId: string; topicId: string; at: string; counts: ChangeBatchSummary['counts'] }): DiffBatchMeta {
+  return { requestId: source.requestId, topicId: source.topicId, at: source.at, counts: source.counts };
+}
+
+function diffBudgetLimit(parsed: ParsedArgs, spec: CommandSpec): number {
+  return integerOption(parsed, spec, 'budget', { min: 1, max: MAX_READ_BUDGET }) ?? DIFF_DEFAULT_RESPONSE_BUDGET;
+}
+
+/** 初次读取最新批次；分为 summary 与 patch 两种分页形式。 */
 async function runLatestDiff(
   spec: CommandSpec,
   parsed: ParsedArgs,
@@ -1758,7 +2071,7 @@ async function runLatestDiff(
   const nodeId = parsed.values.get('node');
   const patch = flag(parsed, 'patch');
   const requestId = parsed.values.get('request');
-  const budgetLimit = integerOption(parsed, spec, 'budget', { min: 1, max: MAX_READ_BUDGET }) ?? DIFF_DEFAULT_PATCH_BUDGET;
+  const budgetLimit = diffBudgetLimit(parsed, spec);
   return withWorkspaceStore(spec, parsed, runtime, ({ snapshot, store }) => {
     const topicId = resolveTopicId(snapshot, topicReference);
     const schemaVersion = store.schemaVersion();
@@ -1800,55 +2113,40 @@ async function runLatestDiff(
         );
       }
     }
-
-    if (patch) {
-      let detail: ChangeBatchDetail;
-      if (nodeId !== undefined) {
-        const summary = store.latestChangeSummary(topicId);
-        if (summary === null) {
-          throw notFoundFailure('CHANGE_NOT_FOUND', '该主题没有最新变化批次：' + topicId, { topicId });
-        }
-        const change = store.nodeChange(topicId, nodeId);
-        if (change === null) {
-          throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在当前最新批次中：' + nodeId, {
-            topicId,
-            nodeId,
-            requestId: summary.requestId,
-          });
-        }
-        detail = {
-          requestId: summary.requestId,
-          topicId: summary.topicId,
-          at: summary.at,
-          counts: summary.counts,
-          nodes: [change],
-        };
-      } else {
-        const full = store.latestChangeDetail(topicId);
-        if (full === null) {
-          throw notFoundFailure('CHANGE_NOT_FOUND', '该主题没有最新变化批次：' + topicId, { topicId });
-        }
-        detail = full;
-      }
-      const applied = applyDiffBudget(detail, budgetLimit);
-      return {
-        ok: true,
-        command: 'diff',
-        source: 'database',
-        workspaceId: snapshot.workspaceId,
-        topicId,
-        batch: applied.batch,
-        budget: applied.budget,
-        diagnostics: [],
-      };
-    }
-
+    const base: DiffPageBase = {
+      source: 'database',
+      workspaceId: snapshot.workspaceId,
+      topicId,
+      diagnostics: [],
+    };
     const summary = store.latestChangeSummary(topicId);
     if (summary === null) {
       throw notFoundFailure('CHANGE_NOT_FOUND', '该主题没有最新变化批次：' + topicId, { topicId });
     }
+    const meta = diffBatchMeta(summary);
+    if (patch) {
+      if (nodeId === undefined) {
+        throw usageFailure('--patch 必须与 --node 同用', { details: { field: 'patch' }, usage: spec.usage[0] });
+      }
+      const change = store.nodeChange(topicId, nodeId);
+      if (change === null) {
+        throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在当前最新批次中：' + nodeId, {
+          topicId,
+          nodeId,
+          requestId: summary.requestId,
+        });
+      }
+      const ctx: DiffPageContext = {
+        base,
+        cursorSource: 'database',
+        cursorRequestId: summary.requestId,
+        nodeId,
+      };
+      return paginatePatch(ctx, meta, change, 0, budgetLimit);
+    }
+    let nodes = summary.nodes;
     if (nodeId !== undefined) {
-      const nodes: ChangeNodeSummary[] = summary.nodes.filter((node) => node.nodeId === nodeId);
+      nodes = nodes.filter((node) => node.nodeId === nodeId);
       if (nodes.length === 0) {
         throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在当前最新批次中：' + nodeId, {
           topicId,
@@ -1856,48 +2154,135 @@ async function runLatestDiff(
           requestId: summary.requestId,
         });
       }
-      return {
-        ok: true,
-        command: 'diff',
-        source: 'database',
-        workspaceId: snapshot.workspaceId,
-        topicId,
-        batch: { ...summary, nodes },
-        diagnostics: [],
-      };
     }
-    return {
-      ok: true,
-      command: 'diff',
-      source: 'database',
-      workspaceId: snapshot.workspaceId,
-      topicId,
-      batch: summary,
-      diagnostics: [],
+    const ctx: DiffPageContext = {
+      base,
+      cursorSource: 'database',
+      cursorRequestId: summary.requestId,
+      ...(nodeId !== undefined ? { nodeId } : {}),
     };
+    return paginateSummary(ctx, meta, nodes, 0, budgetLimit);
   });
 }
 
-async function runDiffPreview(
+/** 最新批次续页：必须先校验 cursor 里 requestId 仍是该主题最新批次。 */
+async function runLatestDiffCursor(
   spec: CommandSpec,
   parsed: ParsedArgs,
   runtime: CliRuntime,
+  cursorRaw: string,
 ): Promise<Record<string, unknown>> {
-  const input = await readJsonInput(parsed, runtime, spec);
-  const action = await convertBatchInput(parseJsonText(input.text, input.sourcePath, 'diff'), input.baseDir, spec);
-  const prepared = await withWorkspaceStore(spec, parsed, runtime, async ({ root, snapshot }): Promise<PreparedWrite> => ({
-    root,
-    workspaceId: snapshot.workspaceId,
-    action,
-  }));
+  const cursor = decodeDiffCursor(cursorRaw);
+  if (cursor.source !== 'database') {
+    throw diffCursorInvalid('--cursor 属于 preview 续页，不能用于最新批次', { source: cursor.source });
+  }
+  if (cursor.form === 'patch' && cursor.nodeId === undefined) {
+    throw diffCursorInvalid('patch 续页缺少 nodeId', { form: cursor.form });
+  }
+  const budgetLimit = diffBudgetLimit(parsed, spec);
+  return withWorkspaceStore(spec, parsed, runtime, ({ snapshot, store }) => {
+    const topicId = cursor.topicId;
+    if (!snapshot.topics.some((topic) => topic.id === topicId)) {
+      throw notFoundFailure('CHANGE_NOT_FOUND', '--cursor 指向的主题不存在：' + topicId, { topicId });
+    }
+    const schemaVersion = store.schemaVersion();
+    if (schemaVersion < 3) {
+      throw notFoundFailure(
+        'CHANGE_HISTORY_UNAVAILABLE',
+        '该数据库 schema ' + String(schemaVersion) + ' 没有变化历史（需要 schema 3），不能续读。',
+        { topicId, schemaVersion },
+      );
+    }
+    const latestRequest = store.changeBatchRequestId(topicId);
+    if (latestRequest === null || latestRequest !== cursor.requestId) {
+      throw operationConflictFailure(
+        'BATCH_SUPERSEDED',
+        '--cursor 对应的批次已不是最新（cursor=' + cursor.requestId + '，最新=' + (latestRequest ?? '（无）') +
+          '）；不能跨批次续读。',
+        { topicId, requested: cursor.requestId, latest: latestRequest },
+      );
+    }
+    const base: DiffPageBase = {
+      source: 'database',
+      workspaceId: snapshot.workspaceId,
+      topicId,
+      diagnostics: [],
+    };
+    const summary = store.latestChangeSummary(topicId);
+    if (summary === null) {
+      throw notFoundFailure('CHANGE_NOT_FOUND', '该主题没有最新变化批次：' + topicId, { topicId });
+    }
+    const meta = diffBatchMeta(summary);
+    if (cursor.form === 'summary') {
+      let nodes = summary.nodes;
+      if (cursor.nodeId !== undefined) {
+        nodes = nodes.filter((node) => node.nodeId === cursor.nodeId);
+        if (nodes.length === 0) {
+          throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在当前最新批次中：' + cursor.nodeId, {
+            topicId,
+            nodeId: cursor.nodeId,
+            requestId: summary.requestId,
+          });
+        }
+      }
+      if (cursor.nodeIndex >= nodes.length) {
+        throw diffCursorInvalid('--cursor 已越过 summary 末尾', {
+          nodeIndex: cursor.nodeIndex,
+          nodeCount: nodes.length,
+        });
+      }
+      const ctx: DiffPageContext = {
+        base,
+        cursorSource: 'database',
+        cursorRequestId: summary.requestId,
+        ...(cursor.nodeId !== undefined ? { nodeId: cursor.nodeId } : {}),
+      };
+      return paginateSummary(ctx, meta, nodes, cursor.nodeIndex, budgetLimit);
+    }
+    const change = store.nodeChange(topicId, cursor.nodeId as string);
+    if (change === null) {
+      throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在当前最新批次中：' + (cursor.nodeId as string), {
+        topicId,
+        nodeId: cursor.nodeId,
+        requestId: summary.requestId,
+      });
+    }
+    const ctx: DiffPageContext = {
+      base,
+      cursorSource: 'database',
+      cursorRequestId: summary.requestId,
+      nodeId: cursor.nodeId as string,
+    };
+    return paginatePatch(ctx, meta, change, cursor.lineOffset, budgetLimit);
+  });
+}
+
+interface DiffPreviewRun {
+  readonly requestId: string;
+  readonly response: AgentCheckResponse;
+  readonly preview: ChangeBatchDetail;
+}
+
+/** 调用同一 dry-run（includeDiff）并校验 preview；预览 cursor 用同一 requestId 重放。 */
+async function dryRunDiffPreview(
+  spec: CommandSpec,
+  parsed: ParsedArgs,
+  runtime: CliRuntime,
+  action: AgentChangeAction,
+  prepared: { readonly root: string; readonly workspaceId: string },
+  requestId?: string,
+): Promise<DiffPreviewRun> {
   const deps = serviceDeps(runtime, parsed);
   const service = await resolveService(prepared.root, prepared.workspaceId, deps);
-  const result = await submitAgentChange(service, action, deps, undefined, { dryRun: true, includeDiff: true });
+  const result = await submitAgentChange(service, action, deps, requestId, {
+    dryRun: true,
+    includeDiff: true,
+  });
   const response = result.response as AgentCheckResponse;
   if (response.dryRun !== true || response.preview === undefined) {
     throw serviceFailure(
       'SERVICE_RESPONSE_INVALID',
-      '--input 预览需要服务返回 includeDiff preview（AgentCheckResponse.preview）；请让 CLI 与服务使用同一构建。',
+      'diff 预览需要服务返回 includeDiff preview（AgentCheckResponse.preview）；请让 CLI 与服务使用同一构建。',
       { requestId: result.requestId },
     );
   }
@@ -1907,19 +2292,190 @@ async function runDiffPreview(
       requestId: result.requestId,
     });
   }
-  return {
-    ok: true,
-    command: 'diff',
+  return { requestId: result.requestId, response, preview };
+}
+
+/** preview 的 summary/patch 与最新批次共用同一分页器。 */
+function renderPreviewPage(
+  spec: CommandSpec,
+  ctx: DiffPageContext,
+  preview: ChangeBatchDetail,
+  nodeId: string | undefined,
+  patch: boolean,
+  budgetLimit: number,
+  nodeIndex: number,
+  lineOffset: number,
+): Record<string, unknown> {
+  const meta = diffBatchMeta(preview);
+  if (patch) {
+    if (nodeId === undefined) {
+      throw usageFailure('--patch 必须与 --node 同用', { details: { field: 'patch' }, usage: spec.usage[0] });
+    }
+    const node = preview.nodes.find((entry) => entry.nodeId === nodeId);
+    if (node === undefined) {
+      throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在预览批次中：' + nodeId, {
+        topicId: preview.topicId,
+        nodeId,
+      });
+    }
+    return paginatePatch(ctx, meta, node, lineOffset, budgetLimit);
+  }
+  const summary = summarizeChangeDetail(preview);
+  let nodes = summary.nodes;
+  if (nodeId !== undefined) {
+    nodes = nodes.filter((node) => node.nodeId === nodeId);
+    if (nodes.length === 0) {
+      throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在预览批次中：' + nodeId, {
+        topicId: preview.topicId,
+        nodeId,
+      });
+    }
+  }
+  return paginateSummary(ctx, meta, nodes, nodeIndex, budgetLimit);
+}
+
+async function runDiffPreview(
+  spec: CommandSpec,
+  parsed: ParsedArgs,
+  runtime: CliRuntime,
+): Promise<Record<string, unknown>> {
+  const nodeId = parsed.values.get('node');
+  const patch = flag(parsed, 'patch');
+  if (patch && nodeId === undefined) {
+    throw usageFailure('--patch 必须与 --node 同用', { details: { field: 'patch' }, usage: spec.usage[0] });
+  }
+  const budgetLimit = diffBudgetLimit(parsed, spec);
+  const input = await readJsonInput(parsed, runtime, spec);
+  const action = await convertBatchInput(parseJsonText(input.text, input.sourcePath, 'diff'), input.baseDir, spec);
+  const prepared = await withWorkspaceStore(spec, parsed, runtime, async ({ root, snapshot }): Promise<PreparedWrite> => ({
+    root,
+    workspaceId: snapshot.workspaceId,
+    action,
+  }));
+  const run = await dryRunDiffPreview(spec, parsed, runtime, action, {
+    root: prepared.root,
+    workspaceId: prepared.workspaceId,
+  });
+  const topicId = run.response.topicId ?? run.preview.topicId;
+  if (typeof topicId !== 'string' || topicId.length === 0) {
+    throw serviceFailure('SERVICE_RESPONSE_INVALID', '服务预览缺少 topicId', {
+      requestId: run.requestId,
+    });
+  }
+  const base: DiffPageBase = {
     source: 'preview',
-    workspaceId: response.workspaceId,
-    topicId: response.topicId,
-    requestId: result.requestId,
-    batch: summarizeChangeDetail(preview),
-    diagnostics: response.diagnostics,
+    workspaceId: prepared.workspaceId,
+    topicId,
+    requestId: run.requestId,
+    diagnostics: run.response.diagnostics,
   };
+  const ctx: DiffPageContext = {
+    base,
+    cursorSource: 'preview',
+    cursorRequestId: run.requestId,
+    ...(nodeId !== undefined ? { nodeId } : {}),
+    action,
+  };
+  return renderPreviewPage(spec, ctx, run.preview, nodeId, patch, budgetLimit, 0, 0);
+}
+
+/** preview 续页：token 内嵌 action+requestId，用同 requestId 重新 dry-run，不写库。 */
+async function runPreviewCursor(
+  spec: CommandSpec,
+  parsed: ParsedArgs,
+  runtime: CliRuntime,
+  cursorRaw: string,
+): Promise<Record<string, unknown>> {
+  const cursor = decodeDiffCursor(cursorRaw);
+  if (cursor.source !== 'preview') {
+    throw diffCursorInvalid('--cursor 属于最新批次续页，不能用于预览', { source: cursor.source });
+  }
+  if (cursor.action === undefined) {
+    throw diffCursorInvalid('preview 续页缺少 action', { field: 'cursor.action' });
+  }
+  if (cursor.form === 'patch' && cursor.nodeId === undefined) {
+    throw diffCursorInvalid('patch 续页缺少 nodeId', { form: cursor.form });
+  }
+  const budgetLimit = diffBudgetLimit(parsed, spec);
+  const prepared = await withWorkspaceStore(
+    spec,
+    parsed,
+    runtime,
+    async ({ root, snapshot }): Promise<{ root: string; workspaceId: string }> => ({
+      root,
+      workspaceId: snapshot.workspaceId,
+    }),
+  );
+  const run = await dryRunDiffPreview(
+    spec,
+    parsed,
+    runtime,
+    cursor.action,
+    { root: prepared.root, workspaceId: prepared.workspaceId },
+    cursor.requestId,
+  );
+  if (run.requestId !== cursor.requestId) {
+    throw diffCursorInvalid('--cursor 的 requestId 与服务预览不一致', {
+      expected: cursor.requestId,
+      actual: run.requestId,
+    });
+  }
+  const topicId = run.response.topicId ?? run.preview.topicId;
+  if (typeof topicId !== 'string' || topicId !== cursor.topicId) {
+    throw diffCursorInvalid('--cursor 的 topic 与当前预览不一致', {
+      expected: cursor.topicId,
+      actual: topicId,
+    });
+  }
+  const base: DiffPageBase = {
+    source: 'preview',
+    workspaceId: prepared.workspaceId,
+    topicId,
+    requestId: cursor.requestId,
+    diagnostics: run.response.diagnostics,
+  };
+  const ctx: DiffPageContext = {
+    base,
+    cursorSource: 'preview',
+    cursorRequestId: cursor.requestId,
+    ...(cursor.nodeId !== undefined ? { nodeId: cursor.nodeId } : {}),
+    action: cursor.action,
+  };
+  return renderPreviewPage(
+    spec,
+    ctx,
+    run.preview,
+    cursor.nodeId,
+    cursor.form === 'patch',
+    budgetLimit,
+    cursor.nodeIndex,
+    cursor.lineOffset,
+  );
 }
 
 async function runDiff(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntime): Promise<Record<string, unknown>> {
+  const cursorRaw = parsed.values.get('cursor');
+  if (cursorRaw !== undefined) {
+    const allowed = new Set(['cursor', 'budget', 'workspace', 'workspace-id', 'json', 'text']);
+    const conflicts: string[] = [];
+    for (const key of parsed.values.keys()) {
+      if (!allowed.has(key)) conflicts.push('--' + key);
+    }
+    for (const key of parsed.lists.keys()) conflicts.push('--' + key);
+    if (parsed.positional.length > 0) conflicts.push('位置参数');
+    if (conflicts.length > 0) {
+      throw usageFailure(
+        '--cursor 只能与 --budget／--json／--text／--workspace 同用；不接受 ' + conflicts.join('、'),
+        { details: { conflicts }, usage: spec.usage[0] },
+      );
+    }
+    const cursor = decodeDiffCursor(cursorRaw);
+    if (cursor.source === 'database') {
+      return runLatestDiffCursor(spec, parsed, runtime, cursorRaw);
+    }
+    return runPreviewCursor(spec, parsed, runtime, cursorRaw);
+  }
+
   const input = parsed.values.get('input');
   const fromStdin = flag(parsed, 'input-stdin');
   const patch = flag(parsed, 'patch');
@@ -1935,14 +2491,15 @@ async function runDiff(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntim
   if (input !== undefined || fromStdin) {
     const conflicts: string[] = [];
     if (topicReference !== undefined) conflicts.push('主题位置参数');
-    if (nodeId !== undefined) conflicts.push('--node');
     if (requestId !== undefined) conflicts.push('--request');
-    if (patch) conflicts.push('--patch');
     if (conflicts.length > 0) {
       throw usageFailure(
-        '--input 预览只接受 batch JSON（--input/--input-stdin）：不接受 ' + conflicts.join('、'),
+        '--input 预览不接受 ' + conflicts.join('、') + '；预览支持 --node <id> [--patch]',
         { details: { conflicts }, usage: spec.usage[0] },
       );
+    }
+    if (patch && nodeId === undefined) {
+      throw usageFailure('--patch 必须与 --node 同用', { details: { field: 'patch' }, usage: spec.usage[0] });
     }
     return runDiffPreview(spec, parsed, runtime);
   }

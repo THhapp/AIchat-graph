@@ -121,35 +121,48 @@ content 的显式节点集合与顺序保留在 cursor 中，topic／subtree 的
 当前指纹包含主题 revision 和所选节点版本，同主题修改可能使 cursor 过期；
 其他主题修改不影响。遇到 STALE_READ 从原范围重新读取。
 
-### 查看最近一次变化（diff）
+### 查看变化批次（diff）
 
 ~~~text
-aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>]
-aichat diff (--input <batch.json>|--input-stdin)
+aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>] [--cursor <token>]
+aichat diff (--input <batch.json>|--input-stdin) [--node <id> [--patch]] [--budget <n>]
+aichat diff --cursor "<page.next>" --budget 12000
 ~~~
 
-最新一批内容变化保存在数据库，diff 直接只读数据库，不需要服务。默认输出摘要：requestId、topicId、at、
-counts（added／modified／deleted）和每个节点的 nodeId、title、kind、fields；不含正文。
+最新一批内容变化保存在数据库，diff 直接只读数据库，不需要服务；--input 用 batch JSON 做 dry-run 预览，需要服务。
+默认输出摘要：requestId、topicId、at、counts（added／modified／deleted）和每个节点的 nodeId、title、kind、fields；不含正文。
 删除节点仍列在清单中（卡片已不在图上）；新增／删除的 fields 为空。
 参与批次的字段只有 title、summary、from、flow、description、side、order；正文用 unified patch 单独表示；
 important 不属于内容批次。
 
---node 过滤到一张卡。加 --patch 时返回该节点的 before／after 版本、fieldDiffs 与 unified 正文 patch
-（含增删行数与 truncated）；只有正文变化的卡也会有 patch，新增／删除分别呈现为空→正文／正文→空。
---patch 必须与 --node 同用；节点不在最新批次时报 CHANGE_NOT_FOUND。
+--node 过滤到一张卡；与 --patch 一起时返回该节点的 before／after 版本、fieldDiffs 与 unified 正文 patch
+（含增删行数与 truncated），最新批次和 --input 预览格式一致。只有正文变化的卡也会有 patch，
+新增／删除分别呈现为空→正文／正文→空。--patch 必须与 --node 同用；节点不在批次时报 CHANGE_NOT_FOUND。
 
 --request 只接受当前最新批次：已被更新批次取代报 BATCH_SUPERSEDED（details.latest 给出最新 requestId），
 未知 requestId 报 BATCH_UNAVAILABLE，不会静默改读其他批次。
 schemaVersion 1／2 的旧库没有保存过变化批次：不带 --request 报 CHANGE_HISTORY_UNAVAILABLE，
 带 --request 报 BATCH_UNAVAILABLE；可写打开一次升级到 3 后开始记录，不补造旧批次。
 
---budget 只截断 unified patch 文本（字符，默认 12000，最大 1000000）；节点清单与字段差异不占预算。
-预算不足时 budget.truncated 与对应节点 body.truncated 为 true。默认 JSON，--text 给简短摘要。
+--budget 是整次 JSON 响应预算（UTF-16，默认 12000，最大 1000000），不是只限制 patch 文本：
+序列化后的响应长度（JSON.stringify(payload).length + 1，含末尾换行）超过预算就分页，
+budget.used 给出实际长度，budget.truncated 与 page.hasMore 一致。
+summary 按节点分页，每页都带整批 counts；--patch 按 unified patch 行分页，每页重复 fieldDiffs 与完整
+added／removed 统计，body.patch 只是本页行片段，body.truncated 表示后面还有行或被原始上限截断。
+预算不足以容纳最小分页单元时报 BUDGET_TOO_SMALL（details.minimum），不输出半个 JSON。
+默认 JSON；--text 给简短摘要，budget.used 仍按 JSON 长度计算。
 
---input／--input-stdin 把 batch JSON 交给与 batch 相同的解析，在服务端 dry-run 并请求完整变化预览；
-CLI 只输出 source=preview 的批次摘要（不含 fieldDiffs／正文 patch），不落库、不生成请求记录。
-预览需要服务，且不能与主题位置参数、--node、--request、--patch 同用。
-仅检查一次提交而不预览仍用 batch --dry-run。
+page.hasMore 为 true 时把 page.next 原样作为 --cursor 续读，只可再带 --budget／--json／--text／--workspace，
+不要重发主题、--node、--patch、--request 或 --input。最新批次续页先核对 requestId 仍为该主题最新批次，
+否则报 BATCH_SUPERSEDED；cursor 非法、越过末尾或与新上下文不符报 CURSOR_INVALID，
+latest 与 preview 的 cursor 不能互用。
+--input 预览的 cursor 内嵌原批次动作与 requestId，续页用同 requestId 重新 dry-run，不落库；
+预览目标在此期间被真实改动时，重放会按版本冲突（412）报错。预览不接受 --request 与主题位置参数；
+预览可能合法地没有最终变化，返回空节点摘要。
+
+--input／--input-stdin 预览与 batch 使用同一解析和同一 dry-run 候选，可用 --node／--patch 展开具体差异；
+结果 source=preview，顶层 requestId 是本次 dry-run 生成的请求 ID（dry-run 不写请求记录）。
+仅检查一次提交而不看差异仍用 batch --dry-run。
 
 ## 写入与节点版本
 

@@ -167,6 +167,17 @@ topic／subtree 不重复完整节点列表，content 保留显式节点顺序�
 其他主题变化不影响。此规则与单卡写入版本检查分别处理。
 resume 优先给 anchor 正文，来路和邻居为摘要级；较长内容按预算续读，不生成模型摘要。
 
+diff 的 --budget 是整次 JSON 响应预算：JSON.stringify(payload).length + 1 ≤ limit，默认 12000；
+响应始终带 page 与 budget，budget.used 等于该长度（--text 也按 JSON 计算），truncated 与 hasMore 一致。
+summary 按节点分页（每页带整批 counts），patch 按 unified patch 行分页
+（每页重复 fieldDiffs 与完整增删统计），最小分页单元放不下报 BUDGET_TOO_SMALL。
+diff 续读 cursor（压缩 JSON）记录 source／form、topicId、requestId、nodeId 与节点或 patch 行偏移；
+cursor 只能另带预算／输出／工作区选项，latest 与 preview 的 token 不能互用，非法或越界报 CURSOR_INVALID。
+最新批次续页先校验 requestId 仍为最新（否则 BATCH_SUPERSEDED）；preview cursor 另内嵌 action，
+用同一 requestId 重放 dry-run，不写库，目标版本变化时按 412 失败。
+预览与最新批次共用同一分页与差异格式化，支持 --node [--patch]；
+--input 预览不接受 --request 与主题位置参数。
+
 ## 阅读器与导出
 
 保留现有主线、分支、卡片、连线、目录、重要性、阅读位置与中性的“当前”标记；

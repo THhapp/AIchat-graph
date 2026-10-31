@@ -65,30 +65,34 @@ cursor 原样传回，只另调 budget，不重发节点或切片条件；工作
 当前指纹含主题版本及所选节点版本，同主题修改可能使其过期，其他主题不影响。
 STALE_READ 时丢弃旧 cursor，从原范围重读。
 
-## 查看最近一次变化：diff
+## 查看变化批次：diff
 
 ~~~text
-aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>]
-aichat diff (--input <batch.json>|--input-stdin)
+aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>] [--cursor <token>]
+aichat diff (--input <batch.json>|--input-stdin) [--node <id> [--patch]] [--budget <n>]
 ~~~
 
-最新批次直接只读数据库，不需要服务。默认摘要给 requestId、counts 与节点
-（nodeId、title、kind、fields）；删除节点也在清单里，正文不在摘要中。
+最新批次直接只读数据库，不需要服务；--input 用 batch JSON 做 dry-run 预览，需要服务。
+默认摘要给 requestId、counts 与节点（nodeId、title、kind、fields）；删除节点也在清单里，正文不在摘要中。
 批次字段只有 title、summary、from、flow、description、side、order，正文用 unified patch 表示，
 important 不属于批次。
-
---node 过滤一张卡；加 --patch 才给 before／after 版本、fieldDiffs 和 unified 正文 patch
-（含增删行数与 truncated）；只有正文变化的卡也有 patch。--patch 必须配 --node；
-节点不在最新批次时 CHANGE_NOT_FOUND。
+--node 过滤一张卡；加 --patch 给 before／after 版本、fieldDiffs 和 unified 正文 patch（新增／删除为
+空→正文／正文→空）；--patch 必须配 --node，不在批次报 CHANGE_NOT_FOUND。预览与最新批次格式一致。
 --request 只接受当前最新批次：旧批次报 BATCH_SUPERSEDED（details.latest 给最新 requestId），
 未知报 BATCH_UNAVAILABLE；不静默换批次。
 schema 1／2 旧库没有保存过批次：不带 --request 报 CHANGE_HISTORY_UNAVAILABLE，带 --request 报 BATCH_UNAVAILABLE；
 可写打开升级后开始记录，不补造。
---budget 只截断 patch 文本（字符，默认 12000），节点清单与字段差异不占预算，截断时 budget.truncated=true。
 
---input／--input-stdin 用与 batch 相同的解析在服务端 dry-run，只输出预览摘要（source=preview），不落库；
-不能与主题位置参数、--node、--request、--patch 同用。只检查一次提交用 batch --dry-run。
-普通写后不必固定看 diff；需要核对上一次写入或确认影响时再查。
+--budget 是整次 JSON 响应预算（UTF-16，默认 12000）：序列化后长度（JSON.stringify(payload).length+1）
+超过预算就分页，budget.used 是实际长度，budget.truncated 与 page.hasMore 一致。
+summary 按节点分页（每页带整批 counts），patch 按 unified patch 行分页（每页重复 fieldDiffs 与完整
+added／removed 统计，body.patch 是本页行片段）；预算不足报 BUDGET_TOO_SMALL，不输出半个 JSON。
+page.hasMore 为真时用 page.next 作为 --cursor 续读，只可再带预算／输出／工作区选项，不重发主题或查看条件；
+最新续页校验 requestId 仍最新（旧批次 BATCH_SUPERSEDED），cursor 非法报 CURSOR_INVALID。
+--input 预览的 cursor 内嵌原批次动作，用同一 requestId 重新 dry-run，不落库；目标期间被真实改动时重放报 412。
+预览不接受 --request 与主题位置参数。
+
+普通写后不必固定看 diff；需要核对上一次写入或确认影响时再查；只检查一次提交用 batch --dry-run。
 
 ## 同一问题的一次完整 edit
 
