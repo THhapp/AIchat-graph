@@ -107,7 +107,7 @@ Markdown AST 章节读取、正文渲染及确有调用者的 IO / 资源辅助�
 数据库包含 meta、workspace、topics、nodes、topic_changes、requests：
 workspace 保存身份及总 revision；topics 保存 key、标题、版本和最近更新兼容字段；
 nodes 保存正文、摘要、连接、重要性及节点版本；
-topic_changes 每个主题一行，保存最近一批内容变化的 request_id、时间与参与节点的 before／after 快照，只保留一批；
+topic_changes 每个主题一行，保存最近一批的 request_id、时间与参与节点的 before／after；
 requests 保存有限的请求结果，用于幂等和 status。
 
 - 节点真实变化才增加其 revision；重要性变化也增加，但不产生也不替换变化批次。
@@ -117,7 +117,7 @@ requests 保存有限的请求结果，用于幂等和 status。
 - 当前 interfaceVersion 为 6、schemaVersion 为 3；两者独立，
   前者是 CLI／服务协议版本，后者是数据库格式版本。
 - nodes 表无 state 列。只读打开接受 v1／v2／v3：旧结构可直接读取，不迁移、不建表、不写库；
-v1／v2 上变化批次辅助方法返回空，不抛原始 SQL 错误。
+  v1／v2 上变化批次辅助方法返回空，不抛原始 SQL 错误。
   可写打开时逐级升级（v1→v2→v3）：v1→v2 重建无 state 的 nodes 并保留内容与版本；
   v2→v3 只新建 topic_changes 表并更新 meta。v1／v2 没有保存过的 before 内容，旧批次历史不可用，不补造。
   新库和导入均为 v3；升级不把旧数据记为最近更新。
@@ -137,9 +137,9 @@ insert 要求真实相邻；delete 只删最终叶卡且不删 root；不自动�
 正文 body / append / replace 互斥，片段替换必须唯一命中；summary:null 清除显式摘要。
 
 变化批次字段固定为 title、summary、from、flow、description、side、order；正文用 unified patch
-（少量上下文，序列化超长截断并标 truncated）表示；important 不属于批次。
+（3 行上下文，最多 16000 UTF-16 单元，超出标 truncated）表示；important 不属于批次。
 added 的 before 为空，deleted 的 after 为空，modified 保存 before／after 的最终值；
-同一批只记录最终差异：创建后又删除只留删除，改回原值不产生差异，不记录被动编号。
+同一批只记录最终差异：新建后又删除不产生最终变化，改回原值不算变化，不记录被动编号。
 
 GraphStore.commit 在同一事务保存节点差异、版本、最新变化批次和请求响应。
 普通写入按 ID 执行 INSERT / UPDATE / DELETE，不重建全库；全量导入仅留在 importState。
@@ -171,6 +171,8 @@ diff 的 --budget 是整次 JSON 响应预算：JSON.stringify(payload).length +
 响应始终带 page 与 budget，budget.used 等于该长度（--text 也按 JSON 计算），truncated 与 hasMore 一致。
 summary 按节点分页（每页带整批 counts），patch 按 unified patch 行分页
 （每页重复 fieldDiffs 与完整增删统计），最小分页单元放不下报 BUDGET_TOO_SMALL。
+正文 patch 的生成上限与响应分页是两层限制；page.hasMore=false 不保证 body.truncated=false。
+不得把固定上限造成的截断描述成可通过续读补齐。
 diff 续读 cursor（压缩 JSON）记录 source／form、topicId、requestId、nodeId 与节点或 patch 行偏移；
 cursor 只能另带预算／输出／工作区选项，latest 与 preview 的 token 不能互用，非法或越界报 CURSOR_INVALID。
 最新批次续页先校验 requestId 仍为最新（否则 BATCH_SUPERSEDED）；preview cursor 另内嵌 action，
@@ -184,7 +186,7 @@ cursor 只能另带预算／输出／工作区选项，latest 与 preview 的 to
 不再显示节点确认状态标签、状态点或状态边色。
 最新内容批次用卡片“新增／改动”标签与主题“本次变化”清单表达，删除只出现在清单（卡片已不存在）；
 单卡差异按需显示字段前后值与正文 patch，旧的“最近更新”圆点已由批次标签取代。
-重要、选择／焦点与目录当前加粗仍保留。
+重要、选择／焦点与目录当前加粗仍保留。批次标签不代表认可或待办，不由 Agent 手工设置。
 实时阅读器从 GraphResponse.lastChanges（ChangeBatchSummary）取标签与清单，单卡差异按需请求
 GET /api/changes/nodes/:nodeId?topicId=<id>；404 CHANGE_NOT_FOUND 视为该节点不在最新批次，不伪造数据。
 服务同时提供 GET /api/changes?topicId=<id>（最近批次摘要）；没有批次时返回 null。

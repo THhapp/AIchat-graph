@@ -305,8 +305,9 @@ const COMMANDS: readonly CommandSpec[] = [
     group: 'read',
     summary: '查看变化批次（最新批次或 batch 预览）；--node --patch 看字段差异与 unified 正文 patch；按整次 JSON 预算分页。',
     usage: [
-      'aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>] [--cursor <token>]',
-      'aichat diff (--input <batch.json>|--input-stdin) [--node <id> [--patch]] [--budget <n>] [--cursor <token>]',
+      'aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>]',
+      'aichat diff (--input <batch.json>|--input-stdin) [--node <id> [--patch]] [--budget <n>]',
+      'aichat diff --cursor <page.next> [--budget <n>]',
     ],
     positionals: [{ name: '<topicId|key>', required: false, description: '最新批次所在主题；--input 预览时省略' }],
     options: [

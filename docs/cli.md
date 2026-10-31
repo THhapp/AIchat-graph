@@ -63,7 +63,9 @@ serve 默认优先本库 .aichat/local/runtime.json 记录的端口，其次 127
 工作区保存 graph.sqlite、resources/ 及 .aichat/ 本机状态。
 正常运行不扫描、监听或写回旧节点 Markdown。
 
-数据库格式为 schemaVersion 3。schemaVersion 1／2 的旧库只读打开可直接读取，不迁移、不建表、不写库；可写打开时一次性逐级升级到 3（v1→v2→v3），保留节点、正文、连接、版本、主题最近更新记录与工作区版本，不把升级记为最近更新。v2→v3 只新建 topic_changes 表并更新 meta；旧库没有保存过变化批次，不会补造。新库和 import 得到的库都是 3。
+当前数据库格式为 schemaVersion 3，新库和 import 的结果均为 3。
+旧版数据库只读打开不升级；可写打开时升级并保留讨论内容与版本。
+升级不制造内容变化，也不补造旧差异。数据位置与升级规则见[工作区指南](workspace.md)。
 
 ## 读取与检索
 
@@ -124,45 +126,60 @@ content 的显式节点集合与顺序保留在 cursor 中，topic／subtree 的
 ### 查看变化批次（diff）
 
 ~~~text
-aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>] [--cursor <token>]
+aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>]
 aichat diff (--input <batch.json>|--input-stdin) [--node <id> [--patch]] [--budget <n>]
 aichat diff --cursor "<page.next>" --budget 12000
 ~~~
 
-最新一批内容变化保存在数据库，diff 直接只读数据库，不需要服务；--input 用 batch JSON 做 dry-run 预览，需要服务。
-默认输出摘要：requestId、topicId、at、counts（added／modified／deleted）和每个节点的 nodeId、title、kind、fields；不含正文。
-删除节点仍列在清单中（卡片已不在图上）；新增／删除的 fields 为空。
-参与批次的字段只有 title、summary、from、flow、description、side、order；正文用 unified patch 单独表示；
-important 不属于内容批次。
+一次实际内容提交形成一批变化，不按聊天轮次累计。每主题只保留最近一批；
+important-only、noop、dry-run 和幂等重放不替换，纯删除会替换。
+查看已提交批次只读数据库，不需要服务；预览复用 batch 输入与 dry-run，需要同版服务。
 
---node 过滤到一张卡；与 --patch 一起时返回该节点的 before／after 版本、fieldDiffs 与 unified 正文 patch
-（含增删行数与 truncated），最新批次和 --input 预览格式一致。只有正文变化的卡也会有 patch，
-新增／删除分别呈现为空→正文／正文→空。--patch 必须与 --node 同用；节点不在批次时报 CHANGE_NOT_FOUND。
+常用方式：
 
---request 只接受当前最新批次：已被更新批次取代报 BATCH_SUPERSEDED（details.latest 给出最新 requestId），
-未知 requestId 报 BATCH_UNAVAILABLE，不会静默改读其他批次。
-schemaVersion 1／2 的旧库没有保存过变化批次：不带 --request 报 CHANGE_HISTORY_UNAVAILABLE，
-带 --request 报 BATCH_UNAVAILABLE；可写打开一次升级到 3 后开始记录，不补造旧批次。
+~~~text
+aichat diff <topicId>
+aichat diff <topicId> --request <写入返回的requestId> --node <id> --patch
+aichat diff --input batch.json --node <id> --patch
+~~~
 
---budget 是整次 JSON 响应预算（UTF-16，默认 12000，最大 1000000），不是只限制 patch 文本：
-序列化后的响应长度（JSON.stringify(payload).length + 1，含末尾换行）超过预算就分页，
-budget.used 给出实际长度，budget.truncated 与 page.hasMore 一致。
-summary 按节点分页，每页都带整批 counts；--patch 按 unified patch 行分页，每页重复 fieldDiffs 与完整
-added／removed 统计，body.patch 只是本页行片段，body.truncated 表示后面还有行或被原始上限截断。
-预算不足以容纳最小分页单元时报 BUDGET_TOO_SMALL（details.minimum），不输出半个 JSON。
-默认 JSON；--text 给简短摘要，budget.used 仍按 JSON 长度计算。
+默认摘要含批次身份、时间、整批 counts，以及每项的 nodeId、title、kind 和 fields，不含正文。
+删除项仍在清单里；新增／删除的 fields 为空。字段变化包括 title、summary、from、flow、
+description、side、order；正文另外生成 patch，important 不属于内容批次。
 
-page.hasMore 为 true 时把 page.next 原样作为 --cursor 续读，只可再带 --budget／--json／--text／--workspace，
-不要重发主题、--node、--patch、--request 或 --input。最新批次续页先核对 requestId 仍为该主题最新批次，
-否则报 BATCH_SUPERSEDED；cursor 非法、越过末尾或与新上下文不符报 CURSOR_INVALID，
-latest 与 preview 的 cursor 不能互用。
---input 预览的 cursor 内嵌原批次动作与 requestId，续页用同 requestId 重新 dry-run，不落库；
-预览目标在此期间被真实改动时，重放会按版本冲突（412）报错。预览不接受 --request 与主题位置参数；
-预览可能合法地没有最终变化，返回空节点摘要。
+--node 限定一张卡，--patch 必须配 --node，预览与已提交批次用法相同。
+具体差异含 beforeRevision／afterRevision、fieldDiffs 与正文 unified patch；
+新增和删除的正文分别为“空→正文”和“正文→空”。正文没变时没有 body 差异。
 
---input／--input-stdin 预览与 batch 使用同一解析和同一 dry-run 候选，可用 --node／--patch 展开具体差异；
-结果 source=preview，顶层 requestId 是本次 dry-run 生成的请求 ID（dry-run 不写请求记录）。
-仅检查一次提交而不看差异仍用 batch --dry-run。
+预览支持 --input 文件或 --input-stdin，不接受主题位置参数和 --request。
+相对正文文件路径按 batch 的规则解析；预览不落库、不写请求记录，零变化返回空清单。
+只想检查提交是否可执行、不看差异时，用 batch --dry-run；两者都不是写入的必经步骤。
+
+预算与续读：
+
+- --budget 默认 12000、最大 1000000 UTF-16 单元，覆盖整次 JSON 与末尾换行。
+  budget.used 是实际长度；--text 仍按 JSON 计量，不保证文本输出受同样长度限制。
+- 摘要按节点分页，每页 counts 都是整批统计，不是本页数量。
+  patch 按行分页，每页重复 fieldDiffs 和整篇增删统计；body.patch 只含本页内容。
+- page.hasMore 为真时，原样传回 page.next。续读只另带预算、输出或工作区选项，
+  不重发主题、--node、--patch、--request、--input。
+- 预览 cursor 内含压缩后的批次动作，过大的输入也会占输出预算。
+  续页会重新 dry-run；修改目标的版本过期时报 412，需重新读取并判断。
+
+**分页不等于完整差异。** 每卡正文 patch 最多生成 16000 UTF-16 单元，超出时按整行截断。
+page.hasMore 只表示还能否续页；末页仍有 body.truncated=true，表示已达到 patch 生成上限，
+提高预算或继续翻页也无法补齐。当前正文可另用 read 阅读；diff 不提供任意旧版本的全文读取。
+
+| 错误 | 处理 |
+| --- | --- |
+| BUDGET_TOO_SMALL | 最小分页单元放不下，采用 details.minimum 或更大的预算 |
+| CHANGE_NOT_FOUND | 节点不在该批次中，检查节点与批次 |
+| BATCH_SUPERSEDED | 指定或续读批次已被替换；details.latest 提供最新 requestId |
+| BATCH_UNAVAILABLE | 指定的批次不可用，不会自动改读另一批 |
+| CURSOR_INVALID | 续读标记非法或越界，从原查询重新开始 |
+| CHANGE_HISTORY_UNAVAILABLE | 旧数据库未保存差异；升级后从新的内容提交开始记录 |
+
+--request 与最新批次续读都检查批次身份；旧批次被替换后无法继续查看，不保存完整历史。
 
 ## 写入与节点版本
 

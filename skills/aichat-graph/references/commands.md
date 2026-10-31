@@ -68,8 +68,10 @@ STALE_READ 时丢弃旧 cursor，从原范围重读。
 ## 查看变化批次：diff
 
 ~~~text
-aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>] [--cursor <token>]
+aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>]
 aichat diff (--input <batch.json>|--input-stdin) [--node <id> [--patch]] [--budget <n>]
+
+aichat diff --cursor "<page.next>" --budget 12000
 ~~~
 
 最新批次直接只读数据库，不需要服务；--input 用 batch JSON 做 dry-run 预览，需要服务。
@@ -85,14 +87,27 @@ schema 1／2 旧库没有保存过批次：不带 --request 报 CHANGE_HISTORY_U
 
 --budget 是整次 JSON 响应预算（UTF-16，默认 12000）：序列化后长度（JSON.stringify(payload).length+1）
 超过预算就分页，budget.used 是实际长度，budget.truncated 与 page.hasMore 一致。
-summary 按节点分页（每页带整批 counts），patch 按 unified patch 行分页（每页重复 fieldDiffs 与完整
-added／removed 统计，body.patch 是本页行片段）；预算不足报 BUDGET_TOO_SMALL，不输出半个 JSON。
+summary 按节点分页，每页 counts 都是整批统计；patch 按行分页，每页重复 fieldDiffs 与整篇增删统计。
+预算不足报 BUDGET_TOO_SMALL，details.minimum 给出最小预算；不输出半个 JSON。
+--text 的预算仍按 JSON 计量，不保证文本输出同样短。
 page.hasMore 为真时用 page.next 作为 --cursor 续读，只可再带预算／输出／工作区选项，不重发主题或查看条件；
 最新续页校验 requestId 仍最新（旧批次 BATCH_SUPERSEDED），cursor 非法报 CURSOR_INVALID。
 --input 预览的 cursor 内嵌原批次动作，用同一 requestId 重新 dry-run，不落库；目标期间被真实改动时重放报 412。
 预览不接受 --request 与主题位置参数。
 
-普通写后不必固定看 diff；需要核对上一次写入或确认影响时再查；只检查一次提交用 batch --dry-run。
+例如先预览已有卡片的改写，不提交：
+
+~~~text
+aichat diff --input batch.json --node <id> --patch
+~~~
+
+预览 cursor 内含压缩后的批次动作，大输入可能要求更大预算；不要解码或改写 cursor。
+每卡正文 patch 最多生成 16000 UTF-16 单元，超出按整行截断。
+page.hasMore 决定是否续页；末页 body.truncated 仍为真时，不能声称已看完全部差异，
+增大预算也不会恢复被生成上限截去的部分。需要当前完整正文时另用 read。
+
+每主题只保留最近一次实际内容提交，不按回复累计。
+普通写后不必固定看 diff；需要核对改写时再查；只检查提交可行性用 batch --dry-run。
 
 ## 同一问题的一次完整 edit
 

@@ -40,7 +40,7 @@ resources/
 ~~~
 
 - graph.sqlite 是唯一主存储。WAL 模式还可能出现 graph.sqlite-wal / -shm，由 SQLite 管理。
-- graph.sqlite 的 topic_changes 只保存每个主题最近一批内容变化（新增／改动／删除），供页面标签和差异查看，不是完整历史。
+- 数据库只保存每主题最近一批内容变化，供新增／改动标签和差异查看，不是完整历史。
 - resources/ 保存正文明确引用的本地图片，正文使用 resources/... 键。
 - service.json 是当前服务描述，由程序维护；不要靠删除它解决连接问题。
 - runtime.json 记录本库上次成功绑定的端口；服务优先复用，端口被占用时才换空闲端口。
@@ -94,6 +94,8 @@ config --workspace 保存默认目标，config --show 查看；--workspace-id �
 
 更新只替换程序文件，不复制、不删除讨论资料；不会停止仍在运行的旧服务。
 程序不注册系统服务、PATH、文件关联或协议，也不自动安装 Skill。
+若已安装 Skill，更新程序后再从更新后的包运行 app/tools/install-skill.ps1 同步副本。
+安装器保留原工作区绑定、更新 CLI 入口；宿主可能需要新会话才能加载新说明。
 
 ## 给 Agent 继续讨论
 
