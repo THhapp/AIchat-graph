@@ -138,6 +138,7 @@ important 单独设值可仅给 ID，提供 --if-revision 则检查；它不替�
 追加用 {"append":"新片段"} 替代 body；唯一替换用
 {"replace":[{"old":"唯一旧片段","new":"新片段"}]} 替代 body。
 body / append / replace 三选一；replace.old 必须恰好匹配一次。
+append 直接追加到正文末尾，不会自动将补充融入原文。
 incoming 的来源用实际节点版本；root 整体拒绝 incoming，不能自连或跨主题。
 CLI edit 没有 order 参数，需改它时用 batch 的 patch.incoming.order。
 节点没有确认状态，NodePatch / NodeCreate 都不含 state；batch 输入中出现 state 会按未知字段拒绝。
@@ -157,7 +158,7 @@ aichat batch --input <batch.json> --dry-run
     {
       "op": "edit",
       "target": {"id": "n_old", "revision": 2},
-      "patch": {"append": "融入旧问题的补充。"}
+      "patch": {"body": "原问题的完整正文，已将补充融入对应位置。"}
     },
     {
       "op": "create",
@@ -206,8 +207,9 @@ aichat rearrange --input <edits.json>
 
 ## 写后继续维护与错误处理
 
-成功结果包含提交状态 state（committed／noop／checked）、工作区 revision、nodeRevisions、changedNodeIds、
-created.aliases、requestId 和诊断。节点下一版本取 nodeRevisions[nodeId]，
+写入结果的 state 表示 committed／noop／committed_refresh_pending；dry-run 为 checked，
+不是节点分类。结果还包含工作区 revision、nodeRevisions、changedNodeIds、created.aliases、
+requestId 和诊断。节点下一版本取 nodeRevisions[nodeId]，
 不能用工作区 revision；不只为获取它再发一次 read。
 
 映射覆盖新建、修改和明确操作且仍存在的目标，noop 也给；删除节点省略。

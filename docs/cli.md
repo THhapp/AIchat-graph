@@ -180,6 +180,7 @@ aichat edit --node <id> --if-revision 3 --body-file "./正文.md"
 ~~~
 
 replace.old 必须非空且恰好匹配一次。summary:null 清除显式摘要。
+append 把文本追加到末尾，不会自动合并或重写已有正文。
 incoming.from 使用来源节点实际版本；只改 description 无需重给来源。
 CLI edit 未暴露 order 参数，需要时可通过 batch 的 incoming.order 修改。
 NodePatch 不含 state；batch 的 patch 或 create.node 出现 state 会按未知字段拒绝。
@@ -247,7 +248,7 @@ aichat batch --input <batch.json> --dry-run
     {
       "op": "edit",
       "target": {"id": "n_a", "revision": 2},
-      "patch": {"append": "对旧问题的补充。"}
+      "patch": {"body": "原问题的完整正文，补充已整合到相应段落。"}
     },
     {
       "op": "create",
@@ -311,7 +312,7 @@ aichat rearrange --input <edits.json>
 ~~~
 
 - revision 是工作区版本，nodeRevisions 是本次节点实际版本；下一次 edit 可直接使用映射值。
-- state 是提交状态（committed／noop；dry-run 为 checked），不是节点状态。
+- state 是提交状态（committed／noop／committed_refresh_pending；dry-run 为 checked），不是节点状态。
 - 映射覆盖新建、实际修改及明确操作且仍存在的目标，noop 也返回；删除节点省略。
 - insert 的 after 仅作相邻前置条件，映射包含实际改接的 before 与新节点。
 - created.aliases 将本批名称映射到稳定 ID，不是后续批次仍可使用的别名。
@@ -331,7 +332,8 @@ aichat rearrange --input <edits.json>
 绑定后主题的可见数据变化会自动重建；没有绑定就不生成文件。
 失败保留旧成品，外部改动的目标不直接覆盖，解绑不删除已有文件。
 完整独立 HTML 包含主题、阅读器、样式及必要资源。
-程序或阅读器升级不会单独重写已有成品；主题内容变化或用户显式重新导出时，才用当前阅读器重新生成。旧成品（包括带多余节点 state 字段的 HTML）仍可读取。
+程序或阅读器升级不会单独重写已有成品；主题内容变化或用户显式重新导出时，
+才用当前阅读器重新生成。旧成品（包括带多余节点 state 字段的 HTML）仍可读取。
 
 ## 帮助、错误和恢复
 
