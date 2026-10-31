@@ -12,7 +12,6 @@ import type {
   BranchSide,
   GraphNode,
   GraphTopic,
-  LastChange,
   NodeCreate,
   NodeFlow,
   NodePatch,
@@ -472,4 +471,4 @@ export function scopeNote(view: ReadViewKind): string | undefined {
 
 export function emptyDiagnostic(): Diagnostic[] { return []; }
 
-export type { LastChange, NodePatch, NodeSelector };
+export type { NodePatch, NodeSelector };

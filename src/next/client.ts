@@ -37,7 +37,7 @@ export const REQUEST_TIMEOUT_MS = 15_000;
 export const DEFAULT_START_TIMEOUT_MS = 8_000;
 export const DEFAULT_POLL_INTERVAL_MS = 100;
 export const CLIENT_HEADER = 'X-AIchat-Client';
-export const CLIENT_HEADER_VALUE = 'cli-interface4';
+export const CLIENT_HEADER_VALUE = 'cli-interface6';
 
 export interface ServiceDescriptor {
   readonly version?: number;
@@ -753,6 +753,8 @@ export interface SubmitResult {
 export interface SubmitOptions {
   /** batch dry-run：请求体带 dryRun:true，服务只检查不落库。 */
   readonly dryRun?: boolean | undefined;
+  /** dry-run 且需要完整变化预览时置 true（AgentCheckResponse.preview）。 */
+  readonly includeDiff?: boolean | undefined;
 }
 
 export async function submitAgentChange(
@@ -767,6 +769,7 @@ export async function submitAgentChange(
     workspaceId: service.workspaceId,
     requestId,
     ...(options.dryRun === true ? { dryRun: true } : {}),
+    ...(options.includeDiff === true ? { includeDiff: true } : {}),
     action,
   };
   let outcome: { status: number; body: unknown; text: string };

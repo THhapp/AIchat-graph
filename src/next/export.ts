@@ -460,6 +460,7 @@ class SqliteExportManager implements ExportManagerLike {
       nodes,
       // SQLite 领域不允许跨主题父边，因此没有跨主题边界节点。
       boundaryNodes: [],
+      changes: store.latestChangeDetail(topicId),
       resources: capture.resources,
       resourceDiagnostics: capture.diagnostics as Diagnostic[],
     };

@@ -1,5 +1,15 @@
 import { useEffect, useRef } from 'react';
-import type { GraphNode, GraphResponse, GraphTopic, NodeDetailResponse, TopicDetailResponse } from '../../next/protocol.js';
+import type {
+  ChangeBatchSummary,
+  ChangeKind,
+  ChangeNodeDiff,
+  GraphNode,
+  GraphResponse,
+  GraphTopic,
+  NodeDetailResponse,
+  TopicDetailResponse,
+} from '../../next/protocol.js';
+import { changeCountsLabel, changeFieldLabel, changeKindLabel, formatChangeValue, graphHasNode } from '../lib/changes.js';
 import { MarkdownBody } from './MarkdownBody.js';
 import { CurrentMarker, flowLabel } from './display.js';
 
@@ -38,10 +48,101 @@ export interface DetailPanelProps {
   /** The service is stopped, so the importance write cannot run. */
   importanceDisabled?: boolean;
   importanceError?: string | null;
+  /** Latest persisted content batch of the open topic; drives the change list. */
+  batch?: ChangeBatchSummary | null;
+  /** This node's change kind in that batch, if it changed. */
+  changeKind?: ChangeKind | null;
+  /**
+   * Node whose diff is expanded, from the card meta or a topic change row.
+   * The parent owns the target so the same on-demand request backs both places.
+   */
+  changeTargetNodeId?: string | null;
+  nodeChange?: ChangeNodeDiff | null;
+  nodeChangeLoading?: boolean;
+  /** The service answered that the node has no diff in the latest batch. */
+  nodeChangeMissing?: boolean;
+  nodeChangeError?: string | null;
+  /** Expand/collapse one node's diff; selecting an existing card is the caller's job. */
+  onToggleChange?: (nodeId: string) => void;
 };
 
 function versionLabel(instanceId: string, revision: number): string {
   return instanceId.slice(0, 8) + ' / r' + String(revision);
+}
+
+interface ChangeDiffBodyProps {
+  change: ChangeNodeDiff | null;
+  loading: boolean;
+  missing: boolean;
+  error: string | null;
+  kind: ChangeKind | null;
+}
+
+/** Field before/after rows plus the unified body patch; shared by card and list. */
+function ChangeDiffBody({ change, loading, missing, error, kind }: ChangeDiffBodyProps): React.JSX.Element {
+  return (
+    <>
+      {loading ? (
+        <p className="detail__loading" role="status">
+          <span className="spinner" /> 正在读取本次差异…
+        </p>
+      ) : null}
+      {error !== null ? (
+        <div className="banner banner--error" role="alert">
+          <span className="banner__text">{error}</span>
+        </div>
+      ) : null}
+      {!loading && error === null && change === null ? (
+        <p className="change-diff__empty">
+          {missing ? '最新变化批次里没有这张卡片。' : '本次变化没有这张卡片的可读差异。'}
+        </p>
+      ) : null}
+      {change !== null ? (
+        <>
+          {change.fieldDiffs.length > 0 ? (
+            <ul className="change-fields" aria-label="字段差异">
+              {change.fieldDiffs.map((diff) => (
+                <li key={diff.field} className="change-fields__row">
+                  <span className="change-fields__name">{changeFieldLabel(diff.field)}</span>
+                  <span className="change-fields__before">{formatChangeValue(diff.before)}</span>
+                  <span className="change-fields__arrow" aria-hidden="true">→</span>
+                  <span className="change-fields__after">{formatChangeValue(diff.after)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="change-diff__empty">
+              {kind === 'added' ? '本次新增了这张卡片。' : kind === 'deleted' ? '本次删除了这张卡片。' : '本次没有字段级变化。'}
+            </p>
+          )}
+          {change.body !== undefined ? (
+            <div className="change-patch">
+              <p className="change-patch__meta">
+                正文差异 +{String(change.body.addedLines)} / −{String(change.body.removedLines)}
+                {change.body.truncated ? '（已截断）' : ''}
+              </p>
+              <pre className="change-patch__pre" aria-label="正文 unified diff">
+                {change.body.patch.split('\n').map((line, index) => {
+                  const tone = line.startsWith('+') && !line.startsWith('+++')
+                    ? 'add'
+                    : line.startsWith('-') && !line.startsWith('---')
+                      ? 'del'
+                      : line.startsWith('@@')
+                        ? 'hunk'
+                        : 'plain';
+                  return (
+                    <span key={String(index)} className={'change-patch__line change-patch__line--' + tone}>
+                      {line}{'\n'}
+                    </span>
+                  );
+                })}
+              </pre>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </>
+  );
 }
 
 export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
@@ -50,6 +151,8 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
     activeNodeId, selectedNodeId, onSelectNode, onRetry, onClose, onCopyContinuation, copied,
     onOpenNode, boundaryNodes,
     onCopyLocate, locateCopied, important = false, onToggleImportant, importanceBusy = false, importanceDisabled = false, importanceError = null,
+    batch = null, changeKind = null, changeTargetNodeId = null, nodeChange = null, nodeChangeLoading = false,
+    nodeChangeMissing = false, nodeChangeError = null, onToggleChange,
   } = props;
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -61,6 +164,9 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
   const topicNodes = topicDetail?.nodes ?? null;
   const graphVersion = graph.instanceId + ':' + String(graph.revision);
   const outdated = detailVersion !== null && detailVersion !== graphVersion;
+  const changeTarget = changeTargetNodeId ?? null;
+  const nodeChangeVisible = node !== null && changeTarget === node.id;
+  const nodeChangeToggleVisible = changeKind !== null && onToggleChange !== undefined;
 
   return (
     <aside className="detail panel" id="detail-panel" aria-label="详情">
@@ -141,6 +247,9 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                 {node.id === activeNodeId ? <CurrentMarker /> : null}
                 {node.id === selectedNodeId ? <span className="detail__flag">已选中</span> : null}
                 <span className="detail__flag">{flowLabel(node)}</span>
+                {changeKind !== null ? (
+                  <span className="detail__change" data-kind={changeKind}>{changeKindLabel(changeKind)}</span>
+                ) : null}
                 {important ? <span className="detail__flag detail__flag--important">重要</span> : null}
               </div>
               <h2 id="detail-node-title" ref={headingRef} tabIndex={-1} className="detail__title">{node.title}</h2>
@@ -148,10 +257,15 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                 {node.from !== null ? '来自 ' + (graph.nodes.find((item) => item.id === node.from)?.number ?? node.from) + ' · ' : ''}
                 {topic !== null ? '主题 ' + topic.key + ' · r' + String(topic.revision) : 'topicId ' + node.topicId}
               </p>
-              {onCopyLocate !== undefined || onToggleImportant !== undefined ? (
+              {onCopyLocate !== undefined || onToggleImportant !== undefined || nodeChangeToggleVisible ? (
                 <div className="detail__actions">
                   {onCopyLocate !== undefined ? (
                     <button type="button" onClick={() => { onCopyLocate(); }}>{locateCopied === true ? '已复制定位' : '复制定位'}</button>
+                  ) : null}
+                  {nodeChangeToggleVisible && node !== null && onToggleChange !== undefined ? (
+                    <button type="button" aria-expanded={nodeChangeVisible} onClick={() => { onToggleChange(node.id); }}>
+                      {nodeChangeVisible ? '收起本次差异' : '查看本次差异'}
+                    </button>
                   ) : null}
                   {onToggleImportant !== undefined ? (
                     <button
@@ -176,6 +290,18 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
                 <div className="banner banner--error" role="alert">
                   <span className="banner__text">{importanceError}</span>
                 </div>
+              ) : null}
+              {nodeChangeVisible ? (
+                <section className="change-diff" aria-label="本次差异">
+                  <h3 className="change-diff__title">本次差异</h3>
+                  <ChangeDiffBody
+                    change={nodeChange}
+                    loading={nodeChangeLoading}
+                    missing={nodeChangeMissing}
+                    error={nodeChangeError}
+                    kind={changeKind}
+                  />
+                </section>
               ) : null}
               {connectionText !== '' ? (
                 <div className="detail__connection">
@@ -249,6 +375,66 @@ export function DetailPanel(props: DetailPanelProps): React.JSX.Element {
               <div className="banner banner--error" role="alert">
                 <span className="banner__text">该主题的正文当前未能完整读取，未显示部分正文。</span>
               </div>
+            ) : null}
+            {batch !== null ? (
+              <section className="topic-changes" aria-label="主题本次变化">
+                <h3 className="topic-changes__title">
+                  本次变化
+                  <span className="topic-changes__counts">{changeCountsLabel(batch.counts)}</span>
+                </h3>
+                {batch.nodes.length === 0 ? (
+                  <p className="topic-changes__empty">最新批次没有可列出的节点。</p>
+                ) : (
+                  <ul className="topic-changes__list">
+                    {batch.nodes.map((item) => {
+                      const selectable = graphHasNode(graph, item.nodeId);
+                      const expanded = changeTarget === item.nodeId;
+                      return (
+                        <li key={item.nodeId} className="topic-changes__item" data-expanded={expanded ? 'true' : 'false'}>
+                          {onToggleChange !== undefined ? (
+                            <button
+                              type="button"
+                              className="topic-changes__row"
+                              aria-expanded={expanded}
+                              title={selectable ? '选中卡片并展开本次差异' : '展开本次差异（卡片已删除）'}
+                              onClick={() => {
+                                if (selectable) onSelectNode(item.nodeId);
+                                onToggleChange(item.nodeId);
+                              }}
+                            >
+                              <span className="detail__change" data-kind={item.kind}>{changeKindLabel(item.kind)}</span>
+                              <span className="topic-changes__name">{item.title}</span>
+                              {item.fields.length > 0 ? (
+                                <span className="topic-changes__fields">{item.fields.map(changeFieldLabel).join('、')}</span>
+                              ) : null}
+                              <span className="topic-changes__action">{expanded ? '收起差异' : '查看差异'}</span>
+                            </button>
+                          ) : (
+                            <div className="topic-changes__row">
+                              <span className="detail__change" data-kind={item.kind}>{changeKindLabel(item.kind)}</span>
+                              <span className="topic-changes__name">{item.title}</span>
+                              {item.fields.length > 0 ? (
+                                <span className="topic-changes__fields">{item.fields.map(changeFieldLabel).join('、')}</span>
+                              ) : null}
+                            </div>
+                          )}
+                          {expanded ? (
+                            <div className="topic-changes__diff">
+                              <ChangeDiffBody
+                                change={nodeChange}
+                                loading={nodeChangeLoading}
+                                missing={nodeChangeMissing}
+                                error={nodeChangeError}
+                                kind={item.kind}
+                              />
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </section>
             ) : null}
             <ol className="topic-reader" aria-label="按结构顺序的卡片">
               {topicNodes === null || (topicDetail !== null && topicDetail.topic.id !== topic.id) ? (

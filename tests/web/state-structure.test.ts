@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  ChangeBatchDetail,
   GraphNode,
   GraphResponse,
   GraphTopic,
@@ -80,7 +81,7 @@ const workspace: WorkspaceResponse = {
   agentEntry: { cliPath: 'D:/daily/dist/cli/index.js', skillPath: 'D:/daily/skills/SKILL.md' },
 };
 
-function offlineDocument(): OfflineTopicDocument {
+function offlineDocument(changes: ChangeBatchDetail | null = null): OfflineTopicDocument {
   const [first] = tree;
   return {
     format: 1,
@@ -96,8 +97,44 @@ function offlineDocument(): OfflineTopicDocument {
       body: '缺省正文',
     }],
     boundaryNodes: [],
+    ...(changes !== null ? { changes } : {}),
     resources: {},
     resourceDiagnostics: [],
+  };
+}
+
+function offlineChanges(): ChangeBatchDetail {
+  return {
+    requestId: 'req-offline',
+    topicId: 't_1',
+    at: '2026-01-01T01:00:00Z',
+    counts: { added: 1, modified: 1, deleted: 1 },
+    nodes: [
+      {
+        nodeId: 'n01',
+        kind: 'modified',
+        title: '起点',
+        fields: ['title'],
+        beforeRevision: 1,
+        afterRevision: 2,
+        fieldDiffs: [{ field: 'title', before: '旧起点', after: '起点' }],
+        body: {
+          patch: '@@ -1 +1 @@\n-旧正文\n+缺省正文',
+          addedLines: 1,
+          removedLines: 1,
+          truncated: false,
+        },
+      },
+      {
+        nodeId: 'n_gone',
+        kind: 'deleted',
+        title: '已删除卡片',
+        fields: [],
+        beforeRevision: 3,
+        afterRevision: null,
+        fieldDiffs: [],
+      },
+    ],
   };
 }
 
@@ -222,6 +259,38 @@ describe('offline detail projection', () => {
     expect(missing.topicDetail).toBeNull();
     expect(missing.detailVersion).toBeNull();
   });
+
+  it('carries the embedded batch and the selected node diff', () => {
+    const doc = offlineDocument(offlineChanges());
+    const graphFromDoc = toGraphResponse(doc);
+
+    const topicView = deriveOfflineDetails({
+      graph: graphFromDoc,
+      doc,
+      bodies: new Map(),
+      tab: 'topic',
+      node: tree[0]!,
+      topic,
+    });
+    expect(topicView.batch?.requestId).toBe('req-offline');
+    expect(topicView.batch?.nodes.map((item) => [item.nodeId, item.kind])).toEqual([
+      ['n01', 'modified'],
+      ['n_gone', 'deleted'],
+    ]);
+    expect(topicView.nodeChange).toBeNull();
+
+    const nodeView = deriveOfflineDetails({
+      graph: graphFromDoc,
+      doc,
+      bodies: new Map(),
+      tab: 'node',
+      node: tree[0]!,
+      topic,
+    });
+    expect(nodeView.batch?.requestId).toBe('req-offline');
+    expect(nodeView.nodeChange?.nodeId).toBe('n01');
+    expect(nodeView.nodeChange?.fieldDiffs[0]?.after).toBe('起点');
+  });
 });
 
 describe('frozen offline document', () => {
@@ -236,6 +305,34 @@ describe('frozen offline document', () => {
     expect(response.nodes[0]).not.toHaveProperty('body');
     expect(response.nodes[0]?.id).toBe('n01');
     expect(response.nodes[0]?.revision).toBe(1);
+  });
+
+  it('projects embedded changes into lastChanges, deletions included', () => {
+    const doc = offlineDocument(offlineChanges());
+    const response = toGraphResponse(doc);
+    const batch = response.lastChanges?.['t_1'];
+    expect(batch?.requestId).toBe('req-offline');
+    expect(batch?.counts).toEqual({ added: 1, modified: 1, deleted: 1 });
+    expect(batch?.nodes.map((item) => [item.nodeId, item.kind])).toEqual([
+      ['n01', 'modified'],
+      ['n_gone', 'deleted'],
+    ]);
+  });
+
+  it('keeps an older export without changes readable and label-free', () => {
+    const doc = offlineDocument();
+    const response = toGraphResponse(doc);
+    expect(response.lastChanges).toBeUndefined();
+    const details = deriveOfflineDetails({
+      graph: response,
+      doc,
+      bodies: new Map(),
+      tab: 'node',
+      node: tree[0]!,
+      topic,
+    });
+    expect(details.batch).toBeNull();
+    expect(details.nodeChange).toBeNull();
   });
 
   it('still reads an old export whose nodes carry the retired state field', () => {

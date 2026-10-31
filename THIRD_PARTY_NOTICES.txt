@@ -57,57 +57,58 @@ debug@4.4.3 | MIT | L013
 decode-named-character-reference@1.3.0 | MIT | L014
 dequal@2.0.3 | MIT | L015
 devlop@1.1.0 | MIT | L016
-entities@6.0.1 | BSD-2-Clause | L017
-escape-string-regexp@5.0.0 | MIT | L018
-estree-util-is-identifier-name@3.0.0 | MIT | L019
-extend@3.0.2 | MIT | L020
-hast-util-from-dom@5.0.1 | ISC | L021
-hast-util-from-html@2.0.3 | MIT | L022
-hast-util-from-html-isomorphic@2.0.0 | MIT | L023
+diff@8.0.2 | BSD-3-Clause | L017
+entities@6.0.1 | BSD-2-Clause | L018
+escape-string-regexp@5.0.0 | MIT | L019
+estree-util-is-identifier-name@3.0.0 | MIT | L020
+extend@3.0.2 | MIT | L021
+hast-util-from-dom@5.0.1 | ISC | L022
+hast-util-from-html@2.0.3 | MIT | L023
+hast-util-from-html-isomorphic@2.0.0 | MIT | L024
 hast-util-from-parse5@8.0.3 | MIT | L014
 hast-util-is-element@3.0.0 | MIT | L007
 hast-util-parse-selector@4.0.0 | MIT | L007
 hast-util-to-jsx-runtime@2.3.6 | MIT | L014
-hast-util-to-text@4.0.2 | MIT | L024
+hast-util-to-text@4.0.2 | MIT | L025
 hast-util-whitespace@3.0.0 | MIT | L007
 hastscript@9.0.1 | MIT | L014
-hono@4.13.13 | MIT | L025
-html-url-attributes@3.0.1 | MIT | L026
-inline-style-parser@0.2.7 | MIT | L027
+hono@4.13.13 | MIT | L026
+html-url-attributes@3.0.1 | MIT | L027
+inline-style-parser@0.2.7 | MIT | L028
 is-alphabetical@2.0.1 | MIT | L007
 is-alphanumerical@2.0.1 | MIT | L007
 is-decimal@2.0.1 | MIT | L007
 is-hexadecimal@2.0.1 | MIT | L007
-is-plain-obj@4.1.0 | MIT | L018
-katex@0.16.47 | MIT | L028
-longest-streak@3.1.0 | MIT | L029
+is-plain-obj@4.1.0 | MIT | L019
+katex@0.16.47 | MIT | L029
+longest-streak@3.1.0 | MIT | L030
 markdown-table@3.0.4 | MIT | L014
 mdast-util-find-and-replace@3.0.3 | MIT | L014
 mdast-util-from-markdown@2.1.0 | MIT | L014
 mdast-util-gfm@3.1.0 | MIT | L014
-mdast-util-gfm-autolink-literal@2.0.1 | MIT | L019
+mdast-util-gfm-autolink-literal@2.0.1 | MIT | L020
 mdast-util-gfm-footnote@2.1.0 | MIT | L014
 mdast-util-gfm-strikethrough@2.0.1 | MIT | L014
-mdast-util-gfm-table@2.0.0 | MIT | L019
-mdast-util-gfm-task-list-item@2.0.0 | MIT | L019
-mdast-util-math@3.0.0 | MIT | L019
-mdast-util-mdx-expression@2.0.1 | MIT | L019
-mdast-util-mdx-jsx@3.2.0 | MIT | L019
-mdast-util-mdxjs-esm@2.0.1 | MIT | L019
-mdast-util-phrasing@4.1.0 | MIT | L030
+mdast-util-gfm-table@2.0.0 | MIT | L020
+mdast-util-gfm-task-list-item@2.0.0 | MIT | L020
+mdast-util-math@3.0.0 | MIT | L020
+mdast-util-mdx-expression@2.0.1 | MIT | L020
+mdast-util-mdx-jsx@3.2.0 | MIT | L020
+mdast-util-mdxjs-esm@2.0.1 | MIT | L020
+mdast-util-phrasing@4.1.0 | MIT | L031
 mdast-util-to-hast@13.2.1 | MIT | L007
 mdast-util-to-markdown@2.2.0 | MIT | L014
 mdast-util-to-string@4.0.0 | MIT | L005
 micromark@4.0.3 | MIT | L014
 micromark-core-commonmark@2.0.4 | MIT | L014
-micromark-extension-gfm@3.0.0 | MIT | L019
-micromark-extension-gfm-autolink-literal@2.1.0 | MIT | L019
-micromark-extension-gfm-footnote@2.1.0 | MIT | L031
-micromark-extension-gfm-strikethrough@2.1.0 | MIT | L019
+micromark-extension-gfm@3.0.0 | MIT | L020
+micromark-extension-gfm-autolink-literal@2.1.0 | MIT | L020
+micromark-extension-gfm-footnote@2.1.0 | MIT | L032
+micromark-extension-gfm-strikethrough@2.1.0 | MIT | L020
 micromark-extension-gfm-table@2.1.2 | MIT | L014
-micromark-extension-gfm-tagfilter@2.0.0 | MIT | L019
-micromark-extension-gfm-task-list-item@2.1.0 | MIT | L019
-micromark-extension-math@3.1.0 | MIT | L019
+micromark-extension-gfm-tagfilter@2.0.0 | MIT | L020
+micromark-extension-gfm-task-list-item@2.1.0 | MIT | L020
+micromark-extension-math@3.1.0 | MIT | L020
 micromark-factory-destination@2.0.1 | MIT | L014
 micromark-factory-label@2.0.1 | MIT | L014
 micromark-factory-space@2.1.0 | MIT | L014
@@ -128,47 +129,47 @@ micromark-util-sanitize-uri@2.0.1 | MIT | L014
 micromark-util-subtokenize@2.1.0 | MIT | L014
 micromark-util-symbol@2.0.1 | MIT | L014
 micromark-util-types@2.0.3 | MIT | L014
-ms@2.1.3 | MIT | L032
-parse-entities@4.0.2 | MIT | L033
-parse5@7.3.0 | MIT | L034
-property-information@7.2.0 | MIT | L033
-react@19.3.1 | MIT | L035
-react-dom@19.3.1 | MIT | L035
-react-markdown@10.1.0 | MIT | L036
-rehype-katex@7.0.1 | MIT | L037
+ms@2.1.3 | MIT | L033
+parse-entities@4.0.2 | MIT | L034
+parse5@7.3.0 | MIT | L035
+property-information@7.2.0 | MIT | L034
+react@19.3.1 | MIT | L036
+react-dom@19.3.1 | MIT | L036
+react-markdown@10.1.0 | MIT | L037
+rehype-katex@7.0.1 | MIT | L038
 remark-gfm@4.0.1 | MIT | L014
-remark-math@6.0.0 | MIT | L037
-remark-parse@11.0.0 | MIT | L038
+remark-math@6.0.0 | MIT | L038
+remark-parse@11.0.0 | MIT | L039
 remark-rehype@11.1.2 | MIT | L014
-remark-stringify@11.0.0 | MIT | L038
-scheduler@0.28.0 | MIT | L035
-signal-exit@4.1.0 | ISC | L039
+remark-stringify@11.0.0 | MIT | L039
+scheduler@0.28.0 | MIT | L036
+signal-exit@4.1.0 | ISC | L040
 space-separated-tokens@2.0.2 | MIT | L007
-stringify-entities@4.0.4 | MIT | L029
-style-to-js@1.1.21 | MIT | L040
-style-to-object@1.0.14 | MIT | L041
-trim-lines@3.0.1 | MIT | L029
-trough@2.2.0 | MIT | L042
-unified@11.0.5 | MIT | L043
+stringify-entities@4.0.4 | MIT | L030
+style-to-js@1.1.21 | MIT | L041
+style-to-object@1.0.14 | MIT | L042
+trim-lines@3.0.1 | MIT | L030
+trough@2.2.0 | MIT | L043
+unified@11.0.5 | MIT | L044
 unist-util-find-after@5.0.0 | MIT | L005
-unist-util-is@6.0.1 | MIT | L044
+unist-util-is@6.0.1 | MIT | L045
 unist-util-position@5.0.0 | MIT | L005
 unist-util-remove-position@5.0.0 | MIT | L007
 unist-util-stringify-position@4.0.0 | MIT | L007
 unist-util-visit@5.1.0 | MIT | L005
 unist-util-visit-parents@6.0.2 | MIT | L007
-use-sync-external-store@1.7.0 | MIT | L035
-vfile@6.0.3 | MIT | L043
+use-sync-external-store@1.7.0 | MIT | L036
+vfile@6.0.3 | MIT | L044
 vfile-location@5.0.3 | MIT | L007
 vfile-message@4.0.3 | MIT | L014
-vite@7.3.7 | MIT | L045
+vite@7.3.7 | MIT | L046
 web-namespaces@2.0.1 | MIT | L007
-write-file-atomic@8.0.0 | ISC | L046
-yaml@2.8.2 | ISC | L047
-zod@4.3.6 | MIT | L048
-zustand@4.5.7 | MIT | L049
+write-file-atomic@8.0.0 | ISC | L047
+yaml@2.8.2 | ISC | L048
+zod@4.3.6 | MIT | L049
+zustand@4.5.7 | MIT | L050
 zwitch@2.0.4 | MIT | L007
-KaTeX bundled fonts@katex 0.16.47 | MIT | L050
+KaTeX bundled fonts@katex 0.16.47 | MIT | L051
 
 ========================================================================
 L001
@@ -643,6 +644,40 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
 L017
+diff@8.0.2 — diff/LICENSE
+------------------------------------------------------------------------
+BSD 3-Clause License
+
+Copyright (c) 2009-2015, Kevin Decker <kpdecker@gmail.com>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+========================================================================
+L018
 entities@6.0.1 — entities/LICENSE
 ------------------------------------------------------------------------
 Copyright (c) Felix Böhm
@@ -658,7 +693,7 @@ THIS IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRE
 EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ========================================================================
-L018
+L019
 escape-string-regexp@5.0.0 — escape-string-regexp/license
 is-plain-obj@4.1.0 — is-plain-obj/license
 ------------------------------------------------------------------------
@@ -673,7 +708,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L019
+L020
 estree-util-is-identifier-name@3.0.0 — estree-util-is-identifier-name/license
 mdast-util-gfm-autolink-literal@2.0.1 — mdast-util-gfm-autolink-literal/license
 mdast-util-gfm-table@2.0.0 — mdast-util-gfm-table/license
@@ -713,7 +748,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L020
+L021
 extend@3.0.2 — extend/LICENSE
 ------------------------------------------------------------------------
 The MIT License (MIT)
@@ -740,7 +775,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L021
+L022
 hast-util-from-dom@5.0.1 — hast-util-from-dom/license
 ------------------------------------------------------------------------
 (ISC License)
@@ -760,7 +795,7 @@ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
 
 ========================================================================
-L022
+L023
 hast-util-from-html@2.0.3 — hast-util-from-html/license
 ------------------------------------------------------------------------
 (The MIT License)
@@ -787,7 +822,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L023
+L024
 hast-util-from-html-isomorphic@2.0.0 — hast-util-from-html-isomorphic/license
 ------------------------------------------------------------------------
 (The MIT License)
@@ -814,7 +849,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L024
+L025
 hast-util-to-text@4.0.2 — hast-util-to-text/license
 ------------------------------------------------------------------------
 (The MIT License)
@@ -841,7 +876,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L025
+L026
 hono@4.13.13 — hono/LICENSE
 ------------------------------------------------------------------------
 MIT License
@@ -867,7 +902,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L026
+L027
 html-url-attributes@3.0.1 — html-url-attributes/license
 ------------------------------------------------------------------------
 (The MIT License)
@@ -893,7 +928,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-L027
+L028
 inline-style-parser@0.2.7 — inline-style-parser/LICENSE
 ------------------------------------------------------------------------
 (The MIT License)
@@ -907,7 +942,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L028
+L029
 katex@0.16.47 — katex/LICENSE
 ------------------------------------------------------------------------
 The MIT License (MIT)
@@ -933,7 +968,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L029
+L030
 longest-streak@3.1.0 — longest-streak/license
 stringify-entities@4.0.4 — stringify-entities/license
 trim-lines@3.0.1 — trim-lines/license
@@ -962,7 +997,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L030
+L031
 mdast-util-phrasing@4.1.0 — mdast-util-phrasing/license
 ------------------------------------------------------------------------
 (The MIT License)
@@ -990,7 +1025,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L031
+L032
 micromark-extension-gfm-footnote@2.1.0 — micromark-extension-gfm-footnote/license
 ------------------------------------------------------------------------
 (The MIT License)
@@ -1017,7 +1052,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L032
+L033
 ms@2.1.3 — ms/license.md
 ------------------------------------------------------------------------
 The MIT License (MIT)
@@ -1043,7 +1078,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L033
+L034
 parse-entities@4.0.2 — parse-entities/license
 property-information@7.2.0 — property-information/license
 ------------------------------------------------------------------------
@@ -1071,7 +1106,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L034
+L035
 parse5@7.3.0 — parse5/LICENSE
 ------------------------------------------------------------------------
 Copyright (c) 2013-2019 Ivan Nikulin (ifaaan@gmail.com, https://github.com/inikulin)
@@ -1095,7 +1130,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-L035
+L036
 react@19.3.1 — react/LICENSE
 react-dom@19.3.1 — react-dom/LICENSE
 scheduler@0.28.0 — scheduler/LICENSE
@@ -1124,7 +1159,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L036
+L037
 react-markdown@10.1.0 — react-markdown/license
 ------------------------------------------------------------------------
 The MIT License (MIT)
@@ -1150,7 +1185,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L037
+L038
 rehype-katex@7.0.1 — licenses/remark-math-LICENSE.txt
 remark-math@6.0.0 — licenses/remark-math-LICENSE.txt
 ------------------------------------------------------------------------
@@ -1175,7 +1210,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L038
+L039
 remark-parse@11.0.0 — remark-parse/license
 remark-stringify@11.0.0 — remark-stringify/license
 ------------------------------------------------------------------------
@@ -1202,7 +1237,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-L039
+L040
 signal-exit@4.1.0 — signal-exit/LICENSE.txt
 ------------------------------------------------------------------------
 The ISC License
@@ -1223,7 +1258,7 @@ WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
 ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ========================================================================
-L040
+L041
 style-to-js@1.1.21 — style-to-js/LICENSE
 ------------------------------------------------------------------------
 The MIT License (MIT)
@@ -1250,7 +1285,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L041
+L042
 style-to-object@1.0.14 — style-to-object/LICENSE
 ------------------------------------------------------------------------
 The MIT License (MIT)
@@ -1277,7 +1312,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L042
+L043
 trough@2.2.0 — trough/license
 ------------------------------------------------------------------------
 (The MIT License)
@@ -1303,7 +1338,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-L043
+L044
 unified@11.0.5 — unified/license
 vfile@6.0.3 — vfile/license
 ------------------------------------------------------------------------
@@ -1330,7 +1365,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-L044
+L045
 unist-util-is@6.0.1 — unist-util-is/license
 ------------------------------------------------------------------------
 (The MIT license)
@@ -1357,7 +1392,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L045
+L046
 vite@7.3.7 — vite/LICENSE.md
 ------------------------------------------------------------------------
 # Vite core license
@@ -3482,7 +3517,7 @@ Repository: https://github.com/websockets/ws
 > CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-L046
+L047
 write-file-atomic@8.0.0 — write-file-atomic/LICENSE.md
 ------------------------------------------------------------------------
 Copyright (c) 2015, Rebecca Turner
@@ -3492,7 +3527,7 @@ Permission to use, copy, modify, and/or distribute this software for any purpose
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ========================================================================
-L047
+L048
 yaml@2.8.2 — yaml/LICENSE
 ------------------------------------------------------------------------
 Copyright Eemeli Aro <eemeli@gmail.com>
@@ -3510,7 +3545,7 @@ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
 
 ========================================================================
-L048
+L049
 zod@4.3.6 — zod/LICENSE
 ------------------------------------------------------------------------
 MIT License
@@ -3536,7 +3571,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L049
+L050
 zustand@4.5.7 — zustand/LICENSE
 ------------------------------------------------------------------------
 MIT License
@@ -3562,7 +3597,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-L050
+L051
 KaTeX bundled fonts@katex 0.16.47 — licenses/katex-fonts-LICENSE.txt
 ------------------------------------------------------------------------
 The MIT License (MIT)

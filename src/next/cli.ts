@@ -25,6 +25,7 @@ import {
   parseCommandArgs,
   repeated,
   requireValue,
+  serviceFailure,
   usageFailure,
   validationFailure,
   versionConflictFailure,
@@ -71,6 +72,10 @@ import type {
   AgentDeleteOp,
   AgentEditOp,
   AgentRearrangeEdit,
+  ChangeBatchDetail,
+  ChangeBatchSummary,
+  ChangeNodeDiff,
+  ChangeNodeSummary,
   ChangeStatusResponse,
   GraphNode,
   IncomingPatch,
@@ -205,6 +210,8 @@ const BODY_OPTIONS: readonly OptionSpec[] = [
 ];
 const NODE_REQUIRED = stringOption('node', '节点 ID', { valueName: '<id>', required: true, repeatable: true });
 const IF_REVISION = integerOptionSpec('if-revision', '仅当节点 revision 等于该值时写入', { min: 0 });
+/** diff --patch 的 unified patch 文本预算（字符）；--budget 只截断 patch，不截断字段元数据。 */
+const DIFF_DEFAULT_PATCH_BUDGET = 12_000;
 
 const COMMANDS: readonly CommandSpec[] = [
   /* -------------------------------- read -------------------------------- */
@@ -268,7 +275,7 @@ const COMMANDS: readonly CommandSpec[] = [
       flagOption('offline', '兼容选项：本 CLI 读取始终直接读数据库'),
     ],
     examples: ['aichat read <topicId>', 'aichat read <topicId> --view structure --from <nodeId>', 'aichat read --node <id> --from-heading 第二节'],
-    resultFields: ['ok', 'command', 'source', 'workspaceId', 'view', 'topicId', 'topicTitle', 'scope', 'anchor?', 'items', 'boundaries?', 'page', 'budget', 'fingerprint'],
+    resultFields: ['ok', 'command', 'source', 'workspaceId', 'view', 'topicId', 'topicTitle', 'scope', 'anchorId?', 'items', 'boundaries?', 'page', 'budget', 'fingerprint'],
   },
   {
     name: 'resume',
@@ -290,7 +297,43 @@ const COMMANDS: readonly CommandSpec[] = [
       flagOption('offline', '兼容选项：本 CLI 读取始终直接读数据库'),
     ],
     examples: ['aichat resume <topicId> --node <id>'],
-    resultFields: ['ok', 'command', 'source', 'workspaceId', 'view', 'topicId', 'topicTitle', 'scope', 'anchor?', 'items', 'page', 'budget', 'fingerprint'],
+    resultFields: ['ok', 'command', 'source', 'workspaceId', 'view', 'topicId', 'topicTitle', 'scope', 'anchorId?', 'items', 'page', 'budget', 'fingerprint'],
+  },
+  {
+    name: 'diff',
+    group: 'read',
+    summary: '查看主题最新内容变化批次；--node --patch 看单节点字段差异与 unified 正文 patch。',
+    usage: [
+      'aichat diff <topicId|key> [--request <id>] [--node <id> --patch] [--budget <n>]',
+      'aichat diff (--input <batch.json>|--input-stdin)',
+    ],
+    positionals: [{ name: '<topicId|key>', required: false, description: '最新批次所在主题；--input 预览时省略' }],
+    options: [
+      ...READ_COMMON,
+      stringOption('request', '指定要查看的批次 requestId；必须仍是当前最新批次', { valueName: '<id>' }),
+      stringOption('node', '只看该节点在本批次中的变化', { valueName: '<id>' }),
+      flagOption('patch', '输出字段差异与 unified 正文 patch；必须与 --node 同用'),
+      integerOptionSpec('budget', 'patch 文本预算（字符），默认 12000；只截断 patch 并报告 truncated', {
+        min: 1,
+        max: MAX_READ_BUDGET,
+        defaultValue: DIFF_DEFAULT_PATCH_BUDGET,
+      }),
+      pathOption('input', '用 batch JSON 做 dry-run 预览（不落库）', { valueName: '<batch.json>' }),
+      flagOption('input-stdin', '从 stdin 读 batch JSON 做 dry-run 预览（不落库）'),
+    ],
+    constraints: [
+      '最新批次直接读 SQLite（只读，不需要服务）；旧 schema 没有变化历史时报 CHANGE_HISTORY_UNAVAILABLE，不伪造空批次。',
+      '--input／--input-stdin 走与 batch 相同的解析，只输出 dry-run 预览摘要（可带 includeDiff 的完整预览），不落库。',
+      '--patch 必须与 --node 同用，且只用于最新批次；--input 预览不接受 --patch／--node／--request。',
+      '--request 必须是当前最新批次；旧批次报 BATCH_SUPERSEDED（带最新 requestId），未知批次报 BATCH_UNAVAILABLE，不静默换批次。',
+      'batch 的入边说明写在 patch.incoming.description，patch 顶层没有 description。',
+    ],
+    examples: [
+      'aichat diff <topicId>',
+      'aichat diff <topicId> --node <id> --patch',
+      'aichat diff --input batch.json',
+    ],
+    resultFields: ['ok', 'command', 'source', 'workspaceId', 'topicId', 'batch', 'requestId?', 'budget?', 'diagnostics'],
   },
 
   /* -------------------------------- write ------------------------------- */
@@ -424,6 +467,7 @@ const COMMANDS: readonly CommandSpec[] = [
       '输入形状：{ topicId, ops: [edit|create|delete] }；edit.patch 与单卡 edit 使用同一 NodePatch。',
       'bodyFile／appendFile／replaceFile 由 CLI 读取（相对输入文件目录；stdin 用 cwd），服务端不读路径。',
       '本地仅在节点 revision 匹配时提交；一批只提交一次事务，失败不部分落库。',
+      '入边说明写 patch.incoming.description（patch 顶层没有 description）：{"patch":{"incoming":{"description":"为什么改接"}}}。',
     ],
     examples: ['aichat batch --input batch.json', 'aichat batch --input-stdin --dry-run < batch.json'],
     resultFields: ['ok', 'command', 'requestId', 'workspaceId', 'topicId', 'state', 'revision', 'changedNodeIds', 'nodeRevisions', 'created', 'summary', 'diagnostics'],
@@ -860,6 +904,47 @@ function humanLines(command: string, payload: Record<string, unknown>): string[]
     if (budget !== undefined) lines.push('budget ' + String(budget['used']) + '/' + String(budget['limit']));
     const page = payload['page'] as Record<string, unknown> | undefined;
     if (page !== undefined && page['hasMore'] === true) lines.push('更多：--cursor ' + String(page['next'] ?? ''));
+    return lines;
+  }
+  if (payload['command'] === 'diff') {
+    const batch = payload['batch'] as Record<string, unknown> | undefined;
+    lines.push(
+      'diff ' + String(payload['source'] ?? 'database') + '  request ' + String(batch?.['requestId'] ?? ''),
+    );
+    const counts = batch?.['counts'] as Record<string, unknown> | undefined;
+    if (counts !== undefined) {
+      lines.push(
+        'added ' + String(counts['added']) + '  modified ' + String(counts['modified']) + '  deleted ' + String(counts['deleted']),
+      );
+    }
+    const nodes = Array.isArray(batch?.['nodes']) ? (batch['nodes'] as Array<Record<string, unknown>>) : [];
+    for (const node of nodes) {
+      lines.push('  ' + String(node['kind']) + ' ' + String(node['nodeId']) + '  ' + String(node['title']));
+      const fields = node['fields'];
+      if (Array.isArray(fields) && fields.length > 0) {
+        lines.push('    fields: ' + fields.map((field) => String(field)).join(', '));
+      }
+      const fieldDiffs = node['fieldDiffs'];
+      if (Array.isArray(fieldDiffs)) {
+        for (const diff of fieldDiffs as Array<Record<string, unknown>>) {
+          lines.push(
+            '    ' + String(diff['field']) + ': ' + JSON.stringify(diff['before']) + ' -> ' + JSON.stringify(diff['after']),
+          );
+        }
+      }
+      const body = node['body'] as Record<string, unknown> | undefined;
+      if (body !== undefined) {
+        lines.push(
+          '    patch +' + String(body['addedLines']) + '/-' + String(body['removedLines']) +
+            (body['truncated'] === true ? ' (truncated)' : ''),
+        );
+        for (const patchLine of String(body['patch']).split('\n')) lines.push('      ' + patchLine);
+      }
+    }
+    const budget = payload['budget'] as Record<string, unknown> | undefined;
+    if (budget !== undefined && budget['truncated'] === true) {
+      lines.push('budget truncated at ' + String(budget['limit']));
+    }
     return lines;
   }
   if (Array.isArray(payload['topics'])) {
@@ -1606,6 +1691,275 @@ async function runSearch(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRunt
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * diff：最新批次直接读 SQLite；--input 只做 dry-run includeDiff 预览
+ * ------------------------------------------------------------------ */
+
+interface DiffBudgetInfo {
+  readonly limit: number;
+  readonly used: number;
+  readonly truncated: boolean;
+}
+
+/** 只截断 unified patch 文本；字段差异与节点摘要不占预算。 */
+function applyDiffBudget(
+  detail: ChangeBatchDetail,
+  limit: number,
+): { batch: ChangeBatchDetail; budget: DiffBudgetInfo } {
+  let remaining = limit;
+  let used = 0;
+  let truncated = false;
+  const nodes = detail.nodes.map((node): ChangeNodeDiff => {
+    if (node.body === undefined || truncated) {
+      if (node.body !== undefined && truncated) {
+        return { ...node, body: { ...node.body, patch: '', truncated: true } };
+      }
+      return node;
+    }
+    const body = node.body;
+    if (body.patch.length <= remaining) {
+      remaining -= body.patch.length;
+      used += body.patch.length;
+      return { ...node, body: { ...body } };
+    }
+    truncated = true;
+    const kept = remaining > 0 ? body.patch.slice(0, remaining) : '';
+    used += kept.length;
+    remaining = 0;
+    return {
+      ...node,
+      body: { ...body, patch: kept + '\n…（patch 已按 --budget 截断）', truncated: true },
+    };
+  });
+  return { batch: { ...detail, nodes }, budget: { limit, used, truncated } };
+}
+
+function summarizeChangeDetail(detail: ChangeBatchDetail): ChangeBatchSummary {
+  return {
+    requestId: detail.requestId,
+    topicId: detail.topicId,
+    at: detail.at,
+    counts: detail.counts,
+    nodes: detail.nodes.map((node) => ({
+      nodeId: node.nodeId,
+      kind: node.kind,
+      title: node.title,
+      fields: [...node.fields],
+    })),
+  };
+}
+
+async function runLatestDiff(
+  spec: CommandSpec,
+  parsed: ParsedArgs,
+  runtime: CliRuntime,
+  topicReference: string,
+): Promise<Record<string, unknown>> {
+  const nodeId = parsed.values.get('node');
+  const patch = flag(parsed, 'patch');
+  const requestId = parsed.values.get('request');
+  const budgetLimit = integerOption(parsed, spec, 'budget', { min: 1, max: MAX_READ_BUDGET }) ?? DIFF_DEFAULT_PATCH_BUDGET;
+  return withWorkspaceStore(spec, parsed, runtime, ({ snapshot, store }) => {
+    const topicId = resolveTopicId(snapshot, topicReference);
+    const schemaVersion = store.schemaVersion();
+    if (schemaVersion < 3) {
+      if (requestId !== undefined) {
+        throw notFoundFailure(
+          'BATCH_UNAVAILABLE',
+          '该数据库 schema ' + String(schemaVersion) + ' 没有可用变化批次（需要 schema 3）；旧库历史不可重建，不会伪造。',
+          { topicId, requested: requestId, schemaVersion },
+        );
+      }
+      throw notFoundFailure(
+        'CHANGE_HISTORY_UNAVAILABLE',
+        '该数据库 schema ' + String(schemaVersion) + ' 没有变化历史（需要 schema 3 的 topic_changes）；请用可写模式打开一次以升级，或不会有可展示批次。',
+        { topicId, schemaVersion },
+      );
+    }
+    const latestRequest = store.changeBatchRequestId(topicId);
+    if (requestId !== undefined) {
+      if (latestRequest === null) {
+        throw notFoundFailure('BATCH_UNAVAILABLE', '该主题没有已保存的变化批次：' + requestId, {
+          topicId,
+          requested: requestId,
+        });
+      }
+      if (latestRequest !== requestId) {
+        // 数据库中完全没有这个 requestId → 未知批次；存在但已被取代 → 旧批次。
+        if (store.getRequest(requestId) === null) {
+          throw notFoundFailure(
+            'BATCH_UNAVAILABLE',
+            '数据库中不存在该 requestId 的写入记录：' + requestId + '（当前最新批次为 ' + latestRequest + '）',
+            { topicId, requested: requestId, latest: latestRequest },
+          );
+        }
+        throw operationConflictFailure(
+          'BATCH_SUPERSEDED',
+          '请求的批次 ' + requestId + ' 已被更新的批次 ' + latestRequest + ' 取代；不会静默换批次。',
+          { topicId, requested: requestId, latest: latestRequest },
+        );
+      }
+    }
+
+    if (patch) {
+      let detail: ChangeBatchDetail;
+      if (nodeId !== undefined) {
+        const summary = store.latestChangeSummary(topicId);
+        if (summary === null) {
+          throw notFoundFailure('CHANGE_NOT_FOUND', '该主题没有最新变化批次：' + topicId, { topicId });
+        }
+        const change = store.nodeChange(topicId, nodeId);
+        if (change === null) {
+          throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在当前最新批次中：' + nodeId, {
+            topicId,
+            nodeId,
+            requestId: summary.requestId,
+          });
+        }
+        detail = {
+          requestId: summary.requestId,
+          topicId: summary.topicId,
+          at: summary.at,
+          counts: summary.counts,
+          nodes: [change],
+        };
+      } else {
+        const full = store.latestChangeDetail(topicId);
+        if (full === null) {
+          throw notFoundFailure('CHANGE_NOT_FOUND', '该主题没有最新变化批次：' + topicId, { topicId });
+        }
+        detail = full;
+      }
+      const applied = applyDiffBudget(detail, budgetLimit);
+      return {
+        ok: true,
+        command: 'diff',
+        source: 'database',
+        workspaceId: snapshot.workspaceId,
+        topicId,
+        batch: applied.batch,
+        budget: applied.budget,
+        diagnostics: [],
+      };
+    }
+
+    const summary = store.latestChangeSummary(topicId);
+    if (summary === null) {
+      throw notFoundFailure('CHANGE_NOT_FOUND', '该主题没有最新变化批次：' + topicId, { topicId });
+    }
+    if (nodeId !== undefined) {
+      const nodes: ChangeNodeSummary[] = summary.nodes.filter((node) => node.nodeId === nodeId);
+      if (nodes.length === 0) {
+        throw notFoundFailure('CHANGE_NOT_FOUND', '该节点不在当前最新批次中：' + nodeId, {
+          topicId,
+          nodeId,
+          requestId: summary.requestId,
+        });
+      }
+      return {
+        ok: true,
+        command: 'diff',
+        source: 'database',
+        workspaceId: snapshot.workspaceId,
+        topicId,
+        batch: { ...summary, nodes },
+        diagnostics: [],
+      };
+    }
+    return {
+      ok: true,
+      command: 'diff',
+      source: 'database',
+      workspaceId: snapshot.workspaceId,
+      topicId,
+      batch: summary,
+      diagnostics: [],
+    };
+  });
+}
+
+async function runDiffPreview(
+  spec: CommandSpec,
+  parsed: ParsedArgs,
+  runtime: CliRuntime,
+): Promise<Record<string, unknown>> {
+  const input = await readJsonInput(parsed, runtime, spec);
+  const action = await convertBatchInput(parseJsonText(input.text, input.sourcePath, 'diff'), input.baseDir, spec);
+  const prepared = await withWorkspaceStore(spec, parsed, runtime, async ({ root, snapshot }): Promise<PreparedWrite> => ({
+    root,
+    workspaceId: snapshot.workspaceId,
+    action,
+  }));
+  const deps = serviceDeps(runtime, parsed);
+  const service = await resolveService(prepared.root, prepared.workspaceId, deps);
+  const result = await submitAgentChange(service, action, deps, undefined, { dryRun: true, includeDiff: true });
+  const response = result.response as AgentCheckResponse;
+  if (response.dryRun !== true || response.preview === undefined) {
+    throw serviceFailure(
+      'SERVICE_RESPONSE_INVALID',
+      '--input 预览需要服务返回 includeDiff preview（AgentCheckResponse.preview）；请让 CLI 与服务使用同一构建。',
+      { requestId: result.requestId },
+    );
+  }
+  const preview = response.preview as ChangeBatchDetail;
+  if (!Array.isArray(preview.nodes) || typeof preview.requestId !== 'string') {
+    throw serviceFailure('SERVICE_RESPONSE_INVALID', '服务返回的 preview 结构不完整', {
+      requestId: result.requestId,
+    });
+  }
+  return {
+    ok: true,
+    command: 'diff',
+    source: 'preview',
+    workspaceId: response.workspaceId,
+    topicId: response.topicId,
+    requestId: result.requestId,
+    batch: summarizeChangeDetail(preview),
+    diagnostics: response.diagnostics,
+  };
+}
+
+async function runDiff(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntime): Promise<Record<string, unknown>> {
+  const input = parsed.values.get('input');
+  const fromStdin = flag(parsed, 'input-stdin');
+  const patch = flag(parsed, 'patch');
+  const nodeId = parsed.values.get('node');
+  const requestId = parsed.values.get('request');
+  const topicReference = parsed.positional[0];
+  if (input !== undefined && fromStdin) {
+    throw usageFailure('--input 与 --input-stdin 互斥，只能给一个', {
+      details: { field: 'input' },
+      usage: spec.usage[0],
+    });
+  }
+  if (input !== undefined || fromStdin) {
+    const conflicts: string[] = [];
+    if (topicReference !== undefined) conflicts.push('主题位置参数');
+    if (nodeId !== undefined) conflicts.push('--node');
+    if (requestId !== undefined) conflicts.push('--request');
+    if (patch) conflicts.push('--patch');
+    if (conflicts.length > 0) {
+      throw usageFailure(
+        '--input 预览只接受 batch JSON（--input/--input-stdin）：不接受 ' + conflicts.join('、'),
+        { details: { conflicts }, usage: spec.usage[0] },
+      );
+    }
+    return runDiffPreview(spec, parsed, runtime);
+  }
+  if (topicReference === undefined) {
+    throw usageFailure('缺少主题：aichat diff <topicId|key>（或用 --input/--input-stdin 预览）', {
+      usage: spec.usage[0],
+    });
+  }
+  if (patch && nodeId === undefined) {
+    throw usageFailure('--patch 必须与 --node 同用：aichat diff <topicId> --node <id> --patch', {
+      details: { field: 'patch' },
+      usage: spec.usage[0],
+    });
+  }
+  return runLatestDiff(spec, parsed, runtime, topicReference);
+}
+
 async function runEdit(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRuntime): Promise<Record<string, unknown>> {
   return performWrite('edit', spec, parsed, runtime, (snapshot) => buildEditAction(spec, parsed, runtime, snapshot));
 }
@@ -1786,6 +2140,21 @@ async function convertPatchInput(
   const allowed = new Set(['title', 'summary', 'body', 'append', 'replace', 'important', 'incoming', 'bodyFile', 'appendFile', 'replaceFile']);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
+      if (key === 'description') {
+        // 常见误用：把入边说明写在 patch 顶层；必须放在 patch.incoming.description。
+        throw usageFailure(
+          label +
+            ' 的 description 位置不对：入边说明必须写在 patch.incoming.description（patch 顶层没有 description）。最小正确片段：{"incoming":{"description":"为什么改接"}}',
+          {
+            details: {
+              field: label + '.description',
+              hint: 'patch.incoming.description',
+              example: { incoming: { description: '为什么改接' } },
+            },
+            usage: 'aichat diff <topicId> 或 aichat batch --input batch.json',
+          },
+        );
+      }
       throw usageFailure(label + ' 未知字段：' + key, { details: { field: label + '.' + key } });
     }
   }
@@ -2742,6 +3111,8 @@ async function dispatch(spec: CommandSpec, parsed: ParsedArgs, runtime: CliRunti
       return runValidate(spec, parsed, runtime);
     case 'search':
       return runSearch(spec, parsed, runtime);
+    case 'diff':
+      return runDiff(spec, parsed, runtime);
     case 'read':
     case 'resume':
       return runReadThenMap(spec.name, spec, parsed, runtime);

@@ -13,7 +13,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { LayoutResult } from '../layout/types.js';
-import type { GraphNode } from '../../next/protocol.js';
+import type { ChangeKind, GraphNode } from '../../next/protocol.js';
 import type { GraphView } from '../graph/viewModel.js';
 import { buildFlowEdges } from '../graph/flowEdges.js';
 import { useCanvasViewport } from '../graph/useCanvasViewport.js';
@@ -40,11 +40,11 @@ export interface CanvasProps {
   /** Node to keep at its previous screen position after a structural change. */
   anchorNodeId: string | null;
   /**
-   * Node ids of the current topic's `GraphResponse.lastChanges[topicId].nodeIds`.
+   * Latest-batch label per node for the current topic (added / modified).
    * Read-only decoration: it never affects geometry, and view-only actions cannot
    * change it.
    */
-  recentNodeIds?: ReadonlySet<string>;
+  changeKinds?: ReadonlyMap<string, ChangeKind>;
   /** Stable node ids with an importance write in flight. */
   importanceBusyIds?: ReadonlySet<string>;
   /** Writes one node's important flag from its card; omitted in the read-only offline reader. */
@@ -57,7 +57,7 @@ const nodeTypes = { topic: TopicCard };
 const edgeTypes = { route: RouteEdge, trunk: TrunkEdge };
 
 function CanvasInner(props: CanvasProps): React.JSX.Element {
-  const { view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, recentNodeIds, importanceBusyIds, onToggleImportant, importanceDisabled } = props;
+  const { view, layout, layoutStatus, layoutError, activeNodeId, selectedNodeId, onSelectNode, onOpenNodeDetail, onToggleCollapse, onViewportChange, fitSignal, savedViewport, anchorNodeId, changeKinds, importanceBusyIds, onToggleImportant, importanceDisabled } = props;
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TopicCardData>>([]);
 
   const flowNodes = useMemo<Node<TopicCardData>[]>(() => {
@@ -73,6 +73,7 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
       // initialised with an undefined position and crash the reader.
       if (position === undefined || !Number.isFinite(position.x) || !Number.isFinite(position.y)) continue;
       const height = heights[node.id] ?? layout.cardHeight;
+      const changeKind = changeKinds?.get(node.id);
       result.push({
         id: node.id,
         type: 'topic',
@@ -93,7 +94,7 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
           hiddenCount: view.hiddenDescendantCounts.get(node.id) ?? 0,
           collapsed: collapsed.has(node.id),
           childCount: children.get(node.id) ?? 0,
-          recent: recentNodeIds?.has(node.id) ?? false,
+          ...(changeKind !== undefined ? { changeKind } : {}),
           importanceBusy: importanceBusyIds?.has(node.id) ?? false,
           importanceDisabled: importanceDisabled === true,
           ...(onToggleImportant !== undefined ? { onToggleImportant } : {}),
@@ -102,7 +103,7 @@ function CanvasInner(props: CanvasProps): React.JSX.Element {
       });
     }
     return result;
-  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, recentNodeIds, importanceBusyIds, onToggleImportant, importanceDisabled]);
+  }, [layout, view, activeNodeId, selectedNodeId, onToggleCollapse, changeKinds, importanceBusyIds, onToggleImportant, importanceDisabled]);
 
   // `layout` is the dependency that carries `edgeRoutes` and `branchTrunks`
   // together, so a new trunk set always rebuilds the edge list.

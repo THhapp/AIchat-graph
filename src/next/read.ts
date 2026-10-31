@@ -24,6 +24,7 @@ import type {
   GraphNode,
   ReadBudget,
   ReadItem,
+  ReadNode,
   ReadPage,
   ReadScope,
   ReadViewKind,
@@ -50,13 +51,17 @@ export interface ReadRequest {
 }
 
 interface CursorState {
-  v: 1;
+  v: 2;
   view: ReadViewKind;
   topicId: string;
-  nodeIds: string[];
+  /** Compact original range; explicit content node ids/order are kept only here. */
+  scope: ReadScope;
   anchor?: string | undefined;
   index: number;
   start: number;
+  /** Slice conditions survive across pages. */
+  bodyMode: 'segment' | 'full' | 'meta';
+  length: number;
   fingerprint: string;
 }
 
@@ -75,9 +80,18 @@ function fingerprintOf(snapshot: Snapshot, topic: TopicView, nodeIds: readonly s
   return createHash('sha256').update(JSON.stringify({ topic: topic.id + ':' + String(topic.revision), nodes })).digest('hex');
 }
 
-function scopeOf(view: ReadViewKind, topic: TopicView, nodeIds: readonly string[]): ReadScope {
-  if (view === 'overview' || view === 'resume') return { kind: 'topic' };
-  return { kind: 'nodes', nodeIds: [...nodeIds] };
+function scopeOf(effective: ReadRequest, built: { topic: TopicView; items: ContentCandidate[] }): ReadScope {
+  if (effective.view === 'overview' || effective.view === 'resume') return { kind: 'topic' };
+  if (effective.view === 'structure') {
+    return effective.from === undefined ? { kind: 'topic' } : { kind: 'subtree', from: effective.from };
+  }
+  return { kind: 'nodes', nodeIds: built.items.map((item) => item.node.id) };
+}
+
+/** Read items omit topicId: the response-level topic already owns the scope. */
+function readNode(node: NodeView): ReadNode {
+  const { topicId: _topicId, ...rest } = publicNode(node);
+  return rest;
 }
 
 function mainline(topic: TopicView, nodes: readonly NodeView[]): NodeView[] {
@@ -194,11 +208,43 @@ function encodeCursor(state: CursorState): string {
 function decodeCursor(raw: string): CursorState {
   try {
     const value = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as CursorState;
-    if (value.v !== 1 || typeof value.topicId !== 'string' || !Array.isArray(value.nodeIds)) throw new Error('bad');
+    if (value.v !== 2 || typeof value.topicId !== 'string') throw new Error('bad');
+    if (!isCursorScope(value.scope)) throw new Error('bad');
+    if (value.bodyMode !== 'segment' && value.bodyMode !== 'full' && value.bodyMode !== 'meta') throw new Error('bad');
+    if (!Number.isInteger(value.length) || value.length < 1) throw new Error('bad');
     return value;
   } catch {
     throw new DomainError('INVALID_READ', 'cursor 无效或已过期', 400);
   }
+}
+
+function isCursorScope(value: unknown): value is ReadScope {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const scope = value as Record<string, unknown>;
+  if (scope['kind'] === 'topic') return true;
+  if (scope['kind'] === 'subtree') return typeof scope['from'] === 'string' && scope['from'].length > 0;
+  if (scope['kind'] === 'nodes') return Array.isArray(scope['nodeIds']) && scope['nodeIds'].every((id) => typeof id === 'string');
+  return false;
+}
+
+function cursorRequest(request: ReadRequest, cursor: CursorState): ReadRequest {
+  const scope = cursor.scope;
+  return {
+    ...request,
+    view: cursor.view,
+    topicId: cursor.topicId,
+    ...(scope.kind === 'nodes' ? { nodeIds: scope.nodeIds } : { nodeIds: undefined }),
+    ...(scope.kind === 'subtree' ? { from: scope.from } : { from: undefined }),
+    anchor: cursor.anchor,
+    start: cursor.start,
+    ...(cursor.bodyMode === 'meta'
+      ? { meta: true, full: false }
+      : cursor.bodyMode === 'full'
+        ? { meta: false, full: true }
+        : { meta: false, full: false, length: cursor.length }),
+    section: undefined,
+    sectionIndex: undefined,
+  };
 }
 
 function usedOf(response: ReadViewResponse): number {
@@ -233,118 +279,130 @@ export function readView(
     throw new DomainError('INVALID_READ', 'budget 必须是 1-' + String(MAX_READ_BUDGET) + ' 的整数', 400);
   }
   const cursor = request.cursor === undefined ? null : decodeCursor(request.cursor);
-  const view = cursor?.view ?? request.view;
-  const topicId = cursor?.topicId ?? request.topicId;
-  if (topicId === undefined) throw new DomainError('INVALID_READ', 'read 需要主题或 cursor');
-  const effective: ReadRequest = {
-    ...request,
-    view,
-    topicId,
-    nodeIds: cursor?.nodeIds ?? request.nodeIds,
-    anchor: cursor?.anchor ?? request.anchor,
-    section: cursor === null ? request.section : undefined,
-    sectionIndex: cursor === null ? request.sectionIndex : undefined,
-  };
+  const effective: ReadRequest = cursor === null
+    ? { ...request }
+    : cursorRequest(request, cursor);
+  if (effective.topicId === undefined) throw new DomainError('INVALID_READ', 'read 需要主题或 cursor');
+  const view = effective.view;
   const built = candidatesFor(snapshot, effective);
   const topic = built.topic;
   const fingerprint = fingerprintOf(snapshot, topic, built.items.map((item) => item.node.id));
-  if (cursor !== null) {
-    if (cursor.fingerprint !== fingerprint) {
-      throw new DomainError('STALE_READ', '相关节点已变化；请丢弃旧 cursor，从原范围重新读取', 409);
-    }
+  if (cursor !== null && cursor.fingerprint !== fingerprint) {
+    throw new DomainError('STALE_READ', '相关节点已变化；请丢弃旧 cursor，从原范围重新读取', 409);
   }
+  const scope = scopeOf(effective, built);
+  const bodyMode: CursorState['bodyMode'] = effective.meta === true
+    ? 'meta'
+    : effective.full === true
+      ? 'full'
+      : 'segment';
+  const bodyLength = bodyMode === 'segment' ? (effective.length ?? DEFAULT_READ_LENGTH) : 1;
+  const cursorFor = (index: number, start: number): string => encodeCursor({
+    v: 2,
+    view,
+    topicId: topic.id,
+    scope,
+    anchor: effective.anchor,
+    index,
+    start,
+    bodyMode,
+    length: bodyLength,
+    fingerprint,
+  });
   const startIndex = cursor?.index ?? 0;
   let bodyStart = cursor?.start ?? 0;
   const items: ReadItem[] = [];
   let index = startIndex;
-  let hasMore = false;
-  let next: string | undefined;
 
-  const build = (cutoff: number, withNext: boolean): ReadViewResponse => {
-    const scope: ReadScope = scopeOf(view, topic, built.items.map((item) => item.node.id));
+  const build = (cutoff: number, nextToken?: string): ReadViewResponse => {
     const candidate: ReadViewResponse = {
       ok: true, command: 'read', source, workspaceId: snapshot.workspaceId, view,
       topicId: topic.id, topicTitle: topic.title,
       scope: { ...scope, nodeCount: built.items.length, note: built.note },
-      ...(view === 'resume' && effective.anchor !== undefined ? { anchor: publicNode(findNode(snapshot, effective.anchor)) } : {}),
+      ...(view === 'resume' && effective.anchor !== undefined ? { anchorId: effective.anchor } : {}),
       items: items.slice(0, cutoff),
-      page: { hasMore: withNext, ...(withNext ? { next: '' } : {}) },
+      page: { hasMore: nextToken !== undefined, ...(nextToken !== undefined ? { next: nextToken } : {}) },
       budget: { unit: 'utf16', limit: budget, used: 0, mode: 'auto' },
       fingerprint,
       diagnostics: [],
     };
-    if (withNext) {
-      const lastIndex = cutoff - 1;
-      const state: CursorState = {
-        v: 1, view, topicId: topic.id, nodeIds: built.items.map((item) => item.node.id), anchor: effective.anchor,
-        index: Math.max(0, lastIndex), start: items[lastIndex]?.range.end ?? 0, fingerprint,
-      };
-      candidate.page.next = encodeCursor(state);
-    }
     return candidate;
   };
 
   while (index < built.items.length) {
     const candidate = built.items[index] as ContentCandidate;
-    const segment = candidate.omitted ? null : segmentFor(candidate.node, effective, bodyStart);
-    const range = segment?.range ?? { start: bodyStart, end: bodyStart, total: candidate.node.body.length, unit: 'utf16' as const };
+    const segment = candidate.omitted || effective.meta === true ? null : segmentFor(candidate.node, effective, bodyStart);
     const item: ReadItem = {
-      node: publicNode(candidate.node),
+      node: readNode(candidate.node),
       ...(candidate.role !== undefined ? { role: candidate.role } : {}),
-      body: segment?.text ?? '',
-      range,
-      truncated: segment?.truncated ?? false,
-      ...(candidate.omitted ? { omitted: true } : {}),
+      ...(segment !== null
+        ? { body: segment.text, range: segment.range, truncated: segment.truncated }
+        : { omitted: true as const }),
     };
-    const trial = [...items, item];
-    const old = items.length;
     items.push(item);
     const moreAfterBody = segment !== null && segment.range.end < segment.range.total;
-    hasMore = moreAfterBody || index + 1 < built.items.length;
-    const response = build(items.length, hasMore);
-    const length = usedOf(response);
-    if (length <= budget) {
+    const nextToken = moreAfterBody
+      ? cursorFor(index, segment.range.end)
+      : (index + 1 < built.items.length ? cursorFor(index + 1, 0) : undefined);
+    const response = build(items.length, nextToken);
+    if (usedOf(response) <= budget) {
       bodyStart = 0;
-      if (!hasMore) { index += 1; break; }
-      if (moreAfterBody) {
-        next = encodeCursor({ v: 1, view, topicId: topic.id, nodeIds: built.items.map((entry) => entry.node.id), anchor: effective.anchor, index, start: range.end, fingerprint });
-        hasMore = true;
+      if (nextToken === undefined) {
+        index += 1;
         break;
+      }
+      if (moreAfterBody) {
+        return finalBudget(response);
       }
       index += 1;
       continue;
     }
-    // Doesn't fit: shrink first/single body, otherwise stop before this item.
+
+    // Doesn't fit: shrink the first body segment, otherwise stop before this item.
     if (items.length === 1 && segment !== null) {
       let low = 0;
       let high = segment.text.length;
       let best: ReadItem | null = null;
+      let bestToken: string | undefined;
       while (low <= high) {
         const mid = Math.floor((low + high) / 2);
-        const shorter = sliceBody(candidate.node.body, { start: range.start, length: Math.max(1, mid) });
-        const item2: ReadItem = { node: publicNode(candidate.node), ...(candidate.role !== undefined ? { role: candidate.role } : {}), body: shorter.text, range: shorter.range, truncated: shorter.truncated };
+        const shorter = sliceBody(candidate.node.body, { start: segment.range.start, length: Math.max(1, mid) });
+        const item2: ReadItem = {
+          node: readNode(candidate.node),
+          ...(candidate.role !== undefined ? { role: candidate.role } : {}),
+          body: shorter.text,
+          range: shorter.range,
+          truncated: shorter.truncated,
+        };
         items[0] = item2;
-        const r = build(1, true);
-        if (usedOf(r as unknown as ReadViewResponse) <= budget) { best = item2; low = mid + 1; } else high = mid - 1;
+        const token = shorter.range.end < shorter.range.total
+          ? cursorFor(0, shorter.range.end)
+          : (built.items.length > 1 ? cursorFor(1, 0) : undefined);
+        const r = build(1, token);
+        if (usedOf(r) <= budget) {
+          best = item2;
+          bestToken = token;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
       }
       if (best === null) {
-        throw new DomainError('BUDGET_TOO_SMALL', '预算不足以容纳最小读取页；请增大 budget', 400, { minimum: usedOf(build(1, false)) });
+        throw new DomainError('BUDGET_TOO_SMALL', '预算不足以容纳最小读取页；请增大 budget', 400, { minimum: usedOf(build(1)) });
       }
       items[0] = best;
-      hasMore = best.range.end < best.range.total || index + 1 < built.items.length;
-      next = encodeCursor({ v: 1, view, topicId: topic.id, nodeIds: built.items.map((entry) => entry.node.id), anchor: effective.anchor, index, start: best.range.end, fingerprint });
-      break;
+      return finalBudget(build(1, bestToken));
     }
+
     items.pop();
-    if (old === 0) throw new DomainError('BUDGET_TOO_SMALL', '预算不足以容纳最小读取页；请增大 budget', 400, { minimum: usedOf(build(1, false)) });
-    hasMore = true;
-    next = encodeCursor({ v: 1, view, topicId: topic.id, nodeIds: built.items.map((entry) => entry.node.id), anchor: effective.anchor, index: old - 1, start: items[old - 1]?.range.end ?? 0, fingerprint });
-    break;
+    if (items.length === 0) {
+      throw new DomainError('BUDGET_TOO_SMALL', '预算不足以容纳最小读取页；请增大 budget', 400, { minimum: usedOf(build(0)) });
+    }
+    const token = cursorFor(index, bodyStart);
+    return finalBudget(build(items.length, token));
   }
 
-  const response = build(items.length, hasMore || next !== undefined);
-  response.page = { hasMore: hasMore || next !== undefined, ...(next !== undefined || (hasMore && items.length > 0) ? { next: next ?? build(items.length, true).page.next } : {}) };
-  return finalBudget(response);
+  return finalBudget(build(items.length));
 }
 
 export function findTopicSafe(snapshot: Snapshot, topicId: string): TopicView { return findTopic(snapshot, topicId); }

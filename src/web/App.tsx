@@ -23,8 +23,9 @@ import { searchGraph } from './lib/search.js';
 import { buildContinuationPrompt } from './lib/prompt.js';
 import { buildLocateText } from './lib/locate.js';
 import { useCopyFeedback } from './lib/clipboard.js';
-import { recentNodeIds } from './lib/recent.js';
+import { cardChangeKinds, nodeChangeKind, topicChangeBatch } from './lib/changes.js';
 import { importanceOf, useImportance } from './lib/importance.js';
+import { useNodeChange } from './data/useNodeChange.js';
 import { openWorkspaceRuntime, runtimeErrorMessage, stopRuntimeService, type RuntimeAction } from './data/runtime.js';
 import { Sidebar } from './components/Sidebar.js';
 import { DetailPanel, type DetailTab } from './components/DetailPanel.js';
@@ -140,9 +141,29 @@ export function App(): React.JSX.Element {
     !serviceStopped,
   );
 
-  // Decoration only: derived from the graph and the current topic, so folding,
-  // zooming and selecting can never make it appear or disappear.
-  const recent = useMemo(() => recentNodeIds(graph, effectiveTopicId), [graph, effectiveTopicId]);
+  // Latest persisted content batch: card labels and the topic change list. It
+  // is decoration from the current snapshot, never accumulated by the UI.
+  const batch = useMemo(() => topicChangeBatch(graph, effectiveTopicId), [graph, effectiveTopicId]);
+  const changeKinds = useMemo(() => cardChangeKinds(graph, effectiveTopicId), [graph, effectiveTopicId]);
+  const changeKind = nodeChangeKind(batch, selectedNode?.id ?? null);
+  /**
+   * The expanded change target: a card meta button or a topic change-list row.
+   * It is one id, so the card detail and the inline list row share one request.
+   */
+  const [changeTargetNodeId, setChangeTargetNodeId] = useState<string | null>(null);
+  // A target only makes sense inside one topic's batch: switching topics drops it.
+  useEffect(() => { setChangeTargetNodeId(null); }, [effectiveTopicId]);
+  const changeTarget = serviceStopped ? null : changeTargetNodeId;
+  const nodeChange = useNodeChange(
+    graph,
+    effectiveTopicId,
+    changeTarget,
+    changeTarget !== null,
+    snapshot.refresh,
+  );
+  const toggleChangeTarget = useCallback((nodeId: string) => {
+    setChangeTargetNodeId((current) => (current === nodeId ? null : nodeId));
+  }, []);
 
   const navCollapsedSet = useMemo(
     () => new Set(reading === null ? [] : navCollapsedNodeIds(reading.navTree, currentTopicId ?? '')),
@@ -492,7 +513,7 @@ export function App(): React.JSX.Element {
               fitSignal={fitSignal}
               savedViewport={reading?.viewport ?? null}
               anchorNodeId={anchorNodeId}
-              recentNodeIds={recent}
+              changeKinds={changeKinds}
               importanceBusyIds={importance.busyIds}
               importanceDisabled={serviceStopped}
               onToggleImportant={importance.set}
@@ -542,6 +563,14 @@ export function App(): React.JSX.Element {
               importanceBusy={importantBusyForSelected}
               importanceDisabled={serviceStopped}
               importanceError={importantErrorForSelected}
+              batch={batch}
+              changeKind={changeKind}
+              changeTargetNodeId={changeTarget}
+              nodeChange={nodeChange.change}
+              nodeChangeLoading={nodeChange.loading}
+              nodeChangeMissing={nodeChange.missing}
+              nodeChangeError={nodeChange.error}
+              {...(serviceStopped ? {} : { onToggleChange: toggleChangeTarget })}
               {...(selectedNode !== null
                 ? {
                     important: importanceOf(selectedNode),

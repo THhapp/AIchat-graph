@@ -7,6 +7,7 @@ import { layoutInputForView } from '../graph/layoutBridge.js';
 import { computeLayout } from '../layout/index.js';
 import type { LayoutResult } from '../layout/types.js';
 import { searchGraph } from '../lib/search.js';
+import { cardChangeKinds, nodeChangeFromDetail, nodeChangeKind } from '../lib/changes.js';
 import { useCopyFeedback } from '../lib/clipboard.js';
 import { GraphCanvas } from '../components/GraphCanvas.js';
 import { DetailPanel } from '../components/DetailPanel.js';
@@ -90,6 +91,7 @@ function OfflineReader(): React.JSX.Element {
   const [expandedTopics, setExpandedTopics] = useState<ReadonlySet<string> | null>(null);
   const [fitSignal, setFitSignal] = useState(FIT_SIGNAL_NONE);
   const [savedViewport] = useState<null>(null);
+  const [changeTargetNodeId, setChangeTargetNodeId] = useState<string | null>(null);
   const { copied, copy: copyText } = useCopyFeedback();
 
   const graph = state?.graph ?? null;
@@ -128,6 +130,18 @@ function OfflineReader(): React.JSX.Element {
       topic: selectedTopic,
     }),
     [graph, state, tab, selectedNode, selectedTopic, bodies],
+  );
+  // The frozen batch is embedded in the export; labels and the topic change list
+  // come from it, exactly like the live reader's graph.lastChanges.
+  const changeKinds = useMemo(
+    () => cardChangeKinds(graph, selectedTopic?.id ?? null),
+    [graph, selectedTopic],
+  );
+  const changeKind = nodeChangeKind(details.batch, selectedNodeId);
+  // The same target id drives the card diff and the inline topic change row.
+  const targetChange = useMemo(
+    () => nodeChangeFromDetail(state?.doc.changes ?? null, changeTargetNodeId),
+    [state, changeTargetNodeId],
   );
 
   const openDetail = useCallback((id: string) => {
@@ -255,6 +269,7 @@ function OfflineReader(): React.JSX.Element {
             fitSignal={fitSignal}
             savedViewport={savedViewport}
             anchorNodeId={anchorNodeId}
+            changeKinds={changeKinds}
           />
         </main>
 
@@ -274,11 +289,21 @@ function OfflineReader(): React.JSX.Element {
               detailVersion={details.detailVersion}
               activeNodeId={null}
               selectedNodeId={selectedNodeId}
-              onSelectNode={openDetail}
+              onSelectNode={(id) => { setSelectedNodeId(id); }}
               onRetry={() => undefined}
               onClose={() => { setRightOpen(false); }}
               onOpenNode={(id) => { setSelectedNodeId(id); setTab('node'); }}
               boundaryNodes={state?.doc.boundaryNodes ?? []}
+              batch={details.batch}
+              changeKind={changeKind}
+              changeTargetNodeId={changeTargetNodeId}
+              nodeChange={targetChange}
+              nodeChangeLoading={false}
+              nodeChangeMissing={changeTargetNodeId !== null && targetChange === null && details.batch !== null}
+              nodeChangeError={null}
+              onToggleChange={(nodeId) => {
+                setChangeTargetNodeId((current) => (current === nodeId ? null : nodeId));
+              }}
               important={selectedNode?.important === true}
               onCopyContinuation={() => {
                 copyText(

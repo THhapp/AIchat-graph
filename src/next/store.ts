@@ -41,9 +41,22 @@ import type {
   ExistingSelector,
   NodeCreate,
   ChangeStatusResponse,
+  ChangeBatchDetail,
+  ChangeBatchSummary,
+  ChangeNodeDiff,
 } from './protocol.js';
+import {
+  computeChangeBatches,
+  detailStoredBatch,
+  isPureDeletionBatch,
+  parseStoredBatch,
+  summarizeStoredBatch,
+  type StoredChangeBatch,
+} from './changes.js';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+/** The intermediate schema used by the one-way v1 -> v2 -> v3 upgrade. */
+export const V2_SCHEMA_VERSION = 2;
 const LEGACY_SCHEMA_VERSION = 1;
 const DB_FILE = 'graph.sqlite';
 
@@ -60,12 +73,15 @@ export class GraphStore {
   readonly dbPath: string;
   private readonly db: DatabaseSync;
   private readonly instanceId: string;
+  /** Read-only v1/v2 databases have no topic_changes table; helpers stay safe then. */
+  private readonly hasTopicChanges: boolean;
 
   private constructor(root: string, db: DatabaseSync, instanceId: string) {
     this.root = root;
     this.dbPath = path.join(root, DB_FILE);
     this.db = db;
     this.instanceId = instanceId;
+    this.hasTopicChanges = tableExists(db, 'topic_changes');
   }
 
   static create(root: string, name: string, instanceId = ''): GraphStore {
@@ -91,11 +107,13 @@ export class GraphStore {
     try {
       configure(db, options.readonly === true);
       const version = Number((db.prepare("SELECT value FROM meta WHERE key='schemaVersion'").get() as any)?.value);
-      if (version === LEGACY_SCHEMA_VERSION) {
-        // 旧库只读时按 v1 结构直接读取，不升级、不写库；下一次可写打开再迁移。
-        if (options.readonly !== true) upgradeLegacySchema(db);
-      } else if (version !== SCHEMA_VERSION) {
+      if (version !== LEGACY_SCHEMA_VERSION && version !== V2_SCHEMA_VERSION && version !== SCHEMA_VERSION) {
         throw new DomainError('DB_SCHEMA_UNSUPPORTED', '不支持的数据库 schema 版本：' + String(version), 422);
+      }
+      // 只读打开 v1/v2 时按原结构读取，不迁移、不建表、不写库；可写打开才逐级升级。
+      if (options.readonly !== true) {
+        if (version === LEGACY_SCHEMA_VERSION) upgradeLegacySchema(db);
+        if (version === LEGACY_SCHEMA_VERSION || version === V2_SCHEMA_VERSION) upgradeTopicChangesSchema(db);
       }
     } catch (error) {
       db.close();
@@ -109,6 +127,9 @@ export class GraphStore {
     const snapshot = projectSnapshot(input.workspace, input.topics, input.nodes);
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      // topic_changes references topics; clear children first so a full import
+      // never trips the foreign key.
+      this.db.exec('DELETE FROM topic_changes');
       this.db.exec('DELETE FROM nodes');
       this.db.exec('DELETE FROM topics');
       this.db.prepare('UPDATE workspace SET id=?,name=?,active_node=?,revision=? WHERE rowid=(SELECT rowid FROM workspace LIMIT 1)').run(
@@ -215,12 +236,37 @@ export class GraphStore {
         candidate.workspace.activeNode !== before.workspace.activeNode;
       // 无论 noop 还是 dry-run 都先做完整图校验；失败整体回滚。
       projectSnapshot(candidate.workspace, candidate.topics, candidate.nodes);
+      const at = new Date().toISOString();
       if (dryRun) {
+        // preview 与正常提交走同一 candidate/diff 路径，但只回滚、不落库。
+        let preview: ChangeBatchDetail | undefined;
+        if (request.includeDiff === true) {
+          this.applyRevisions(before, candidate, diff, at);
+          const previewBatches = computeChangeBatches(
+            before.nodes,
+            candidate.nodes,
+            request.requestId,
+            at,
+          );
+          const previewBatch =
+            previewBatches.find((batch) => batch.topicId === outcome.primaryTopicId) ??
+            previewBatches[0];
+          preview = previewBatch === undefined
+            ? {
+                requestId: request.requestId,
+                topicId: outcome.primaryTopicId ?? '',
+                at,
+                counts: { added: 0, modified: 0, deleted: 0 },
+                nodes: [],
+              }
+            : detailStoredBatch(previewBatch);
+        }
         const response: AgentCheckResponse = {
           ok: true, command: request.action.action, dryRun: true, state: 'checked',
           requestId: request.requestId, workspaceId: before.workspace.id,
           topicId: outcome.primaryTopicId, summary: outcome.summary,
           diagnostics: [], changes: changesOf(diff),
+          ...(preview === undefined ? {} : { preview }),
         };
         this.db.exec('ROLLBACK');
         return response;
@@ -241,8 +287,15 @@ export class GraphStore {
         this.finishRequest(request.requestId, bodyHash, 'noop', response);
         return response;
       }
-      this.applyRevisions(before, candidate, diff);
+      this.applyRevisions(before, candidate, diff, at);
+      // 内容批次与提交在同一事务内持久化；important-only 不产生批次，
+      // 因此不会替换该主题已有的最新内容批次。
+      const batches = computeChangeBatches(before.nodes, candidate.nodes, request.requestId, at);
+      this.applyPureDeletionRecency(candidate, batches);
       this.persistDiff(before, candidate);
+      this.persistChangeBatches(batches);
+      const batch =
+        batches.find((entry) => entry.topicId === outcome.primaryTopicId) ?? batches[0];
       const response: AgentChangeResponse = {
         ok: true, requestId: request.requestId, action: request.action.action,
         workspaceId: before.workspace.id, topicId: outcome.primaryTopicId,
@@ -250,6 +303,7 @@ export class GraphStore {
         created: { topicId: outcome.createdTopicId, nodeIds: outcome.createdNodeIds, aliases: outcome.aliases },
         changedNodeIds: [...diff.created, ...diff.updated, ...diff.deleted].map((node) => node.id),
         nodeRevisions: revisionsOf(request.action, diff, candidate.nodes),
+        ...(batch === undefined ? {} : { change: summarizeStoredBatch(batch) }),
         summary: outcome.summary,
         diagnostics: [], revision: candidate.workspace.revision,
         instanceId: this.instanceId,
@@ -280,8 +334,7 @@ export class GraphStore {
    * 只为前后最终字段有差异的节点递增持久 revision、更新主题 lastChange 与 topic revision，
    * 并递增 workspace revision。created/updated/deleted 由调用方按真实差异给出。
    */
-  private applyRevisions(before: State, candidate: State, diff: NodeDiff): void {
-    const now = new Date().toISOString();
+  private applyRevisions(before: State, candidate: State, diff: NodeDiff, at: string): void {
     const beforeNodes = new Map(before.nodes.map((node) => [node.id, node]));
     const updated = new Set(diff.updated.map((node) => node.id));
     const contentByTopic = new Map<string, string[]>();
@@ -298,7 +351,7 @@ export class GraphStore {
     for (const [topicId, ids] of contentByTopic) {
       const topic = candidate.topics.find((entry) => entry.id === topicId);
       if (topic === undefined) continue;
-      topic.lastChangeAt = now;
+      topic.lastChangeAt = at;
       topic.lastChangeIds = [...new Set(ids)].filter((id) => candidate.nodes.some((node) => node.id === id));
     }
     for (const node of diff.deleted) {
@@ -392,6 +445,110 @@ export class GraphStore {
         afterWorkspace.revision,
         afterWorkspace.id,
       );
+    }
+  }
+
+  /** Pure deletions replace the latest batch and mark the topic as just-changed. */
+  private applyPureDeletionRecency(candidate: State, batches: readonly StoredChangeBatch[]): void {
+    for (const batch of batches) {
+      if (!isPureDeletionBatch(batch)) continue;
+      const topic = candidate.topics.find((entry) => entry.id === batch.topicId);
+      if (topic !== undefined) {
+        topic.lastChangeAt = batch.at;
+        topic.lastChangeIds = [];
+      }
+    }
+  }
+
+  /** Replace the latest content batch per topic; absent topics keep their old row. */
+  private persistChangeBatches(batches: readonly StoredChangeBatch[]): void {
+    if (batches.length === 0) return;
+    if (!this.hasTopicChanges) {
+      throw new DomainError('DB_SCHEMA_UNSUPPORTED', '当前数据库缺少 topic_changes 表', 500);
+    }
+    const upsert = this.db.prepare(
+      'INSERT INTO topic_changes(topic_id,request_id,at,nodes_json) VALUES(?,?,?,?) ' +
+        'ON CONFLICT(topic_id) DO UPDATE SET request_id=excluded.request_id, at=excluded.at, nodes_json=excluded.nodes_json',
+    );
+    for (const batch of batches) {
+      upsert.run(batch.topicId, batch.requestId, batch.at, JSON.stringify(batch.nodes));
+    }
+  }
+
+  /** Stored schema version; read-only v1/v2 databases report their real version. */
+  schemaVersion(): number {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key='schemaVersion'").get() as any;
+    return Number(row?.value);
+  }
+
+  private storedBatch(topicId: string): StoredChangeBatch | null {
+    if (!this.hasTopicChanges) return null;
+    let row: any;
+    try {
+      row = this.db.prepare('SELECT * FROM topic_changes WHERE topic_id=?').get(topicId);
+    } catch {
+      return null;
+    }
+    if (row === undefined || row === null) return null;
+    return parseStoredBatch(
+      topicId,
+      String(row.request_id ?? ''),
+      String(row.at ?? ''),
+      row.nodes_json,
+    );
+  }
+
+  latestChangeSummary(topicId: string): ChangeBatchSummary | null {
+    const batch = this.storedBatch(topicId);
+    return batch === null ? null : summarizeStoredBatch(batch);
+  }
+
+  latestChangeDetail(topicId: string): ChangeBatchDetail | null {
+    const batch = this.storedBatch(topicId);
+    return batch === null ? null : detailStoredBatch(batch);
+  }
+
+  nodeChange(topicId: string, nodeId: string): ChangeNodeDiff | null {
+    const batch = this.storedBatch(topicId);
+    if (batch === null) return null;
+    const detail = detailStoredBatch(batch);
+    return detail.nodes.find((node) => node.nodeId === nodeId) ?? null;
+  }
+
+  /** Latest persisted summaries for all topics; empty on read-only v1/v2. */
+  changeSummaries(): Record<string, ChangeBatchSummary> {
+    if (!this.hasTopicChanges) return {};
+    let rows: any[];
+    try {
+      rows = this.db.prepare('SELECT * FROM topic_changes ORDER BY topic_id').all() as any[];
+    } catch {
+      return {};
+    }
+    const summaries: Record<string, ChangeBatchSummary> = {};
+    for (const row of rows) {
+      const topicId = String(row.topic_id ?? '');
+      if (topicId.length === 0) continue;
+      const batch = parseStoredBatch(
+        topicId,
+        String(row.request_id ?? ''),
+        String(row.at ?? ''),
+        row.nodes_json,
+      );
+      if (batch !== null) summaries[topicId] = summarizeStoredBatch(batch);
+    }
+    return summaries;
+  }
+
+  /** Latest persisted batch request id for a topic (CLI --request stale checks). */
+  changeBatchRequestId(topicId: string): string | null {
+    if (!this.hasTopicChanges) return null;
+    try {
+      const row = this.db.prepare('SELECT request_id FROM topic_changes WHERE topic_id=?').get(topicId) as any;
+      if (row === undefined || row === null) return null;
+      const requestId = String(row.request_id ?? '');
+      return requestId.length === 0 ? null : requestId;
+    } catch {
+      return null;
     }
   }
 }
@@ -842,7 +999,7 @@ function upgradeLegacySchema(db: DatabaseSync): void {
       CREATE INDEX nodes_topic ON nodes(topic_id);
       CREATE INDEX nodes_from ON nodes(from_id);
     `);
-    const updated = db.prepare("UPDATE meta SET value=? WHERE key='schemaVersion'").run(String(SCHEMA_VERSION));
+    const updated = db.prepare("UPDATE meta SET value=? WHERE key='schemaVersion'").run(String(V2_SCHEMA_VERSION));
     if (Number(updated.changes) !== 1) throw new Error('meta.schemaVersion 更新失败');
     db.exec('COMMIT');
   } catch (error) {
@@ -851,9 +1008,54 @@ function upgradeLegacySchema(db: DatabaseSync): void {
       'DB_SCHEMA_UPGRADE_FAILED',
       '旧数据库结构升级失败，原有数据未变：' + (error instanceof Error ? error.message : String(error)),
       500,
-      { fromSchemaVersion: LEGACY_SCHEMA_VERSION, toSchemaVersion: SCHEMA_VERSION },
+      { fromSchemaVersion: LEGACY_SCHEMA_VERSION, toSchemaVersion: V2_SCHEMA_VERSION },
     );
   }
+}
+
+/**
+ * v2 -> v3 upgrade: only add the topic_changes table and bump meta. Existing
+ * v2 databases have no stored before-content, so their batch history starts
+ * empty; nothing is fabricated from the legacy last-change timestamps.
+ */
+function upgradeTopicChangesSchema(db: DatabaseSync): void {
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    createTopicChangesTable(db);
+    const updated = db.prepare("UPDATE meta SET value=? WHERE key='schemaVersion'").run(String(SCHEMA_VERSION));
+    if (Number(updated.changes) !== 1) throw new Error('meta.schemaVersion 更新失败');
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw new DomainError(
+      'DB_SCHEMA_UPGRADE_FAILED',
+      '数据库结构升级失败，原有数据未变：' + (error instanceof Error ? error.message : String(error)),
+      500,
+      { fromSchemaVersion: V2_SCHEMA_VERSION, toSchemaVersion: SCHEMA_VERSION },
+    );
+  }
+}
+
+function tableExists(db: DatabaseSync, table: string): boolean {
+  try {
+    const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) as any;
+    return row !== undefined && row !== null;
+  } catch {
+    return false;
+  }
+}
+
+function createTopicChangesTable(db: DatabaseSync): void {
+  // IF NOT EXISTS keeps the upgrade "only create the table" semantics even for
+  // databases that already have the table (aborted/duplicated migration tests).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS topic_changes(
+      topic_id TEXT PRIMARY KEY REFERENCES topics(id),
+      request_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      nodes_json TEXT NOT NULL
+    );
+  `);
 }
 
 function createSchema(db: DatabaseSync): void {
@@ -898,6 +1100,7 @@ function createSchema(db: DatabaseSync): void {
       created_at TEXT NOT NULL
     );
   `);
+  createTopicChangesTable(db);
 }
 
 function nodeRow(row: any): NodeRecord {

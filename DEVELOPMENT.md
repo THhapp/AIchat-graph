@@ -79,7 +79,8 @@ CLI 的默认目录来自当前程序根 .aichat/default.json；便携包、源�
 | 模块 | 职责 |
 | --- | --- |
 | src/next/protocol.ts、model.ts | 领域记录、输入输出、图校验和编号 |
-| src/next/store.ts | SQLite、最终候选、差异提交与请求结果 |
+| src/next/store.ts | SQLite、最终候选、差异提交、变化批次与请求结果 |
+| src/next/changes.ts | 变化批次：字段差异、正文 unified patch 与持久化格式 |
 | src/next/read.ts | overview / structure / content / resume、预算与游标 |
 | src/next/cli.ts、args.ts、client.ts、config.ts | 命令、帮助、输入、open/stop 服务接入和工作区定位 |
 | src/next/installation.ts | 源码/便携布局、程序根、随包 Node、真实 Agent 入口与启动日志 |
@@ -92,6 +93,7 @@ CLI 的默认目录来自当前程序根 .aichat/default.json；便携包、源�
 | scripts/package-windows.mjs | Windows x64 自包含包与 ZIP 构建 |
 
 读取直接打开同一 SQLite；普通写入通过本机服务进入统一 GraphStore.commit。
+变化批次与提交在同一事务持久化；diff 读取最新批次时直接只读数据库，不需要服务。
 成功提交后广播 SSE 并安排成品更新；没有源 MD watcher、文件事务或 writer.lock。
 SQLite WAL、BEGIN IMMEDIATE 和 busy timeout 协调数据库写入。
 当前没有多实例通知机制，日常使用维持一个服务；不把“可打开多个连接”当作协同能力。
@@ -102,20 +104,24 @@ Markdown AST 章节读取、正文渲染及确有调用者的 IO / 资源辅助�
 ## 存储与版本
 
 工作区由 graph.sqlite、resources/ 和 .aichat/ 下的本机状态组成。
-数据库包含 meta、workspace、topics、nodes、requests：
-workspace 保存身份及总 revision；topics 保存 key、标题、版本和各自最近一批；
+数据库包含 meta、workspace、topics、nodes、topic_changes、requests：
+workspace 保存身份及总 revision；topics 保存 key、标题、版本和最近更新兼容字段；
 nodes 保存正文、摘要、连接、重要性及节点版本；
+topic_changes 每个主题一行，保存最近一批内容变化的 request_id、时间与参与节点的 before／after 快照，只保留一批；
 requests 保存有限的请求结果，用于幂等和 status。
 
-- 节点真实变化才增加其 revision；重要性变化也增加，但不替换内容更新集合。
+- 节点真实变化才增加其 revision；重要性变化也增加，但不产生也不替换变化批次。
 - 主题和工作区版本随实际变化更新；noop 不增加；服务重启不重置持久版本。
 - summary 为 null 表示没有显式摘要，读取时按正文首段派生。
 - 编号、坐标和 children 是派生值；side 只保留已有元数据，界面统一向右。
-- 当前 interfaceVersion 为 5、schemaVersion 为 2；两者独立，
+- 当前 interfaceVersion 为 6、schemaVersion 为 3；两者独立，
   前者是 CLI／服务协议版本，后者是数据库格式版本。
-- nodes 表无 state 列。旧 v1 库只读打开可直接读取且不迁移；可写打开时一次性升级为 v2，
-  保留 ID、正文、摘要、连接、顺序、important、节点 revision、主题最近更新与工作区 revision，
-  不把升级记为最近更新。新库和导入均为 v2。
+- nodes 表无 state 列。只读打开接受 v1／v2／v3：旧结构可直接读取，不迁移、不建表、不写库；
+v1／v2 上变化批次辅助方法返回空，不抛原始 SQL 错误。
+  可写打开时逐级升级（v1→v2→v3）：v1→v2 重建无 state 的 nodes 并保留内容与版本；
+  v2→v3 只新建 topic_changes 表并更新 meta。v1／v2 没有保存过的 before 内容，旧批次历史不可用，不补造。
+  新库和导入均为 v3；升级不把旧数据记为最近更新。
+- topic last_change_at／last_change_ids 保留给 resume／最近节点兼容，不作为 diff 批次展示。
 - interfaceVersion 常量只在 src/next/protocol.ts 定义，build-info 与程序信息直接复用，不另设副本。
 - 旧 Markdown 导入仍读取旧 frontmatter 的 state 但忽略、不转成正文；它只是遗留导入格式，不属于新节点契约。
 
@@ -130,29 +136,47 @@ important 的独立设值允许仅给节点 ID；给版本时则检查版本。
 insert 要求真实相邻；delete 只删最终叶卡且不删 root；不自动挤走未声明的 next。
 正文 body / append / replace 互斥，片段替换必须唯一命中；summary:null 清除显式摘要。
 
-GraphStore.commit 在同一事务保存节点差异、版本、每主题最近一批和请求响应。
+变化批次字段固定为 title、summary、from、flow、description、side、order；正文用 unified patch
+（少量上下文，序列化超长截断并标 truncated）表示；important 不属于批次。
+added 的 before 为空，deleted 的 after 为空，modified 保存 before／after 的最终值；
+同一批只记录最终差异：创建后又删除只留删除，改回原值不产生差异，不记录被动编号。
+
+GraphStore.commit 在同一事务保存节点差异、版本、最新变化批次和请求响应。
 普通写入按 ID 执行 INSERT / UPDATE / DELETE，不重建全库；全量导入仅留在 importState。
-最终值没有变化时为 noop，业务行不写。仅重要性、纯删除和被动编号不替换最近内容更新，
-删除时移除集合中已不存在的节点。
+最终值没有变化时为 noop，业务行不写。important-only、noop、dry-run 与幂等重放不产生／不替换批次；
+纯删除同样写入并替换，且清空最近更新节点列表；混合删除把已删除节点从列表移除。
 
 成功响应的 revision 是工作区版本，nodeRevisions 给实际目标的持久节点版本，
 可直接用于下一次写入；新建、修改和 noop 的目标均适用，删除节点省略。
 映射随响应保存，幂等重放不拼入最新版本；dry-run 不伪造提交后版本。
 insert 的 after 仅为相邻前置条件，不作为修改目标返回。
+内容提交响应另带 change（最新批次摘要）；noop、important-only 不含，纯删除返回。
+dry-run 带 includeDiff 时沿同一候选／差异路径生成 AgentCheckResponse.preview（完整 ChangeBatchDetail），
+随后回滚：不写库、不写请求记录、不改变版本。
 
 事务内不夹 HTTP、模型调用或 HTML 渲染。提交成功后通知 / 导出失败不能声称数据回滚。
 请求结果有限保留，status=unknown 不等于写入失败，不能据此盲目重发。
 
-读取视图共用预算和正文切片，预算计入整次序列化输出。
+读取视图共用预算和正文切片，预算计入整次序列化输出；BUDGET_TOO_SMALL 给出 details.minimum。
+ReadNode 不重复 topicId（由响应顶层携带）；overview／structure 只返回元数据与连接，不带 body／range，
+content 才返回正文片段，--meta 与摘要级项用 omitted 标记；resume 以顶层 anchorId 指认锚点，
+anchor 元数据在 items 中只出现一次。
+scope 取 topic／subtree(from)／nodes(nodeIds)；cursor v2 保存视图、范围、起始位置、切片条件与指纹，
+topic／subtree 不重复完整节点列表，content 保留显式节点顺序，续页保持原切片长度与 range。
 当前 cursor 指纹包含主题 revision 和所选节点版本：同主题变化可能使其过期，
 其他主题变化不影响。此规则与单卡写入版本检查分别处理。
 resume 优先给 anchor 正文，来路和邻居为摘要级；较长内容按预算续读，不生成模型摘要。
 
 ## 阅读器与导出
 
-保留现有主线、分支、卡片、连线、目录、重要性、最近更新和阅读位置。
-当前讨论节点用中性的“当前”标记；不再显示节点确认状态标签、状态点或状态边色。
-重要、最近更新、选择／焦点与目录当前加粗仍保留。
+保留现有主线、分支、卡片、连线、目录、重要性、阅读位置与中性的“当前”标记；
+不再显示节点确认状态标签、状态点或状态边色。
+最新内容批次用卡片“新增／改动”标签与主题“本次变化”清单表达，删除只出现在清单（卡片已不存在）；
+单卡差异按需显示字段前后值与正文 patch，旧的“最近更新”圆点已由批次标签取代。
+重要、选择／焦点与目录当前加粗仍保留。
+实时阅读器从 GraphResponse.lastChanges（ChangeBatchSummary）取标签与清单，单卡差异按需请求
+GET /api/changes/nodes/:nodeId?topicId=<id>；404 CHANGE_NOT_FOUND 视为该节点不在最新批次，不伪造数据。
+服务同时提供 GET /api/changes?topicId=<id>（最近批次摘要）；没有批次时返回 null。
 Web 接收领域 DTO，不查询 SQL，也不依赖源 MD 路径、哈希或源码范围。
 实例身份只用于服务连接等运行状态，不决定节点版本有效性。
 
@@ -163,6 +187,8 @@ Web 接收领域 DTO，不查询 SQL，也不依赖源 MD 路径、哈希或源�
 导出目标保存在 .aichat/local/exports.json，由页面选择：
 目标位于工作区与应用根之外，保存完整主题；取消绑定不删除文件。
 沿用先生成后替换、失败保留旧文件、拒绝覆盖外部改动和安全资源处理。
+导出文档内嵌 store.latestChangeDetail 得到的 changes 快照，离线阅读器据此复现标签、清单与差异；
+没有 changes 字段的旧成品仍可读，只是不显示变化标记。
 没有绑定时不生成 HTML；独立文件不会主动联网刷新。
 已有成品不因程序或阅读器升级自动重写：只有主题内容变化或用户显式重新绑定／重导出时，
 才用当前阅读器生成。新旧 HTML 都可读取，旧文件中多余的节点 state 字段会被忽略。

@@ -5,7 +5,7 @@ import type { GraphNode } from '../../next/protocol.js';
  *
  * The product no longer maintains a node classification, so this only says
  * "this is where the conversation currently is". It is deliberately not a
- * colour-coded state: important / recent / selected have their own cues.
+ * colour-coded state: important / latest-change label / selected have their own cues.
  */
 export function CurrentMarker(): React.JSX.Element {
   return (
@@ -16,7 +16,7 @@ export function CurrentMarker(): React.JSX.Element {
 }
 
 /**
- * Branch geometry is single-sided in v5: every branch unfolds to the right of
+ * Branch geometry is single-sided in the current reader: every branch unfolds to the right of
  * its source, so the source `side` value must not be echoed as a reading fact.
  */
 export function flowLabel(node: Pick<GraphNode, 'flow'>): string {

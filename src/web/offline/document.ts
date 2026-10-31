@@ -1,5 +1,6 @@
 import type { Diagnostic, GraphNode, GraphResponse, OfflineTopicDocument } from '../../next/protocol.js';
 import { isRecord } from '../../shared/guards.js';
+import { changeSummaryFromDetail } from '../lib/changes.js';
 
 /**
  * Reads the frozen document from the inert JSON block the exporter writes.
@@ -79,6 +80,7 @@ function offlineGraphNode(node: OfflineTopicDocument['nodes'][number]): GraphNod
  * intentionally not placed in the graph (they belong to another topic).
  */
 export function toGraphResponse(doc: OfflineTopicDocument): GraphResponse {
+  const batch = changeSummaryFromDetail(doc.changes ?? null);
   const diagnostics: Diagnostic[] = [
     ...(Array.isArray(doc.resourceDiagnostics) ? doc.resourceDiagnostics : []),
   ];
@@ -91,6 +93,9 @@ export function toGraphResponse(doc: OfflineTopicDocument): GraphResponse {
     diagnostics,
     nodes: doc.nodes.map(offlineGraphNode),
     topics: [doc.topic],
+    // The exported document already embeds the latest persisted batch; projecting
+    // it keeps card labels and the topic change list identical to the live reader.
+    ...(batch !== null ? { lastChanges: { [batch.topicId]: batch } } : {}),
   };
 }
 

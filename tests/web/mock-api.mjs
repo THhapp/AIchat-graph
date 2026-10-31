@@ -17,12 +17,59 @@ const topics = [
 ];
 const body = '正文示例：这里说明**为什么**按主题归档。\n\n- 列表项\n- 第二项\n\n> 引用的一段话\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n';
 const version = { instanceId: 'inst_demo_123456', revision: 7 };
+
+// Latest persisted content batch for the demo topic (development fixture only).
+const changeNodes = [
+  { nodeId: 'n3', kind: 'added', title: '一个具体情境', fields: [] },
+  { nodeId: 'n4', kind: 'modified', title: '侧枝继续', fields: ['title'] },
+  { nodeId: 'n_gone', kind: 'deleted', title: '已删除的演示卡片', fields: [] },
+];
+const changeSummary = {
+  requestId: 'req_demo_1',
+  topicId: 't1',
+  at: '2026-01-01T00:00:00Z',
+  counts: { added: 1, modified: 1, deleted: 1 },
+  nodes: changeNodes,
+};
+const changeDetail = {
+  ...changeSummary,
+  nodes: [
+    {
+      ...changeNodes[0],
+      beforeRevision: null,
+      afterRevision: 1,
+      fieldDiffs: [],
+      body: { patch: '@@ -0,0 +1,2 @@\n+新加入的第一段\n+新加入的第二段', addedLines: 2, removedLines: 0, truncated: false },
+    },
+    {
+      ...changeNodes[1],
+      beforeRevision: 1,
+      afterRevision: 2,
+      fieldDiffs: [{ field: 'title', before: '侧枝', after: '侧枝继续' }],
+      body: { patch: '@@ -1 +1 @@\n-旧正文\n+新正文', addedLines: 1, removedLines: 1, truncated: false },
+    },
+    { ...changeNodes[2], beforeRevision: 3, afterRevision: null, fieldDiffs: [] },
+  ],
+};
 const json = (res, code, data) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
 
 createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   if (url.pathname === '/api/workspace') return json(res, 200, { ...version, workspaceId: 'w_demo', name: '演示工作区', rootPath: 'D:/demo', activeNode: 'n2', stale: false, diagnostics: [] });
-  if (url.pathname === '/api/graph') return json(res, 200, { ...version, workspaceId: 'w_demo', activeNode: 'n2', stale: false, diagnostics: [], nodes, topics });
+  if (url.pathname === '/api/graph') return json(res, 200, { ...version, workspaceId: 'w_demo', activeNode: 'n2', stale: false, diagnostics: [], nodes, topics, lastChanges: { t1: changeSummary } });
+  if (url.pathname === '/api/changes') {
+    const topicId = url.searchParams.get('topicId');
+    if (topicId !== 't1') return json(res, 404, { error: { code: 'CHANGE_NOT_FOUND', message: 'no change batch' } });
+    return json(res, 200, { ...version, batch: changeSummary });
+  }
+  if (url.pathname.startsWith('/api/changes/nodes/')) {
+    const nodeId = url.pathname.split('/').pop();
+    const topicId = url.searchParams.get('topicId');
+    if (topicId !== 't1') return json(res, 404, { error: { code: 'CHANGE_NOT_FOUND', message: 'no change batch' } });
+    const change = changeDetail.nodes.find((item) => item.nodeId === nodeId);
+    if (!change) return json(res, 404, { error: { code: 'CHANGE_NOT_FOUND', message: 'node did not change' } });
+    return json(res, 200, { ...version, batchRequestId: changeSummary.requestId, change });
+  }
   if (url.pathname.startsWith('/api/nodes/')) {
     const id = url.pathname.split('/').pop();
     const node = nodes.find((n) => n.id === id);

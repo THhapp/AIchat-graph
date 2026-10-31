@@ -1,6 +1,6 @@
 # 命令参考
 
-适用接口：5。本参考随 Skill 分发，可独立完成接入、读取和图维护，不依赖程序手册。
+适用接口：6。本参考随 Skill 分发，可独立完成接入、读取和图维护，不依赖程序手册。
 以下 aichat 指实际入口：Windows 便携包用包根 aichat.cmd；源码开发用
 node <程序目录>/dist/next/cli.js。
 <...>、n_a、t_... 等均为占位，使用真实返回的 ID 与版本。
@@ -18,7 +18,7 @@ aichat topics --workspace <dir>
 目录按 --workspace、AICHAT_WORKSPACE、该程序根 .aichat/default.json 选择。
 --workspace-id 只校验身份，不查目录；已知目标后持续沿用，不每轮重新接入。
 默认 JSON，--text 为人类摘要；写入 --verbose 仅增加诊断。
-程序、服务和参考对应接口 5。Skill 包装脚本只定位 cli，不自动使用配置中的 workspace。
+程序、服务和参考对应接口 6。Skill 包装脚本只定位 cli，不自动使用配置中的 workspace。
 
 `init <dir> --name <名称>` 用于新库；`import --workspace <旧V2目录> [--name <名称>]`
 只在明确需要时一次导入，原件不改，已有 graph.sqlite 拒绝覆盖。
@@ -40,11 +40,13 @@ aichat search <词> [--topic <topicId|key>] [--limit 10] [--page 0]
 aichat validate
 ~~~
 
-- overview 是主题默认视图，给主线和直接分支入口。
-- structure 返回主题 / 子树连接，不带正文；--from 包含其后可达的 next 与 branch。
-- content 可由 read --node 直达，返回正文与节点 revision；--meta 省略正文。
+- overview 是主题默认视图，给主线和直接分支入口，只含节点元数据与连接。
+- structure 返回主题 / 子树结构，不带正文；--from 包含其后可达的 next 与 branch。
+- content 可由 read --node 直达，返回正文与节点 revision；--meta 只给元数据。
 - resume 等价于 `read <topicId> --view resume --node <id>`，优先给 anchor 正文，
   其他来路、邻居、少量重要 / 最近节点为摘要；长正文仍可能需要续读。
+- 节点项不重复 topicId；只有实际返回正文的项才有 body／range／truncated，其余标 omitted。
+  resume 用响应顶层 anchorId 指认锚点，anchor 元数据在 items 中只出现一次。
 - search 按标题、摘要、正文检索；validate 是主动诊断，不是每次提交后的固定步骤。
 
 正文可选 --start、--length、--full，或 --from-heading 配 --occurrence。
@@ -55,11 +57,38 @@ from-heading 从标题起读，不自动止于下一标题；full 也受整次�
 aichat read --cursor "<page.next>" --budget 12000
 ~~~
 
-budget 默认 12000 UTF-16 单位，计整次响应。
-page.hasMore 决定是否继续；range 表示片段范围，omitted 表示按视图省略正文。
+budget 默认 12000 UTF-16 单位，计整次响应；BUDGET_TOO_SMALL 的 details.minimum 给出最小可用预算。
+page.hasMore 决定是否继续；range 只在正文返回时出现，omitted 表示按视图或 --meta 省略正文。
+续读 cursor（v2）记录原视图、范围与切片条件（length／full／meta），续页保持原切片长度与 range；
+content 的节点顺序保留，topic／subtree 不在 cursor 重复节点列表。
 cursor 原样传回，只另调 budget，不重发节点或切片条件；工作区仍需正常定位。
 当前指纹含主题版本及所选节点版本，同主题修改可能使其过期，其他主题不影响。
 STALE_READ 时丢弃旧 cursor，从原范围重读。
+
+## 查看最近一次变化：diff
+
+~~~text
+aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>]
+aichat diff (--input <batch.json>|--input-stdin)
+~~~
+
+最新批次直接只读数据库，不需要服务。默认摘要给 requestId、counts 与节点
+（nodeId、title、kind、fields）；删除节点也在清单里，正文不在摘要中。
+批次字段只有 title、summary、from、flow、description、side、order，正文用 unified patch 表示，
+important 不属于批次。
+
+--node 过滤一张卡；加 --patch 才给 before／after 版本、fieldDiffs 和 unified 正文 patch
+（含增删行数与 truncated）；只有正文变化的卡也有 patch。--patch 必须配 --node；
+节点不在最新批次时 CHANGE_NOT_FOUND。
+--request 只接受当前最新批次：旧批次报 BATCH_SUPERSEDED（details.latest 给最新 requestId），
+未知报 BATCH_UNAVAILABLE；不静默换批次。
+schema 1／2 旧库没有保存过批次：不带 --request 报 CHANGE_HISTORY_UNAVAILABLE，带 --request 报 BATCH_UNAVAILABLE；
+可写打开升级后开始记录，不补造。
+--budget 只截断 patch 文本（字符，默认 12000），节点清单与字段差异不占预算，截断时 budget.truncated=true。
+
+--input／--input-stdin 用与 batch 相同的解析在服务端 dry-run，只输出预览摘要（source=preview），不落库；
+不能与主题位置参数、--node、--request、--patch 同用。只检查一次提交用 batch --dry-run。
+普通写后不必固定看 diff；需要核对上一次写入或确认影响时再查。
 
 ## 同一问题的一次完整 edit
 
@@ -114,7 +143,7 @@ aichat insert --after-node <a> --after-revision <na> --before-node <b> --before-
 
 上面是换行展示的参数结构，实际按宿主 shell 的续行方式组合。
 delete 仅删最终无子节点叶卡，root 不可删，不自动安排其子树。
-important 单独设值可仅给 ID，提供 --if-revision 则检查；它不替换最近内容更新。
+important 单独设值可仅给 ID，提供 --if-revision 则检查；它不产生也不替换变化批次。
 
 ## NodePatch：单卡与批次相同
 
@@ -141,6 +170,7 @@ body / append / replace 三选一；replace.old 必须恰好匹配一次。
 append 直接追加到正文末尾，不会自动将补充融入原文。
 incoming 的来源用实际节点版本；root 整体拒绝 incoming，不能自连或跨主题。
 CLI edit 没有 order 参数，需改它时用 batch 的 patch.incoming.order。
+入边说明属于 incoming.description，patch 顶层没有 description；放错时 CLI 会指出正确字段并给最小片段。
 节点没有确认状态，NodePatch / NodeCreate 都不含 state；batch 输入中出现 state 会按未知字段拒绝。
 
 ## 补旧卡并新建卡：batch
@@ -181,6 +211,7 @@ next 不带 side / order。删除操作为
 bodyFile / appendFile / replaceFile 由 CLI 读取，
 相对输入文件目录解析；stdin 输入相对当前目录。
 相应字段与内联正文模式互斥。dry-run 只给 checked / changes，不保存或伪造提交版本。
+入边说明写在 patch.incoming.description，patch 顶层没有 description。
 整批按最终图一次事务提交，不写临时旁支。
 
 ## 纯连接整理：rearrange
@@ -209,14 +240,14 @@ aichat rearrange --input <edits.json>
 
 写入结果的 state 表示 committed／noop／committed_refresh_pending；dry-run 为 checked，
 不是节点分类。结果还包含工作区 revision、nodeRevisions、changedNodeIds、created.aliases、
-requestId 和诊断。节点下一版本取 nodeRevisions[nodeId]，
-不能用工作区 revision；不只为获取它再发一次 read。
+requestId 和诊断。内容提交成功时另有 change（本次最新批次摘要）；noop、仅 important 与 dry-run 不含。
+节点下一版本取 nodeRevisions[nodeId]，不能用工作区 revision；不只为获取它再发一次 read。
 
 映射覆盖新建、修改和明确操作且仍存在的目标，noop 也给；删除节点省略。
 insert 的 after 仅作相邻前置条件，不作为修改目标返回。
 replay 保留当时结果，dry-run 不给虚构新版本。
-内容、入边等实际变化按主题替换最近一批；important、纯删除等不替换，
-删除时清除已不存在的节点 ID。
+内容批次（新增、改动、删除）替换该主题上一批，纯删除同样替换并把最近更新节点列表清空；
+important、noop、dry-run 与重放不替换；混合删除会移除已不存在的节点 ID。
 
 - 412：重读相关节点，理解新内容后再判断，不能静默取最新版本覆盖。
 - 409 占位 / 相邻冲突：明确最终连接，必要时 rearrange；不要临时 branch 绕行。
@@ -233,6 +264,7 @@ replay 保留当时结果，dry-run 不给虚构新版本。
 aichat serve --workspace <dir> [--port <端口>] [--no-browser]
 aichat help --json
 aichat help batch --json
+aichat help diff --json
 aichat version
 aichat whoami
 aichat status <requestId>

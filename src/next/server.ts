@@ -43,6 +43,9 @@ import type {
   AgentChangeRequest,
   AgentChangeResponse,
   AgentCheckResponse,
+  ChangeBatchSummary,
+  ChangeNodeResponse,
+  ChangeSummaryResponse,
   Diagnostic,
   NodeDetailResponse,
   GraphResponse,
@@ -352,11 +355,7 @@ export function createGraphApp(options: GraphAppOptions): Hono {
 
   api.get('/graph', (c) => {
     const snapshot = runtime.snapshot();
-    const lastChanges: Record<string, { at: string; nodeIds: string[] }> = {};
-    for (const topic of snapshot.topics) {
-      if (topic.lastChangeAt === null) continue;
-      lastChanges[topic.id] = { at: topic.lastChangeAt, nodeIds: [...topic.lastChangeIds] };
-    }
+    const lastChanges: Record<string, ChangeBatchSummary> = runtime.store.changeSummaries();
     const body: GraphResponse = {
       instanceId: runtime.instanceId,
       revision: snapshot.revision,
@@ -381,6 +380,45 @@ export function createGraphApp(options: GraphAppOptions): Hono {
       node: publicNode(node),
       body: node.body,
       resources: collectBodyResources(node.body),
+    };
+    return jsonResponse(c, body);
+  });
+
+  api.get('/changes', (c) => {
+    const topicId = c.req.query('topicId');
+    if (topicId === undefined || topicId.length === 0) {
+      throw badRequest('changes 需要 topicId', { field: 'topicId' });
+    }
+    const snapshot = runtime.snapshot();
+    findTopic(snapshot, topicId);
+    const body: ChangeSummaryResponse = {
+      instanceId: runtime.instanceId,
+      revision: snapshot.revision,
+      batch: runtime.store.latestChangeSummary(topicId),
+    };
+    return jsonResponse(c, body);
+  });
+
+  api.get('/changes/nodes/:nodeId', (c) => {
+    const topicId = c.req.query('topicId');
+    if (topicId === undefined || topicId.length === 0) {
+      throw badRequest('changes/nodes/:nodeId 需要 topicId', { field: 'topicId' });
+    }
+    const snapshot = runtime.snapshot();
+    findTopic(snapshot, topicId);
+    const nodeId = c.req.param('nodeId');
+    const change = runtime.store.nodeChange(topicId, nodeId);
+    if (change === null) {
+      throw new DomainError('CHANGE_NOT_FOUND', '该节点不在本主题最近一批变化中', 404, {
+        topicId,
+        nodeId,
+      });
+    }
+    const body: ChangeNodeResponse = {
+      instanceId: runtime.instanceId,
+      revision: snapshot.revision,
+      batchRequestId: runtime.store.changeBatchRequestId(topicId),
+      change,
     };
     return jsonResponse(c, body);
   });

@@ -18,6 +18,9 @@ import type {
   AgentChangeResponse,
   AgentCheckResponse,
   GraphResponse,
+  ChangeBatchSummary,
+  ChangeNodeResponse,
+  ChangeSummaryResponse,
   ReadViewResponse,
   SearchResponse,
   TopicExportStatus,
@@ -248,7 +251,9 @@ describe('next service：读取与描述', () => {
     expect(graph.body.nodes[0]).not.toHaveProperty('sourcePath');
     expect(graph.body.nodes[0]).not.toHaveProperty('state');
     expect(graph.body.topics[0]).toMatchObject({ id: seeded.topicId, key: '主线' });
-    expect(graph.body.lastChanges?.[seeded.topicId]?.nodeIds).toContain(seeded.rootNodeId);
+    expect(graph.body.lastChanges?.[seeded.topicId]?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: seeded.rootNodeId, kind: 'added' }),
+    ]));
 
     const detail = await getJson<{
       node: { id: string };
@@ -336,7 +341,8 @@ describe('next service：读取与描述', () => {
         '&meta=true',
     );
     expect(meta.status).toBe(200);
-    expect(meta.body.items[0]?.body).toBe('');
+    expect(meta.body.items[0]).not.toHaveProperty('body');
+    expect(meta.body.items[0]).not.toHaveProperty('range');
     expect(meta.body.items[0]?.omitted).toBe(true);
 
     const resume = await getJson<ReadViewResponse>(
@@ -349,6 +355,8 @@ describe('next service：读取与描述', () => {
         seeded.rootNodeId,
     );
     expect(resume.status).toBe(200);
+    expect(resume.body.anchorId).toBe(seeded.rootNodeId);
+    expect(resume.body).not.toHaveProperty('anchor');
     expect(resume.body.items[0]?.role ?? 'anchor').toBe('anchor');
     expect(resume.body.items[0]?.body).toContain('起点正文');
 
@@ -483,6 +491,134 @@ describe('next service：Agent 写入与重要性', () => {
     expect(afterDry.body.body).not.toContain('dry-run 不应写入。');
     const dryStatus = await getJson<{ status: string }>(handle.url + '/api/changes/' + dryId);
     expect(dryStatus.body.status).toBe('unknown');
+  });
+
+  it('变化 API：同批 added/modified、纯删除替换、节点 patch 与 status 路由共存', async () => {
+    const seeded = await seedWorkspace();
+    const handle = await start(seeded);
+
+    const request = requestId();
+    const committed = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId: seeded.workspaceId,
+      requestId: request,
+      action: {
+        action: 'batch',
+        topicId: seeded.topicId,
+        ops: [
+          {
+            op: 'edit',
+            target: { id: seeded.rootNodeId, revision: 1 },
+            patch: { title: '改后起点', body: '改后正文。' },
+          },
+          {
+            op: 'create',
+            as: 'child',
+            from: { id: seeded.rootNodeId, revision: 1 },
+            flow: 'next',
+            description: '继续说明',
+            node: { title: '新增子卡', body: '子卡正文。' },
+          },
+        ],
+      },
+    });
+    expect(committed.status).toBe(200);
+    expect(committed.body.change).toMatchObject({ counts: { added: 1, modified: 1, deleted: 0 } });
+    const childId = committed.body.created.nodeIds[0] as string;
+
+    const summary = await getJson<ChangeSummaryResponse>(
+      handle.url + '/api/changes?topicId=' + seeded.topicId,
+    );
+    expect(summary.status).toBe(200);
+    expect(summary.body.batch).toMatchObject({
+      requestId: request,
+      counts: { added: 1, modified: 1, deleted: 0 },
+    });
+    expect(summary.body.batch?.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: seeded.rootNodeId, kind: 'modified' }),
+      expect.objectContaining({ nodeId: childId, kind: 'added' }),
+    ]));
+
+    // 旧的 status 路由不能被节点差异路由抢占。
+    const status = await getJson<{ status: string }>(handle.url + '/api/changes/' + request);
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe('committed');
+
+    const rootChange = await getJson<ChangeNodeResponse>(
+      handle.url + '/api/changes/nodes/' + seeded.rootNodeId + '?topicId=' + seeded.topicId,
+    );
+    expect(rootChange.status).toBe(200);
+    expect(rootChange.body.change).toMatchObject({ kind: 'modified', nodeId: seeded.rootNodeId });
+    expect(rootChange.body.change?.fieldDiffs).toEqual(expect.arrayContaining([
+      { field: 'title', before: '起点', after: '改后起点' },
+    ]));
+    expect(rootChange.body.change?.body?.patch).toContain('+改后正文。');
+
+    const childChange = await getJson<ChangeNodeResponse>(
+      handle.url + '/api/changes/nodes/' + childId + '?topicId=' + seeded.topicId,
+    );
+    expect(childChange.status).toBe(200);
+    expect(childChange.body.change).toMatchObject({ kind: 'added', nodeId: childId });
+    expect(childChange.body.change?.body?.addedLines).toBeGreaterThan(0);
+
+    // 纯删除必须替换上一批 added/modified 标签。
+    const childRevision = committed.body.nodeRevisions[childId] as number;
+    const deletedRequest = requestId();
+    const deleted = await postJson<AgentChangeResponse>(handle.url + '/api/agent/changes', {
+      workspaceId: seeded.workspaceId,
+      requestId: deletedRequest,
+      action: { action: 'delete', target: { id: childId, revision: childRevision } },
+    });
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.change).toMatchObject({
+      requestId: deletedRequest,
+      counts: { added: 0, modified: 0, deleted: 1 },
+    });
+    const afterDelete = await getJson<GraphResponse>(handle.url + '/api/graph');
+    expect(afterDelete.body.lastChanges?.[seeded.topicId]).toMatchObject({
+      requestId: deletedRequest,
+      counts: { added: 0, modified: 0, deleted: 1 },
+    });
+    expect(afterDelete.body.lastChanges?.[seeded.topicId]?.nodes).toEqual([
+      expect.objectContaining({ nodeId: childId, kind: 'deleted' }),
+    ]);
+    const deletedChange = await getJson<ChangeNodeResponse>(
+      handle.url + '/api/changes/nodes/' + childId + '?topicId=' + seeded.topicId,
+    );
+    expect(deletedChange.status).toBe(200);
+    expect(deletedChange.body.change).toMatchObject({ kind: 'deleted', nodeId: childId });
+    expect(deletedChange.body.change?.body?.removedLines).toBeGreaterThan(0);
+
+    // important-only 不替换删除批次。
+    const importance = await postJson<{ node: { revision: number } }>(handle.url + '/api/importance', {
+      topicId: seeded.topicId,
+      nodeId: seeded.rootNodeId,
+      important: true,
+    });
+    expect(importance.status).toBe(200);
+    const afterImportance = await getJson<GraphResponse>(handle.url + '/api/graph');
+    expect(afterImportance.body.lastChanges?.[seeded.topicId]).toEqual(
+      afterDelete.body.lastChanges?.[seeded.topicId],
+    );
+
+    // 无实际变化的预览仍是合法的空批次，CLI 可输出 0 项，而不是报服务响应错误。
+    const rootNow = afterImportance.body.nodes.find((node) => node.id === seeded.rootNodeId);
+    expect(rootNow).toBeDefined();
+    const noopPreview = await postJson<AgentCheckResponse>(handle.url + '/api/agent/changes', {
+      workspaceId: seeded.workspaceId,
+      requestId: requestId(),
+      dryRun: true,
+      includeDiff: true,
+      action: {
+        action: 'batch',
+        topicId: seeded.topicId,
+        ops: [{ op: 'edit', target: { id: seeded.rootNodeId, revision: rootNow?.revision ?? 0 }, patch: { title: '改后起点' } }],
+      },
+    });
+    expect(noopPreview.status).toBe(200);
+    expect(noopPreview.body.preview).toMatchObject({
+      counts: { added: 0, modified: 0, deleted: 0 },
+      nodes: [],
+    });
   });
 
   it('workspaceId 不一致 409；importance 更新节点但不替换最近内容更新', async () => {

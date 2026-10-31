@@ -1,7 +1,8 @@
 import { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
-import type { GraphNode } from '../../next/protocol.js';
+import type { ChangeKind, GraphNode } from '../../next/protocol.js';
+import { changeKindLabel } from '../lib/changes.js';
 import { CurrentMarker } from './display.js';
 
 export interface TopicCardData extends Record<string, unknown> {
@@ -12,8 +13,8 @@ export interface TopicCardData extends Record<string, unknown> {
   hiddenCount: number;
   collapsed: boolean;
   childCount: number;
-  /** This node is part of the current topic's `GraphResponse.lastChanges[topicId].nodeIds`. */
-  recent: boolean;
+  /** Latest-batch label for this node's number row; deleted nodes never own a card. */
+  changeKind?: ChangeKind;
   /** An importance write for this card is in flight; the button keeps its size. */
   importanceBusy: boolean;
   /** The service is stopped; the importance write is disabled without moving the pin. */
@@ -27,11 +28,11 @@ export interface TopicCardData extends Record<string, unknown> {
  * Variable-height card. The title wraps in full and its height comes from the
  * layout result; the summary keeps a fixed three-line preview so cards do not
  * change height while someone types. The relationship sentence is not repeated
- * here — it belongs to the connector — so the footer row carries the recent-change
- * marker instead, inside the height the card already had.
+ * here — it belongs to the connector. The number row carries the latest-batch
+ * label (added / modified) next to the displayed number.
  */
 function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
-  const { node, height, active, hiddenCount, collapsed, childCount, recent, importanceBusy, importanceDisabled = false, onToggleImportant, onToggleCollapse } = data as TopicCardData;
+  const { node, height, active, hiddenCount, collapsed, childCount, changeKind, importanceBusy, importanceDisabled = false, onToggleImportant, onToggleCollapse } = data as TopicCardData;
   const important = node.important;
   const importanceLabel = (important ? '取消重要标记：' : '标记为重要：') + node.number + ' ' + node.title;
   return (
@@ -41,13 +42,15 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
       data-flow={node.flow}
       data-active={active ? 'true' : 'false'}
       data-selected={selected === true ? 'true' : 'false'}
-      data-recent={recent ? 'true' : 'false'}
       data-important={important ? 'true' : 'false'}
-      aria-label={node.number + ' ' + node.title + (active ? '，当前讨论' : '') + (important ? '，重要' : '') + (recent ? '，最近更新' : '')}
+      aria-label={node.number + ' ' + node.title + (active ? '，当前讨论' : '') + (important ? '，重要' : '') + (changeKind !== undefined ? '，本次' + changeKindLabel(changeKind) : '')}
     >
       <Handle type="target" position={Position.Top} className="rf-handle" isConnectable={false} />
       <header className="topic-card__head">
         <span className="topic-card__number">{node.number}</span>
+        {changeKind !== undefined ? (
+          <span className="topic-card__change" data-kind={changeKind}>{changeKindLabel(changeKind)}</span>
+        ) : null}
         {active ? <CurrentMarker /> : null}
         <span className="topic-card__spacer" />
         {onToggleImportant !== undefined ? (
@@ -99,13 +102,6 @@ function TopicCardComponent({ data, selected }: NodeProps): React.JSX.Element {
       </header>
       <h3 className="topic-card__title">{node.title}</h3>
       <p className="topic-card__summary">{node.summary}</p>
-      <footer className="topic-card__foot">
-        {recent ? (
-          <span className="topic-card__recent" title="最近一次写入涉及这张卡片">
-            <span className="topic-card__recent-dot" aria-hidden="true" />最近更新
-          </span>
-        ) : null}
-      </footer>
       <Handle type="source" position={Position.Bottom} className="rf-handle" isConnectable={false} />
     </article>
   );

@@ -290,15 +290,37 @@ function writePayloadOf(result: RunResult): Record<string, unknown> {
 async function readOf(args: readonly string[], context: Parameters<typeof main>[1] = {}) {
   const result = await cli(['read', ...args], context);
   expect(result.exitCode, result.stderr).toBe(0);
-  return { payload: jsonOf<{ items: Array<{ node: { id: string; revision: number }; body: string; range: { start: number; end: number; total: number } }>; refs?: unknown; budget: { used: number }; page: { hasMore: boolean; next?: string } }>(result.stdout), stdout: result.stdout };
+  return {
+    payload: jsonOf<{
+      view?: string;
+      anchorId?: string;
+      items: Array<{
+        node: { id: string; revision: number };
+        role?: string;
+        body?: string;
+        range?: { start: number; end: number; total: number };
+        truncated?: boolean;
+      }>;
+      refs?: unknown;
+      budget: { used: number };
+      page: { hasMore: boolean; next?: string };
+    }>(result.stdout),
+    stdout: result.stdout,
+  };
+}
+
+async function diffOf(args: readonly string[], context: Parameters<typeof main>[1] = {}) {
+  const result = await cli(['diff', ...args], context);
+  expect(result.exitCode, result.stderr).toBe(0);
+  return { payload: jsonOf<Record<string, unknown>>(result.stdout), stdout: result.stdout };
 }
 
 describe('Interface 4 CLI', () => {
   it('init／topics／validate／version／help 不依赖服务', async () => {
     const { parent, root, workspaceId, schemaVersion } = await initWorkspace();
     expect(workspaceId.startsWith('w_')).toBe(true);
-    // 节点状态删除后新库 schemaVersion=2。
-    expect(schemaVersion).toBe(2);
+    // 变化批次（topic_changes）落地后新库 schemaVersion=3。
+    expect(schemaVersion).toBe(3);
 
     const topics = writePayloadOf(await cli(['topics', '--workspace', root], { cwd: parent }));
     expect(topics).toMatchObject({ ok: true, command: 'topics', workspaceId, revision: 1, topics: [] });
@@ -867,13 +889,13 @@ describe('Interface 4 CLI', () => {
     const first = await readOf(['--node', nodeId, '--budget', '1500', '--workspace', root], { cwd: parent });
     expect(first.payload.page.hasMore).toBe(true);
     expect(first.payload.page.next).toBeTruthy();
-    let total = first.payload.items[0]?.body.length ?? 0;
+    let total = first.payload.items[0]?.body?.length ?? 0;
     let next: string | undefined = first.payload.page.next;
     let pages = 1;
     while (next !== undefined) {
       const page = await readOf(['--cursor', next, '--budget', '1500', '--workspace', root], { cwd: parent });
       expect(page.payload.budget.used).toBe(page.stdout.length);
-      total += page.payload.items[0]?.body.length ?? 0;
+      total += page.payload.items[0]?.body?.length ?? 0;
       next = page.payload.page.next;
       pages += 1;
       expect(pages).toBeLessThan(60);
@@ -1158,5 +1180,294 @@ describe('Interface 4 CLI', () => {
     const result = await cli(['stop', '--workspace', root], { cwd: parent, installation });
     const payload = writePayloadOf(result);
     expect(payload['state']).toBe('not-running');
+  });
+
+  it('read 响应契约：resume 用 anchorId，structure/overview 无 body/range，content 保留', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '阅读契约', '--body', '根正文。', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const rootId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    writePayloadOf(
+      await cli(
+        ['next', '--from-node', rootId, '--from-revision', '1', '--title', '后继', '--description', '继续', '--body', '后继正文。', '--workspace', root],
+        context,
+      ),
+    );
+
+    const overview = await readOf(['--topic', topicId, '--workspace', root], context);
+    expect(overview.payload.items[0]).toBeTruthy();
+    expect(overview.payload.items[0]).not.toHaveProperty('body');
+    expect(overview.payload.items[0]).not.toHaveProperty('range');
+    expect(overview.payload.items[0]).not.toHaveProperty('truncated');
+
+    const structure = await readOf(['--topic', topicId, '--view', 'structure', '--workspace', root], context);
+    expect(structure.payload.items.length).toBeGreaterThanOrEqual(2);
+    for (const item of structure.payload.items) {
+      expect(item).not.toHaveProperty('body');
+      expect(item).not.toHaveProperty('range');
+      expect(item).not.toHaveProperty('truncated');
+    }
+
+    const resumeResult = await cli(['resume', topicId, '--node', rootId, '--workspace', root], context);
+    expect(resumeResult.exitCode, resumeResult.stderr).toBe(0);
+    const resume = jsonOf<{
+      view: string;
+      anchorId?: string;
+      anchor?: unknown;
+      items: Array<{ role?: string; node: { id: string }; body?: string; range?: unknown }>;
+    }>(resumeResult.stdout);
+    expect(resume.view).toBe('resume');
+    expect(resume.anchorId).toBe(rootId);
+    expect(resume).not.toHaveProperty('anchor');
+    const anchors = resume.items.filter((item) => item.role === 'anchor');
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]?.node.id).toBe(rootId);
+    expect(typeof anchors[0]?.body).toBe('string');
+    expect(anchors[0]?.range).toBeTruthy();
+
+    const content = await readOf(['--node', rootId, '--workspace', root], context);
+    const contentItem = content.payload.items[0];
+    expect(typeof contentItem?.body).toBe('string');
+    expect(contentItem?.range).toMatchObject({ unit: 'utf16' });
+    expect(typeof contentItem?.truncated).toBe('boolean');
+  });
+
+  it('diff：最新批次摘要、节点过滤、--node --patch 与 --request 旧批次诊断', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '差异主题', '--body', '起点正文。', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const nodeId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+
+    const firstEdit = writePayloadOf(
+      await cli(['edit', '--node', nodeId, '--title', '第一版标题', '--workspace', root], context),
+    );
+    const firstRequest = firstEdit['requestId'] as string;
+    const secondEdit = writePayloadOf(
+      await cli(['edit', '--node', nodeId, '--title', '第二版标题', '--workspace', root], context),
+    );
+    const secondRequest = secondEdit['requestId'] as string;
+
+    const latest = await diffOf([topicId, '--workspace', root], context);
+    const summary = latest.payload['batch'] as {
+      requestId: string;
+      topicId: string;
+      counts: { added: number; modified: number; deleted: number };
+      nodes: Array<{ nodeId: string; kind: string; title: string; fields: string[]; body?: unknown; fieldDiffs?: unknown }>;
+    };
+    expect(summary.requestId).toBe(secondRequest);
+    expect(summary.topicId).toBe(topicId);
+    expect(summary.counts).toMatchObject({ added: 0, modified: 1, deleted: 0 });
+    expect(summary.nodes).toHaveLength(1);
+    expect(summary.nodes[0]).toMatchObject({ nodeId, kind: 'modified', title: '第二版标题' });
+    expect(summary.nodes[0]?.fields).toContain('title');
+    expect(summary.nodes[0]?.body).toBeUndefined();
+    expect(summary.nodes[0]?.fieldDiffs).toBeUndefined();
+
+    // --text 输出简短摘要。
+    const textDiff = await cli(['diff', topicId, '--text', '--workspace', root], context);
+    expect(textDiff.exitCode, textDiff.stderr).toBe(0);
+    expect(textDiff.stdout).toContain('diff database');
+    expect(textDiff.stdout).toContain('modified');
+
+    // --request 当前批次可直接读取。
+    const current = await diffOf([topicId, '--request', secondRequest, '--workspace', root], context);
+    expect((current.payload['batch'] as { requestId: string }).requestId).toBe(secondRequest);
+
+    // 旧批次：BATCH_SUPERSEDED + 最新 requestId，不静默换批次。
+    const stale = await cli(['diff', topicId, '--request', firstRequest, '--workspace', root], context);
+    expect(stale.exitCode).toBe(5);
+    const staleError = jsonOf<{ error: { code: string; details?: Record<string, unknown> } }>(stale.stderr).error;
+    expect(staleError.code).toBe('BATCH_SUPERSEDED');
+    expect(staleError.details?.['latest']).toBe(secondRequest);
+
+    const unknown = await cli(['diff', topicId, '--request', 'not-a-request', '--workspace', root], context);
+    expect(unknown.exitCode).toBe(11);
+    expect(jsonOf<{ error: { code: string } }>(unknown.stderr).error.code).toBe('BATCH_UNAVAILABLE');
+
+    // --node 过滤摘要；不存在的节点明确 CHANGE_NOT_FOUND。
+    const filtered = await diffOf([topicId, '--node', nodeId, '--workspace', root], context);
+    expect((filtered.payload['batch'] as { nodes: unknown[] }).nodes).toHaveLength(1);
+    const missingNode = await cli(
+      ['diff', topicId, '--node', 'n_0123456789abcdef0123456789abcdef', '--workspace', root],
+      context,
+    );
+    expect(missingNode.exitCode).toBe(11);
+    expect(jsonOf<{ error: { code: string } }>(missingNode.stderr).error.code).toBe('CHANGE_NOT_FOUND');
+
+    // 正文变化：--node --patch 返回 fieldDiffs 与 unified body patch。
+    const currentNode = (await readOf(['--node', nodeId, '--workspace', root], context)).payload.items[0]
+      ?.node as unknown as { revision: number };
+    const bodyEdit = writePayloadOf(
+      await cli(
+        ['edit', '--node', nodeId, '--if-revision', String(currentNode.revision), '--body', '更新后的正文。', '--workspace', root],
+        context,
+      ),
+    );
+    const patched = await diffOf([topicId, '--node', nodeId, '--patch', '--workspace', root], context);
+    const patchedBatch = patched.payload['batch'] as {
+      requestId: string;
+      nodes: Array<{
+        fieldDiffs: Array<{ field: string; before: unknown; after: unknown }>;
+        body?: { patch: string; addedLines: number; removedLines: number; truncated: boolean };
+      }>;
+    };
+    expect(patchedBatch.requestId).toBe(bodyEdit['requestId']);
+    expect(patchedBatch.nodes).toHaveLength(1);
+    const patchedNode = patchedBatch.nodes[0];
+    expect(patchedNode?.body).toBeTruthy();
+    expect(patchedNode?.body?.addedLines).toBeGreaterThan(0);
+    expect(patchedNode?.body?.removedLines).toBeGreaterThan(0);
+    expect(typeof patchedNode?.body?.patch).toBe('string');
+
+    // 用法：--patch 必须配 --node；缺少主题。
+    const patchOnly = await cli(['diff', topicId, '--patch', '--workspace', root], context);
+    expect(patchOnly.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(patchOnly.stderr).error.message).toContain('--node');
+    const noTopic = await cli(['diff'], context);
+    expect(noTopic.exitCode).toBe(2);
+
+    // 纯删除也写入最新批次（counts.deleted 与 kind=deleted）。
+    const revisionNow = (await readOf(['--node', nodeId, '--workspace', root], context)).payload.items[0]
+      ?.node as unknown as { revision: number };
+    const branch = writePayloadOf(
+      await cli(
+        ['branch', '--from-node', nodeId, '--from-revision', String(revisionNow.revision), '--title', '待删分支', '--description', '旁支', '--body', '分支正文', '--workspace', root],
+        context,
+      ),
+    );
+    const branchId = (branch['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const branchNode = (await readOf(['--node', branchId, '--workspace', root], context)).payload.items[0]
+      ?.node as unknown as { revision: number };
+    writePayloadOf(
+      await cli(['delete', '--node', branchId, '--if-revision', String(branchNode.revision), '--workspace', root], context),
+    );
+    const deletion = await diffOf([topicId, '--workspace', root], context);
+    const deletionBatch = deletion.payload['batch'] as {
+      counts: { added: number; modified: number; deleted: number };
+      nodes: Array<{ nodeId: string; kind: string; title: string }>;
+    };
+    expect(deletionBatch.counts.deleted).toBe(1);
+    expect(deletionBatch.nodes[0]).toMatchObject({ nodeId: branchId, kind: 'deleted', title: '待删分支' });
+  });
+
+  it('diff --input 预览：发送 includeDiff、只输出摘要、不落库', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '预览', '--body', '正文', '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const nodeId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    const reader = GraphStore.open(root, { readonly: true });
+    const revisionBefore = reader.snapshot().revision;
+    reader.close();
+
+    const batchFile = path.join(parent, 'diff-preview.json');
+    await fs.writeFile(
+      batchFile,
+      JSON.stringify({
+        topicId,
+        ops: [{ op: 'edit', target: { id: nodeId, revision: 1 }, patch: { title: '预览标题' } }],
+      }),
+      'utf8',
+    );
+    const preview = await diffOf(['--input', batchFile, '--workspace', root], context);
+    expect(preview.payload['source']).toBe('preview');
+    expect(typeof preview.payload['requestId']).toBe('string');
+    const batch = preview.payload['batch'] as {
+      nodes: Array<{ nodeId: string; kind: string; fieldDiffs?: unknown; body?: unknown }>;
+    };
+    expect(batch.nodes).toHaveLength(1);
+    expect(batch.nodes[0]).toMatchObject({ nodeId, kind: 'modified' });
+    // 预览默认只输出摘要：不带字段差异与 body patch。
+    expect(batch.nodes[0]?.fieldDiffs).toBeUndefined();
+    expect(batch.nodes[0]?.body).toBeUndefined();
+    const previewRequest = service.requests.filter((request) => request.url === '/api/agent/changes').pop();
+    expect(previewRequest?.body).toContain('"includeDiff":true');
+    const after = GraphStore.open(root, { readonly: true });
+    expect(after.snapshot().revision).toBe(revisionBefore);
+    after.close();
+
+    const combo = await cli(['diff', '--input', batchFile, '--patch', '--workspace', root], context);
+    expect(combo.exitCode).toBe(2);
+    expect(jsonOf<{ error: { message: string } }>(combo.stderr).error.message).toContain('--patch');
+  });
+
+  it('diff --budget 只截断 unified patch 并报告 truncated', async () => {
+    const { parent, root, workspaceId } = await initWorkspace();
+    const service = await startMockService({ root, workspaceId });
+    cleanup.push(() => service.close());
+    await service.writeDescriptor();
+    const context = { cwd: parent };
+    const created = writePayloadOf(
+      await cli(['create-topic', '--title', '预算', '--body', 'A'.repeat(4000), '--workspace', root], context),
+    );
+    const topicId = created['topicId'] as string;
+    const nodeId = (created['created'] as { nodeIds: string[] }).nodeIds[0] as string;
+    writePayloadOf(await cli(['edit', '--node', nodeId, '--body', 'B'.repeat(4000), '--workspace', root], context));
+
+    const truncated = await diffOf([topicId, '--node', nodeId, '--patch', '--budget', '50', '--workspace', root], context);
+    const batch = truncated.payload['batch'] as {
+      nodes: Array<{ body?: { patch: string; truncated: boolean } }>;
+    };
+    const budget = truncated.payload['budget'] as { limit: number; used: number; truncated: boolean };
+    expect(budget.limit).toBe(50);
+    expect(budget.truncated).toBe(true);
+    expect(budget.used).toBeLessThanOrEqual(50);
+    expect(batch.nodes[0]?.body?.truncated).toBe(true);
+    expect(batch.nodes[0]?.body?.patch).toContain('截断');
+  });
+
+  it('batch patch.description 误用给出 patch.incoming.description 与最小片段；diff 帮助无别名', async () => {
+    const { parent, root } = await initWorkspace();
+    const context = { cwd: parent };
+    const batchFile = path.join(parent, 'misplaced-description.json');
+    await fs.writeFile(
+      batchFile,
+      JSON.stringify({
+        topicId: 't_0123456789abcdef0123456789abcdef',
+        ops: [{
+          op: 'edit',
+          target: { id: 'n_0123456789abcdef0123456789abcdef', revision: 1 },
+          patch: { title: 'x', description: '误放在 patch 顶层' },
+        }],
+      }),
+      'utf8',
+    );
+    const result = await cli(['batch', '--input', batchFile, '--workspace', root], context);
+    expect(result.exitCode).toBe(2);
+    const error = jsonOf<{ error: { message: string; details?: Record<string, unknown> } }>(result.stderr).error;
+    expect(error.message).toContain('patch.incoming.description');
+    expect(error.message).toContain('最小正确片段');
+    expect(error.details?.['hint']).toBe('patch.incoming.description');
+    expect(error.details?.['example']).toEqual({ incoming: { description: '为什么改接' } });
+
+    const batchHelp = await cli(['batch', '--help'], context);
+    expect(batchHelp.stdout).toContain('patch.incoming.description');
+    const diffHelp = await cli(['diff', '--help'], context);
+    expect(diffHelp.exitCode).toBe(0);
+    expect(diffHelp.stdout).toContain('--node');
+    expect(diffHelp.stdout).toContain('--patch');
+    expect(diffHelp.stdout).toContain('--request');
+    for (const alias of ['--compact', '--preview', '--inspect', '--review']) {
+      expect(diffHelp.stdout).not.toContain(alias);
+    }
   });
 });

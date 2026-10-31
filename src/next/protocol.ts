@@ -1,9 +1,9 @@
 /**
- * Interface 4 DTO: SQLite-backed discussion graph.
+ * Interface 6 DTO: SQLite-backed discussion graph.
  * No file paths, file hashes, edit refs or expected files are part of this contract.
  */
 
-export const INTERFACE_VERSION = 5;
+export const INTERFACE_VERSION = 6;
 
 export type NodeFlow = 'root' | 'next' | 'branch';
 export type BranchSide = 'left' | 'right';
@@ -41,6 +41,71 @@ export interface GraphNode {
   revision: number;
 }
 
+export type ChangeKind = 'added' | 'modified' | 'deleted';
+export type ChangeFieldName = 'title' | 'summary' | 'from' | 'flow' | 'description' | 'side' | 'order';
+
+/** Short, display-only summary of the latest content change batch for one topic. */
+export interface ChangeNodeSummary {
+  nodeId: string;
+  kind: ChangeKind;
+  /** Title after the change; for deleted nodes, the title before deletion. */
+  title: string;
+  /** Content/structure fields changed in this batch; empty for added/deleted. */
+  fields: ChangeFieldName[];
+}
+
+export interface ChangeCounts {
+  added: number;
+  modified: number;
+  deleted: number;
+}
+
+export interface ChangeBatchSummary {
+  requestId: string;
+  topicId: string;
+  at: string;
+  counts: ChangeCounts;
+  nodes: ChangeNodeSummary[];
+}
+
+export interface ChangeFieldDiff {
+  field: ChangeFieldName;
+  before: string | number | null;
+  after: string | number | null;
+}
+
+export interface ChangeBodyPatch {
+  /** Unified diff with a small amount of context; not two full bodies. */
+  patch: string;
+  addedLines: number;
+  removedLines: number;
+  truncated: boolean;
+}
+
+export interface ChangeNodeDiff extends ChangeNodeSummary {
+  beforeRevision: number | null;
+  afterRevision: number | null;
+  fieldDiffs: ChangeFieldDiff[];
+  body?: ChangeBodyPatch;
+}
+
+export interface ChangeBatchDetail {
+  requestId: string;
+  topicId: string;
+  at: string;
+  counts: ChangeCounts;
+  nodes: ChangeNodeDiff[];
+}
+
+export interface ChangeSummaryResponse extends SnapshotVersion {
+  batch: ChangeBatchSummary | null;
+}
+
+export interface ChangeNodeResponse extends SnapshotVersion {
+  batchRequestId: string | null;
+  change: ChangeNodeDiff | null;
+}
+
 export interface GraphTopic {
   id: string;
   /** User-facing stable key chosen at creation/import; not a filesystem path. */
@@ -48,11 +113,6 @@ export interface GraphTopic {
   title: string;
   nodeIds: string[];
   revision: number;
-}
-
-export interface LastChange {
-  at: string;
-  nodeIds: string[];
 }
 
 export interface Diagnostic {
@@ -81,7 +141,7 @@ export interface GraphResponse extends SnapshotVersion {
   diagnostics: Diagnostic[];
   nodes: GraphNode[];
   topics: GraphTopic[];
-  lastChanges?: Record<string, LastChange>;
+  lastChanges?: Record<string, ChangeBatchSummary>;
 }
 
 export interface NodeDetailResponse extends SnapshotVersion {
@@ -154,6 +214,21 @@ export type ReadScope =
   | { kind: 'subtree'; from: string }
   | { kind: 'nodes'; nodeIds: string[] };
 
+/** Node identity/metadata in a read response; the outer response already carries topicId. */
+export interface ReadNode {
+  id: string;
+  title: string;
+  summary: string;
+  number: string;
+  from: string | null;
+  flow: NodeFlow;
+  side?: BranchSide;
+  order?: number;
+  important: boolean;
+  description?: string;
+  revision: number;
+}
+
 export interface ReadRange {
   start: number;
   end: number;
@@ -162,14 +237,17 @@ export interface ReadRange {
 }
 
 export interface ReadItem {
-  node: GraphNode;
+  node: ReadNode;
   /** Role of this item in a resume view; absent for normal views. */
   role?: 'anchor' | 'ancestor' | 'next' | 'branch' | 'important' | 'recent';
-  body: string;
-  range: ReadRange;
-  truncated: boolean;
+  /** Present only when body text was requested and returned. */
+  body?: string;
+  /** Present only with a body segment. */
+  range?: ReadRange;
+  /** Present only with a body segment; true when more of this body follows. */
+  truncated?: boolean;
   /** true when body was intentionally omitted in a summary-only navigation item. */
-  omitted?: boolean;
+  omitted?: true;
 }
 
 export interface ReadPage {
@@ -193,7 +271,8 @@ export interface ReadViewResponse {
   topicId: string;
   topicTitle: string;
   scope: ReadScope & { nodeCount: number; note?: string };
-  anchor?: GraphNode;
+  /** Resume anchor identity; the anchor metadata itself appears once in items. */
+  anchorId?: string;
   items: ReadItem[];
   boundaries?: GraphNode[];
   page: ReadPage;
@@ -335,6 +414,8 @@ export interface AgentChangeRequest {
   workspaceId: string;
   requestId: string;
   dryRun?: boolean;
+  /** For dry-run previews: include the full before/after change detail. */
+  includeDiff?: boolean;
   action: AgentChangeAction;
 }
 
@@ -359,6 +440,8 @@ export interface AgentChangeResponse extends SnapshotVersion {
    */
   nodeRevisions: Record<string, number>;
   replayed?: boolean;
+  /** Short latest-batch summary for this commit; absent for noop/important-only. */
+  change?: ChangeBatchSummary;
   summary: string;
   diagnostics: Diagnostic[];
 }
@@ -374,6 +457,8 @@ export interface AgentCheckResponse {
   summary: string;
   diagnostics: Diagnostic[];
   changes: Array<{ nodeId: string; kind: 'create' | 'update' | 'delete' }>;
+  /** Present only when the request asked for a diff preview (includeDiff). */
+  preview?: ChangeBatchDetail;
 }
 
 export interface ChangeStatusResponse {
@@ -403,6 +488,8 @@ export interface OfflineTopicDocument {
   topic: GraphTopic;
   nodes: OfflineNode[];
   boundaryNodes: GraphNode[];
+  /** Latest content change snapshot, embedded for offline labels and detail diffs. */
+  changes?: ChangeBatchDetail | null;
   resources: Record<string, string>;
   resourceDiagnostics: Diagnostic[];
 }

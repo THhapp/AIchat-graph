@@ -186,6 +186,9 @@ describe('SQLite topic export manager', () => {
     expect(document.topic.title).toBe('讨论主题');
     expect(document.nodes).toHaveLength(2);
     expect(document.boundaryNodes).toEqual([]);
+    expect(document.changes).toMatchObject({ counts: { added: 1, modified: 0, deleted: 0 } });
+    expect(document.changes?.nodes[0]).toMatchObject({ nodeId: fixture.nextNodeId, kind: 'added' });
+    expect(document.changes?.nodes[0]?.body?.addedLines).toBeGreaterThan(0);
     expect(document.fingerprint).toBe(computeContentFingerprint(document));
     expect(document.nodes.map((node) => node.body).join('\n')).toContain('续卡正文。');
     expect(document.nodes.map((node) => node.body).join('\n')).toContain('根卡正文。');

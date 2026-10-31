@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { GraphNode, GraphResponse, WorkspaceResponse } from '../../src/next/protocol.js';
+import type { ChangeBatchSummary, ChangeKind, GraphNode, GraphResponse, WorkspaceResponse } from '../../src/next/protocol.js';
 import {
   emptyReadingState,
   leftPanelOpenFor,
@@ -17,7 +17,7 @@ import {
 import { hiddenTreeCounts, treeChildCounts, visibleTreeNodes } from '../../src/web/components/directoryTree.js';
 import { buildGraphView } from '../../src/web/graph/viewModel.js';
 import { buildLocateText } from '../../src/web/lib/locate.js';
-import { recentNodeIds } from '../../src/web/lib/recent.js';
+import { cardChangeKinds, changeCountsLabel, nodeChangeKind, topicChangeBatch } from '../../src/web/lib/changes.js';
 import { importanceErrorMessage, importanceOf } from '../../src/web/lib/importance.js';
 import { ApiError } from '../../src/web/data/client.js';
 
@@ -243,58 +243,87 @@ describe('card locator', () => {
   });
 });
 
-describe('recent-change marker', () => {
-  it('keeps each topic’s own latest batch', () => {
-    const onlyFirst = { ...graph, lastChanges: { t_1: { at: 'a', nodeIds: ['n06', 'n0601'] } } };
-    expect([...recentNodeIds(onlyFirst, 't_1')]).toEqual(['n06', 'n0601']);
-    // A topic without its own record has no marker; it never falls back to t_1.
-    expect(recentNodeIds(onlyFirst, 't_2').size).toBe(0);
-    expect(recentNodeIds(onlyFirst, 't_missing').size).toBe(0);
+describe('latest change labels', () => {
+  function batch(
+    topicId: string,
+    nodes: Array<{ nodeId: string; kind: ChangeKind; title?: string }>,
+  ): ChangeBatchSummary {
+    const counts = { added: 0, modified: 0, deleted: 0 };
+    for (const node of nodes) counts[node.kind] += 1;
+    return {
+      requestId: 'req-' + topicId,
+      topicId,
+      at: '2026-01-01T00:00:00Z',
+      counts,
+      nodes: nodes.map((node) => ({
+        nodeId: node.nodeId,
+        kind: node.kind,
+        title: node.title ?? node.nodeId,
+        fields: [],
+      })),
+    };
+  }
 
-    const onlySecond = { ...graph, lastChanges: { t_2: { at: 'b', nodeIds: ['nX'] } } };
-    expect([...recentNodeIds(onlySecond, 't_2')]).toEqual(['nX']);
-    expect(recentNodeIds(onlySecond, 't_1').size).toBe(0);
-
-    // Switching the reading topic switches the marker with it.
-    const both = {
+  it('labels only added/modified cards and never falls back to another topic', () => {
+    const onlyFirst = {
       ...graph,
       lastChanges: {
-        t_1: { at: 'a', nodeIds: ['n06'] },
-        t_2: { at: 'b', nodeIds: ['nX'] },
+        t_1: batch('t_1', [
+          { nodeId: 'n06', kind: 'modified' },
+          { nodeId: 'n0601', kind: 'added' },
+          { nodeId: 'n_gone', kind: 'deleted' },
+        ]),
       },
     };
-    expect([...recentNodeIds(both, 't_1')]).toEqual(['n06']);
-    expect([...recentNodeIds(both, 't_2')]).toEqual(['nX']);
+    expect([...cardChangeKinds(onlyFirst, 't_1')]).toEqual([
+      ['n06', 'modified'],
+      ['n0601', 'added'],
+    ]);
+    expect(cardChangeKinds(onlyFirst, 't_2').size).toBe(0);
+    expect(cardChangeKinds(onlyFirst, 't_missing').size).toBe(0);
 
-    // Decoration only: the marker data never changes the drawn structure.
+    const onlySecond = { ...graph, lastChanges: { t_2: batch('t_2', [{ nodeId: 'nX', kind: 'modified' }]) } };
+    expect([...cardChangeKinds(onlySecond, 't_2')]).toEqual([['nX', 'modified']]);
+    expect(cardChangeKinds(onlySecond, 't_1').size).toBe(0);
+
+    // Decoration only: the batch data never changes the drawn structure.
     expect(buildGraphView(onlyFirst, new Set(), 't_1').structureKey)
       .toBe(buildGraphView(graph, new Set(), 't_1').structureKey);
   });
 
-  it('merges every topic in the whole-workspace view without duplicates', () => {
-    const changes = {
-      t_1: { at: 'a', nodeIds: ['n06', 'n07'] },
-      t_2: { at: 'b', nodeIds: ['n07', 'nX'] },
+  it('keeps deleted nodes in the topic change list and reports counts', () => {
+    const changed = {
+      ...graph,
+      lastChanges: {
+        t_1: batch('t_1', [
+          { nodeId: 'n06', kind: 'modified' },
+          { nodeId: 'n_gone', kind: 'deleted', title: '删掉的卡片' },
+        ]),
+      },
     };
-    const merged = { ...graph, lastChanges: changes };
-    expect([...recentNodeIds(merged, null)].sort()).toEqual(['n06', 'n07', 'nX']);
-    // Omitting the topic means the same whole-library view.
-    expect([...recentNodeIds(merged)].sort()).toEqual(['n06', 'n07', 'nX']);
-    expect([...recentNodeIds(merged, '')].sort()).toEqual(['n06', 'n07', 'nX']);
+    const stored = topicChangeBatch(changed, 't_1');
+    expect(stored).not.toBeNull();
+    expect(stored?.nodes.map((node) => [node.nodeId, node.kind])).toEqual([
+      ['n06', 'modified'],
+      ['n_gone', 'deleted'],
+    ]);
+    expect(nodeChangeKind(stored, 'n_gone')).toBe('deleted');
+    expect(nodeChangeKind(stored, 'n07')).toBeNull();
+    expect(changeCountsLabel(stored!.counts)).toBe('新增 0 · 改动 1 · 删除 1');
   });
 
-  it('has no marker when nothing is recorded and ignores non-string ids', () => {
-    expect(recentNodeIds(graph, 't_1').size).toBe(0);
-    expect(recentNodeIds(null).size).toBe(0);
-    expect(recentNodeIds(null, 't_1').size).toBe(0);
-    expect(recentNodeIds({ lastChanges: {} }, 't_1').size).toBe(0);
-    expect(recentNodeIds({ lastChanges: { t_1: { at: 'x', nodeIds: [] } } }, 't_1').size).toBe(0);
-    expect(recentNodeIds({ lastChanges: { t_1: { at: 'x', nodeIds: [] } } }, null).size).toBe(0);
+  it('has no labels when nothing is recorded or the stored shape is unusable', () => {
+    expect(cardChangeKinds(graph, 't_1').size).toBe(0);
+    expect(cardChangeKinds(null, 't_1').size).toBe(0);
+    expect(topicChangeBatch(null, 't_1')).toBeNull();
+    expect(topicChangeBatch({ lastChanges: {} }, 't_1')).toBeNull();
+    expect(topicChangeBatch(graph, null)).toBeNull();
+    expect(cardChangeKinds({ lastChanges: { t_1: batch('t_1', []) } }, 't_1').size).toBe(0);
 
     const dirty = {
-      lastChanges: { t_1: { at: 'x', nodeIds: ['n06', 7, null, 'n06'] } },
-    } as unknown as Parameters<typeof recentNodeIds>[0];
-    expect([...recentNodeIds(dirty, 't_1')]).toEqual(['n06']);
+      lastChanges: { t_1: { at: 'x', nodes: 'not-an-array' } },
+    } as unknown as Pick<GraphResponse, 'lastChanges'>;
+    expect(topicChangeBatch(dirty, 't_1')).toBeNull();
   });
 });
 

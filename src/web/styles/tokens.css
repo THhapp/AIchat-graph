@@ -24,6 +24,8 @@
   --red-700: hsl(0 62% 38%);
   --red-100: hsl(0 60% 95%);
   --blue-600: hsl(214 84% 44%);
+  --blue-700: hsl(214 84% 32%);
+  --blue-100: hsl(214 70% 94%);
 
   --font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
@@ -81,6 +83,12 @@
   --state-proposed-fg: var(--amber-700);
   --state-proposed-bg: var(--amber-100);
 
+  /* Latest persisted change batch: added / modified card labels. */
+  --change-added-fg: var(--green-700);
+  --change-added-bg: var(--green-100);
+  --change-modified-fg: var(--blue-700);
+  --change-modified-bg: var(--blue-100);
+
   /* component */
   --card-bg: var(--bg-raised);
   --card-border: var(--border);
@@ -120,6 +128,11 @@
   --state-agreed-bg: hsl(146 30% 18%);
   --state-proposed-fg: hsl(42 82% 68%);
   --state-proposed-bg: hsl(40 35% 17%);
+
+  --change-added-fg: hsl(146 48% 68%);
+  --change-added-bg: hsl(146 30% 18%);
+  --change-modified-fg: hsl(214 78% 74%);
+  --change-modified-bg: hsl(214 38% 20%);
 
   --card-bg: hsl(220 12% 14%);
   --card-border: hsl(220 8% 27%);

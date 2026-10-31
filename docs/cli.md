@@ -1,6 +1,6 @@
 # AIchat-graph 程序 CLI 手册
 
-适用接口：5。程序可独立使用，不要求安装 Skill。
+适用接口：6。程序可独立使用，不要求安装 Skill。
 Windows 便携包中 aichat 表示包根 aichat.cmd；源码开发时可用 aichat.cmd 或
 node <程序目录>/dist/next/cli.js。普通用户用包内 AIchat-graph.exe 打开，不必执行 CLI。
 
@@ -49,8 +49,9 @@ stop 只请求当前库的服务自行退出，不自启动、不按 PID 杀进�
 不是节点版本；写后继续改节点使用 nodeRevisions。
 
 init 建立 graph.sqlite，拒绝覆盖已有数据库；建议选新的或空目录。
-import 只读取旧 schemaVersion 2 / isolated 资料，在原目录新建数据库，
-不改写原文件。已有 graph.sqlite 时拒绝；失败不留下半导入的可见库。
+import 只读取旧工作区 Markdown 资料（旧 workspace.json 里的 schemaVersion 2、topicMode isolated）
+与原目录节点 .md 文件；这是旧工作区格式，不是 graph.sqlite 的 schemaVersion 3。
+导入在原目录新建数据库，不改写原文件。已有 graph.sqlite 时拒绝；失败不留下半导入的可见库。
 原相对节点链接和资源引用会转换为稳定 ID 链接与 resources/ 键。
 
 serve 默认优先本库 .aichat/local/runtime.json 记录的端口，其次 127.0.0.1:4317，
@@ -62,7 +63,7 @@ serve 默认优先本库 .aichat/local/runtime.json 记录的端口，其次 127
 工作区保存 graph.sqlite、resources/ 及 .aichat/ 本机状态。
 正常运行不扫描、监听或写回旧节点 Markdown。
 
-数据库格式为 schemaVersion 2；旧 schemaVersion 1 库只读打开可直接读取且不修改，可写打开时一次性升级为 2，保留节点 ID、正文、摘要、连接、顺序、重要性与节点 revision、主题最近更新和工作区版本，不把升级记为最近更新。新库和 import 得到的库都是 2。
+数据库格式为 schemaVersion 3。schemaVersion 1／2 的旧库只读打开可直接读取，不迁移、不建表、不写库；可写打开时一次性逐级升级到 3（v1→v2→v3），保留节点、正文、连接、版本、主题最近更新记录与工作区版本，不把升级记为最近更新。v2→v3 只新建 topic_changes 表并更新 meta；旧库没有保存过变化批次，不会补造。新库和 import 得到的库都是 3。
 
 ## 读取与检索
 
@@ -78,20 +79,24 @@ aichat resume <topicId|key> --node <anchorId>
 
 读取直接只读打开数据库，不要求服务，source 为 database。
 主题默认 overview；给 --node 可直接读 content，不必先经过其他视图。
+节点元数据不再重复 topicId（响应顶层已有 topicId）。items 只有在实际返回正文时才带 body、range、truncated；
+overview／structure 及 --meta 的项为 omitted:true，没有这些字段。
+本次范围写在 scope：overview／resume 为 topic；structure 无 --from 为 topic、有 --from 为 subtree；content 为 nodes（保留请求顺序）。
 
 | 视图 | 返回内容 |
 | --- | --- |
-| overview | 主线和直接 branch 入口，分支内部未展开 |
-| structure | 主题或从 --from 开始可达的结构，不含正文 |
+| overview | 主线和直接 branch 入口，只含节点元数据与连接，不含正文 |
+| structure | 主题或从 --from 开始可达的结构，只含元数据，不含正文 |
 | content | 指定节点正文和元数据 |
 | resume | anchor 正文，必要祖先、直接邻居及少量重要 / 最近节点的摘要 |
 
 resume 等价于 `read <topicId> --view resume --node <id>`。
+响应用顶层 anchorId 指认锚点，anchor 元数据只在 items 中出现一次（role=anchor），没有另外的 anchor 对象。
 较长 anchor 正文仍受切片和输出预算约束，需要时续读。
 
 content 可用：
 
-- --meta：只读元数据与节点版本。
+- --meta：只读元数据与节点版本；items 为 omitted:true，不含 body／range。
 - `--start <n>`：从 UTF-16 偏移开始，0 起。
 - `--length <n>`：片段长度，1–16000，默认 4000。
 - --full：请求从起点到正文末尾，仍受整次响应预算约束。
@@ -103,17 +108,48 @@ content 可用：
 ### 预算与续读
 
 --budget 默认 12000 UTF-16 单位，覆盖最终序列化响应，不等同于模型 token 数。
-range 给出正文实际起止和总长；omitted 表示本视图按设计省略正文；
-是否还有下一页以 page.hasMore 为准。
+range 只随正文返回，给出实际起止与总长；truncated 只表示该段正文后面还有内容；
+omitted:true 表示本视图或 --meta 按设计省略正文。是否还有下一页以 page.hasMore 为准。
 
 ~~~text
 aichat read --cursor "<page.next>" --budget 12000
 ~~~
 
-把 page.next 原样传回，只另调 --budget，不重发主题、节点或切片条件。
-工作区仍由当前入口配置或显式 --workspace 选择。
+续读 cursor（v2）记录原视图、范围、起始位置与切片条件（--length／--full／--meta），续页保持原切片长度与 range，不丢页；
+content 的显式节点集合与顺序保留在 cursor 中，topic／subtree 的 cursor 不重复完整节点列表。
+把 page.next 原样传回，只另调 --budget（工作区仍正常定位），不重发主题、节点或切片条件。
 当前指纹包含主题 revision 和所选节点版本，同主题修改可能使 cursor 过期；
 其他主题修改不影响。遇到 STALE_READ 从原范围重新读取。
+
+### 查看最近一次变化（diff）
+
+~~~text
+aichat diff <topicId|key> [--request <id>] [--node <id> [--patch]] [--budget <n>]
+aichat diff (--input <batch.json>|--input-stdin)
+~~~
+
+最新一批内容变化保存在数据库，diff 直接只读数据库，不需要服务。默认输出摘要：requestId、topicId、at、
+counts（added／modified／deleted）和每个节点的 nodeId、title、kind、fields；不含正文。
+删除节点仍列在清单中（卡片已不在图上）；新增／删除的 fields 为空。
+参与批次的字段只有 title、summary、from、flow、description、side、order；正文用 unified patch 单独表示；
+important 不属于内容批次。
+
+--node 过滤到一张卡。加 --patch 时返回该节点的 before／after 版本、fieldDiffs 与 unified 正文 patch
+（含增删行数与 truncated）；只有正文变化的卡也会有 patch，新增／删除分别呈现为空→正文／正文→空。
+--patch 必须与 --node 同用；节点不在最新批次时报 CHANGE_NOT_FOUND。
+
+--request 只接受当前最新批次：已被更新批次取代报 BATCH_SUPERSEDED（details.latest 给出最新 requestId），
+未知 requestId 报 BATCH_UNAVAILABLE，不会静默改读其他批次。
+schemaVersion 1／2 的旧库没有保存过变化批次：不带 --request 报 CHANGE_HISTORY_UNAVAILABLE，
+带 --request 报 BATCH_UNAVAILABLE；可写打开一次升级到 3 后开始记录，不补造旧批次。
+
+--budget 只截断 unified patch 文本（字符，默认 12000，最大 1000000）；节点清单与字段差异不占预算。
+预算不足时 budget.truncated 与对应节点 body.truncated 为 true。默认 JSON，--text 给简短摘要。
+
+--input／--input-stdin 把 batch JSON 交给与 batch 相同的解析，在服务端 dry-run 并请求完整变化预览；
+CLI 只输出 source=preview 的批次摘要（不含 fieldDiffs／正文 patch），不落库、不生成请求记录。
+预览需要服务，且不能与主题位置参数、--node、--request、--patch 同用。
+仅检查一次提交而不预览仍用 batch --dry-run。
 
 ## 写入与节点版本
 
@@ -182,6 +218,7 @@ aichat edit --node <id> --if-revision 3 --body-file "./正文.md"
 replace.old 必须非空且恰好匹配一次。summary:null 清除显式摘要。
 append 把文本追加到末尾，不会自动合并或重写已有正文。
 incoming.from 使用来源节点实际版本；只改 description 无需重给来源。
+incoming.description 才是入边说明，patch 顶层没有 description。
 CLI edit 未暴露 order 参数，需要时可通过 batch 的 incoming.order 修改。
 NodePatch 不含 state；batch 的 patch 或 create.node 出现 state 会按未知字段拒绝。
 
@@ -217,7 +254,7 @@ create-topic 当前只提供主题 / 根标题及正文，摘要从正文派生�
 
 key 在库内唯一，不是真实目录。next 已有后继会冲突，不自动挤走。
 delete 只删最终没有子节点的叶卡，不删 root，不推断如何安置子树。
-important 只设置标记，不替换最近内容更新集合。
+important 只设置标记，不产生也不替换最新变化批次。
 
 insert 用 --after-node / --after-revision、--before-node / --before-revision 指定真实相邻 A→B，
 并给新卡的 --title、正文、A→新卡的 --description、新卡→B 的 --next-description。
@@ -269,6 +306,8 @@ aichat batch --input <batch.json> --dry-run
 create.node 支持 title、body 及可选 summary / important / side / order；
 bodyFile 是 CLI 输入形式，不能与 body 同给。后续创建可用 {"local":"new-question"} 作为 from。
 前向引用须最终可解析且不成环。--dry-run 返回 checked 和变化计划，不写库或请求记录。
+patch 没有顶层 description：入边说明写在 patch.incoming.description（如 {"incoming":{"description":"为什么改接"}}）。
+放错位置时 CLI 会指出正确字段并给最小片段。
 
 ### rearrange
 
@@ -313,13 +352,15 @@ aichat rearrange --input <edits.json>
 
 - revision 是工作区版本，nodeRevisions 是本次节点实际版本；下一次 edit 可直接使用映射值。
 - state 是提交状态（committed／noop／committed_refresh_pending；dry-run 为 checked），不是节点状态。
+- 内容提交成功时另有 change：本次保存的最新变化摘要（requestId／counts／nodes）；noop、仅 important 与 dry-run 不含，纯删除会返回。
 - 映射覆盖新建、实际修改及明确操作且仍存在的目标，noop 也返回；删除节点省略。
 - insert 的 after 仅作相邻前置条件，映射包含实际改接的 before 与新节点。
 - created.aliases 将本批名称映射到稳定 ID，不是后续批次仍可使用的别名。
 - 幂等重放返回当时保存的结果和版本，不拼入最新数据；dry-run 不返回伪造的新版本。
 
-只读、布局、被动编号、important 及纯删除不替换内容更新集合。
-内容 / 入边等实际变化按主题更新各自最近一批；删除会清掉其中已不存在的 ID。
+内容批次（新增、改动或删除）与提交在同一事务内保存为该主题的最新变化批次，替换上一批，不累积历史；
+纯删除同样替换，并把最近更新节点列表清空。important、noop、dry-run 和幂等重放不替换；
+混合删除会把已删除节点从最近更新列表移除，被动编号等不产生变化批次。
 
 写入由程序生成 requestId。结果未知先 `status <requestId>`；
 同一 ID 和相同请求体重放原结果，不同请求体则冲突。
@@ -332,6 +373,8 @@ aichat rearrange --input <edits.json>
 绑定后主题的可见数据变化会自动重建；没有绑定就不生成文件。
 失败保留旧成品，外部改动的目标不直接覆盖，解绑不删除已有文件。
 完整独立 HTML 包含主题、阅读器、样式及必要资源。
+导出时同时保存该主题最新一批变化快照，离线也能显示新增／改动标签、主题变化清单和单卡差异；
+没有该字段的旧成品仍可读取，只是不显示变化标记。
 程序或阅读器升级不会单独重写已有成品；主题内容变化或用户显式重新导出时，
 才用当前阅读器重新生成。旧成品（包括带多余节点 state 字段的 HTML）仍可读取。
 
@@ -341,6 +384,7 @@ aichat rearrange --input <edits.json>
 aichat help --json
 aichat help edit --json
 aichat help batch --json
+aichat help diff --json
 aichat version
 aichat whoami
 aichat status <requestId>

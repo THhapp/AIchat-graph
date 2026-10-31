@@ -1,4 +1,6 @@
 import type {
+  ChangeBatchSummary,
+  ChangeNodeDiff,
   GraphNode,
   GraphResponse,
   GraphTopic,
@@ -6,15 +8,26 @@ import type {
   OfflineTopicDocument,
   TopicDetailResponse,
 } from '../../next/protocol.js';
+import { changeSummaryFromDetail, nodeChangeFromDetail } from '../lib/changes.js';
 
 export interface OfflineDetailView {
   nodeDetail: NodeDetailResponse | null;
   topicDetail: TopicDetailResponse | null;
   /** Version label of the frozen snapshot the detail belongs to. */
   detailVersion: string | null;
+  /** Latest persisted batch embedded in the export, if the export has one. */
+  batch: ChangeBatchSummary | null;
+  /** Selected node's frozen diff from that batch, if it changed. */
+  nodeChange: ChangeNodeDiff | null;
 }
 
-const EMPTY: OfflineDetailView = { nodeDetail: null, topicDetail: null, detailVersion: null };
+const EMPTY: OfflineDetailView = {
+  nodeDetail: null,
+  topicDetail: null,
+  detailVersion: null,
+  batch: null,
+  nodeChange: null,
+};
 
 export interface OfflineDetailInput {
   graph: GraphResponse | null;
@@ -37,6 +50,7 @@ export function deriveOfflineDetails(input: OfflineDetailInput): OfflineDetailVi
   if (graph === null || doc === null) return EMPTY;
 
   const detailVersion = graph.instanceId + ':' + String(graph.revision);
+  const batch = changeSummaryFromDetail(doc.changes ?? null);
   if (tab === 'topic') {
     const nodes = doc.nodes.map((item) => ({
       ...item,
@@ -55,6 +69,8 @@ export function deriveOfflineDetails(input: OfflineDetailInput): OfflineDetailVi
         resources: doc.resources,
       },
       detailVersion,
+      batch,
+      nodeChange: null,
     };
   }
 
@@ -70,5 +86,7 @@ export function deriveOfflineDetails(input: OfflineDetailInput): OfflineDetailVi
     },
     topicDetail: null,
     detailVersion,
+    batch,
+    nodeChange: nodeChangeFromDetail(doc.changes ?? null, node.id),
   };
 }
